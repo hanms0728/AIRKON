@@ -1,0 +1,24 @@
+name: 2_5d_env
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - numpy
+      - pandas
+      - matplotlib
+      - opencv-python
+      - torch==2.8.0
+      - torchvision==0.23.0
+      - ultralytics==8.3.203
+      - onnx==1.19.0
+      - onnxruntime-gpu==1.19.2
+      - scipy
+      - tqdm
+      - pyyaml
+      - requests
+      - pillow
+      - polars
+      - psutil
+      - pyquaternion
+      - sympy
+      - jinja2
