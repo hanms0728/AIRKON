@@ -1,6 +1,4 @@
 # infer.py
-# 학습된 yolo11_2p5d *.pth 로드 → 디코딩 → 시각화/라벨 저장
-# (+선택: GT와 함께 시각화 & IoU 표기, +선택: 2D 성능지표 계산)
 
 import os
 import cv2
@@ -9,6 +7,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
+from train import tiny_filter_on_dets
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,6 @@ except Exception:
     Line2D = None
     _MATPLOTLIB_AVAILABLE = False
 
-# 학습 코드와 동일한 유틸 (반드시 train과 동일 파일이어야 함)
 from geometry_utils import parallelogram_from_triangle
 from evaluation_utils import (
     decode_predictions,
@@ -37,9 +35,6 @@ from evaluation_utils import (
     orientation_error_deg,
 )
 
-# ---------------------------
-# Model (train.py와 동일)
-# ---------------------------
 class TriHead(nn.Module):
     def __init__(self, in_ch, nc, prior_p=0.20):
         super().__init__()
@@ -66,7 +61,6 @@ class YOLO11_2p5D(nn.Module):
         self.strides = detect.stride
         self.f_indices = detect.f
 
-        # in_channels 추출
         self.backbone_neck.eval()
         with torch.no_grad():
             dummy = torch.zeros(1,3,img_size[0],img_size[1])
@@ -93,11 +87,8 @@ class YOLO11_2p5D(nn.Module):
             feats_memory.append(x if m.i in self.save_idx else None)
         feat_list = [feats_memory[i] for i in self.f_indices]
         outs = [head(f) for head, f in zip(self.heads, feat_list)]
-        return outs  # list of (reg,obj,cls)
+        return outs
 
-# ---------------------------
-# GT 로더 (원본 해상도 기준 라벨 가정: "cls p0x p0y p1x p1y p2x p2y")
-# ---------------------------
 def load_gt_triangles(label_path: str) -> np.ndarray:
     if not os.path.isfile(label_path):
         return np.zeros((0,3,2), dtype=np.float32)
@@ -115,11 +106,7 @@ def load_gt_triangles(label_path: str) -> np.ndarray:
         return np.zeros((0,3,2), dtype=np.float32)
     return np.asarray(tris, dtype=np.float32)
 
-# ---------------------------
-# 기하 유틸: 폴리곤 IoU (우선 정확: convex-intersection, 실패 시 AABB로 폴백)
-# ---------------------------
 def poly_from_tri(tri: np.ndarray) -> np.ndarray:
-    """tri(3,2) → 평행사변형(4,2) float32"""
     p0, p1, p2 = tri[0], tri[1], tri[2]
     return parallelogram_from_triangle(p0, p1, p2).astype(np.float32)
 
@@ -128,7 +115,6 @@ def polygon_area(poly: np.ndarray) -> float:
     return float(abs(np.dot(x, np.roll(y,-1)) - np.dot(y, np.roll(x,-1))) * 0.5)
 
 def iou_polygon(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
-    """OpenCV intersectConvexConvex 사용, 실패 시 AABB IoU."""
     try:
         pa = poly_a.astype(np.float32)
         pb = poly_b.astype(np.float32)
@@ -152,34 +138,19 @@ def iou_polygon(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
         union = ua + ub - inter
         return float(inter / max(union, 1e-9))
 
-# ---------------------------
-# Inference 시각화
-# ---------------------------
 def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
-    """
-    image_bgr: (H, W)로 리사이즈된 BGR 이미지 (시각화용)
-    dets: [{"tri":(3,2), "score":float}, ...]  # (H, W) 좌표계
-    save_path_img: 시각화 이미지 저장 경로 (리사이즈 좌표계로 그림)
-    save_path_txt: 라벨 저장 경로 (==> 원본 해상도 좌표계로 저장)
-    W,H:   모델 입력(리사이즈) 가로/세로
-    W0,H0: 원본 해상도 가로/세로
-    """
     os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
     os.makedirs(os.path.dirname(save_path_txt), exist_ok=True)
 
-    # 시각화는 기존처럼 (리사이즈 좌표계)로 그림
     img = image_bgr.copy()
-
-    # 스케일 팩터: (리사이즈 → 원본)
     sx, sy = float(W0) / float(W), float(H0) / float(H)
 
     lines = []
     tri_orig_list: List[np.ndarray] = []
     for d in dets:
-        tri = np.asarray(d["tri"], dtype=np.float32)  # (3,2) in (H,W)
+        tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
 
-        # 시각화(리사이즈 기준)
         p0, p1, p2 = tri[0], tri[1], tri[2]
         poly4 = parallelogram_from_triangle(p0, p1, p2).astype(np.int32)
         cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
@@ -187,7 +158,6 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
 
-        # === 라벨(.txt)은 원본 해상도 좌표계로 저장 ===
         tri_orig = tri.copy()
         tri_orig[:, 0] *= sx
         tri_orig[:, 1] *= sy
@@ -197,7 +167,6 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
             f"0 {p0o[0]:.2f} {p0o[1]:.2f} {p1o[0]:.2f} {p1o[1]:.2f} {p2o[0]:.2f} {p2o[1]:.2f} {score:.4f}"
         )
 
-    # 저장
     cv2.imwrite(save_path_img, img)
     with open(save_path_txt, "w") as f:
         f.write("\n".join(lines))
@@ -205,36 +174,28 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
     return tri_orig_list
 
 def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mix, iou_thr=0.5):
-    """
-    - dets: [{"tri":(3,2), "score":float}, ...]  (리사이즈 좌표계)
-    - gt_tris_resized: (Ng,3,2)  (리사이즈 좌표계로 스케일된 GT)
-    결과: pred(빨강), GT(초록), 점수/IoU 텍스트 색상 구분
-    """
     os.makedirs(os.path.dirname(save_path_img_mix), exist_ok=True)
     img = image_bgr_resized.copy()
 
-    # 1) GT 박스 & 점 (초록)
     for g in gt_tris_resized:
         poly_g = poly_from_tri(g).astype(np.int32)
-        cv2.polylines(img, [poly_g], True, (0,255,0), 2)   # green polygon
+        cv2.polylines(img, [poly_g], True, (0,255,0), 2)
         for k in range(3):
             x = int(round(float(g[k,0])))
             y = int(round(float(g[k,1])))
-            cv2.circle(img, (x, y), 3, (0,255,0), -1)      # green dots
+            cv2.circle(img, (x, y), 3, (0,255,0), -1)
 
-    # 2) Pred 박스 & 점수 (빨강 박스, 점수는 초록 글씨)
     for d in dets:
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
         poly4 = poly_from_tri(tri).astype(np.int32)
-        cv2.polylines(img, [poly4], True, (0,0,255), 2)   # red polygon
+        cv2.polylines(img, [poly4], True, (0,0,255), 2)
         p0 = tri[0].astype(int)
         cv2.putText(img, f"{score:.2f}",
                     (int(p0[0]), max(0, int(p0[1])-4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0,255,0), 1, cv2.LINE_AA)             # green text
+                    (0,255,0), 1, cv2.LINE_AA)
 
-    # 3) IoU 매칭 결과 (IoU는 빨간색 글씨)
     if gt_tris_resized.shape[0] > 0 and len(dets) > 0:
         det_idx_sorted = np.argsort([-float(d["score"]) for d in dets])
         matched = np.zeros((gt_tris_resized.shape[0],), dtype=bool)
@@ -258,10 +219,9 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
                 cv2.putText(img, f"IoU {best_iou:.2f}",
                             (int(p0[0]), int(p0[1]) + 14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0,0,255), 1, cv2.LINE_AA)     # red text
+                            (0,0,255), 1, cv2.LINE_AA)
 
     cv2.imwrite(save_path_img_mix, img)
-
 
 def normalize_angle_deg(angle: float) -> float:
     while angle <= -180.0:
@@ -269,7 +229,6 @@ def normalize_angle_deg(angle: float) -> float:
     while angle > 180.0:
         angle -= 360.0
     return angle
-
 
 def apply_homography(points: np.ndarray, H: np.ndarray) -> np.ndarray:
     pts = np.asarray(points, dtype=np.float64)
@@ -285,7 +244,6 @@ def apply_homography(points: np.ndarray, H: np.ndarray) -> np.ndarray:
     if np.any(valid):
         result[valid] = proj[valid, :2] / denom[valid]
     return result.reshape(pts.shape)
-
 
 def load_homography(calib_dir: str, image_name: str, cache: dict, invert: bool = False) -> Optional[np.ndarray]:
     base = os.path.splitext(os.path.basename(image_name))[0]
@@ -316,7 +274,6 @@ def load_homography(calib_dir: str, image_name: str, cache: dict, invert: bool =
     cache[base] = H
     return H
 
-
 def _read_h_matrix(path: Path) -> Optional[np.ndarray]:
     try:
         if path.suffix.lower() == ".npy":
@@ -333,30 +290,25 @@ def _read_h_matrix(path: Path) -> Optional[np.ndarray]:
         return None
     return arr
 
-
-def compute_bev_properties(poly4: np.ndarray) -> Optional[Tuple[Tuple[float, float], float, float, float]]:
-    poly = np.asarray(poly4, dtype=np.float64)
-    if poly.shape != (4, 2) or not np.all(np.isfinite(poly)):
+def compute_bev_properties(tri):
+    p0, p1, p2 = np.asarray(tri, dtype=np.float64)
+    if not np.all(np.isfinite(tri)):
         return None
 
-    edges = [np.linalg.norm(poly[(i + 1) % 4] - poly[i]) for i in range(2)]
-    if edges[0] < 1e-6 or edges[1] < 1e-6:
-        return None
-    if edges[0] >= edges[1]:
-        length = edges[0]
-        width = edges[1]
-        vec = poly[1] - poly[0]
-    else:
-        length = edges[1]
-        width = edges[0]
-        vec = poly[2] - poly[1]
-    if np.linalg.norm(vec) < 1e-6:
-        vec = poly[1] - poly[0]
-    yaw = math.degrees(math.atan2(vec[1], vec[0]))
-    yaw = normalize_angle_deg(yaw)
+    front_center = (p1 + p2) / 2.0
+    front_vec = front_center - p0
+
+    yaw = math.degrees(math.atan2(front_vec[1], front_vec[0]))
+    yaw = (yaw + 180) % 360 - 180
+
+    poly = parallelogram_from_triangle(p0, p1, p2)
+    edges = [np.linalg.norm(poly[(i+1)%4]-poly[i]) for i in range(4)]
+    length = max(edges)
+    width  = min(edges)
     center = poly.mean(axis=0)
-    return (float(center[0]), float(center[1])), float(length), float(width), float(yaw)
 
+    front_edge = (p1, p2)  # BEV 상 앞변
+    return (float(center[0]), float(center[1])), float(length), float(width), float(yaw), front_edge
 
 def write_bev_labels(save_path: str, bev_dets: List[dict]):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -369,7 +321,6 @@ def write_bev_labels(save_path: str, bev_dets: List[dict]):
         lines.append(f"0 {cx:.4f} {cy:.4f} {length:.4f} {width:.4f} {yaw:.2f}")
     with open(save_path, "w") as f:
         f.write("\n".join(lines))
-
 
 def _prepare_bev_canvas(polygons: List[np.ndarray], padding: float = 1.0, target: float = 800.0):
     if not polygons:
@@ -396,13 +347,11 @@ def _prepare_bev_canvas(polygons: List[np.ndarray], padding: float = 1.0, target
         "height": height,
     }
 
-
 def _to_canvas(points: np.ndarray, params: dict) -> np.ndarray:
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
     xs = (pts[:, 0] - params["min_x"]) * params["scale"]
     ys = (params["max_y"] - pts[:, 1]) * params["scale"]
     return np.stack([xs, ys], axis=1).astype(np.int32)
-
 
 def draw_bev_visualization(
     preds_bev: List[dict],
@@ -424,7 +373,6 @@ def draw_bev_visualization(
         return
 
     if _MATPLOTLIB_AVAILABLE:
-        # Matplotlib 렌더링 (plt 스타일)
         try:
             fig, ax = plt.subplots(figsize=(6.0, 6.0), dpi=220)
             ax.set_facecolor("#f7f7f7")
@@ -461,13 +409,28 @@ def draw_bev_visualization(
                         continue
                     patch = MplPolygon(poly, closed=True, fill=False, edgecolor="#e74c3c", linewidth=1.8)
                     ax.add_patch(patch)
+
                     center = det["center"]
                     ax.scatter(center[0], center[1], s=20, color="#e74c3c", alpha=0.9)
+
+                    # 앞변 표시 (굵은 선)
+                    f1, f2 = det.get("front_edge", (None, None))
+                    if f1 is not None and f2 is not None and np.all(np.isfinite(f1)) and np.all(np.isfinite(f2)):
+                        ax.plot([f1[0], f2[0]], [f1[1], f2[1]], linewidth=2.2, color="#1f77b4")
+
+                        # front arrow (center → front_center)
+                        front_center = (np.asarray(f1) + np.asarray(f2)) / 2.0
+                        ax.annotate("",
+                                    xy=(front_center[0], front_center[1]),
+                                    xytext=(center[0], center[1]),
+                                    arrowprops=dict(arrowstyle="->", linewidth=1.2, color="#1f77b4"))
+
                     label = f"{det['score']:.2f} / {det['yaw']:.1f}°"
                     ax.text(center[0], center[1] + text_offset, label,
                             fontsize=7.5, color="#e74c3c", ha="center", va="bottom",
                             bbox=dict(facecolor="#ffffff", alpha=0.6, edgecolor="none", pad=1.5))
                 legend_handles.append(Line2D([0], [0], color="#e74c3c", lw=2, label="Pred"))
+                legend_handles.append(Line2D([0], [0], color="#1f77b4", lw=3, label="Front edge"))
 
             if legend_handles:
                 ax.legend(handles=legend_handles, loc="upper right", frameon=True, framealpha=0.75, fontsize=8)
@@ -479,7 +442,6 @@ def draw_bev_visualization(
         except Exception:
             plt.close("all")
 
-    # Fallback: OpenCV 기반 간단 시각화
     canvas = np.full((params["height"], params["width"], 3), 255, dtype=np.uint8)
     axis_color = (120, 120, 120)
     axis_thickness = 1
@@ -508,6 +470,18 @@ def draw_bev_visualization(
         cv2.polylines(canvas, [poly_px], True, (0, 0, 255), 2)
         center_px = _to_canvas(np.asarray(det["center"]).reshape(1, 2), params)[0]
         cv2.circle(canvas, tuple(center_px), 4, (0, 0, 255), -1)
+
+        # 앞변 표시 (굵은 파란 선)
+        f1, f2 = det.get("front_edge", (None, None))
+        if f1 is not None and f2 is not None and np.all(np.isfinite(f1)) and np.all(np.isfinite(f2)):
+            fpx = _to_canvas(np.vstack([f1, f2]), params)
+            cv2.line(canvas, tuple(fpx[0]), tuple(fpx[1]), (255, 100, 0), 3, cv2.LINE_AA)
+
+            # center → front_center 화살표
+            front_center = (np.asarray(f1) + np.asarray(f2)) / 2.0
+            fcp = _to_canvas(front_center.reshape(1,2), params)[0]
+            cv2.arrowedLine(canvas, tuple(center_px), tuple(fcp), (255, 100, 0), 2, tipLength=0.18)
+
         label = f"{det['score']:.2f} / {det['yaw']:.1f}°"
         text_pos = (center_px[0] + 4, max(center_px[1] - 8, 10))
         cv2.putText(canvas, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 20, 20), 1, cv2.LINE_AA)
@@ -517,7 +491,6 @@ def draw_bev_visualization(
     cv2.putText(canvas, coord_text, (10, params["height"] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1)
 
     cv2.imwrite(save_path_img, canvas)
-
 
 def evaluate_single_image_bev(preds_bev: List[dict], gt_tris_bev: np.ndarray, iou_thr=0.5):
     gt_arr = np.asarray(gt_tris_bev)
@@ -553,39 +526,32 @@ def evaluate_single_image_bev(preds_bev: List[dict], gt_tris_bev: np.ndarray, io
 
     return records, int(matched.sum())
 
-# ---------------------------
-# Main
-# ---------------------------
 def main():
     ap = argparse.ArgumentParser("YOLO11 2.5D Inference (+GT overlay & IoU + 2D metrics)")
-    ap.add_argument("--input-dir", type=str, required=True, help="이미지 폴더")
-    ap.add_argument("--output-dir", type=str, default="./inference_results", help="결과 저장 루트")
-    ap.add_argument("--weights", type=str, required=True, help="학습된 *.pth (state_dict)")
-    ap.add_argument("--base-model", type=str, default="yolo11m.pt", help="학습시 사용한 YOLO11 가중치")
-    ap.add_argument("--img-size", type=str, default="864,1536", help="HxW (학습과 동일)")
+    ap.add_argument("--input-dir", type=str, required=True)
+    ap.add_argument("--output-dir", type=str, default="./inference_results")
+    ap.add_argument("--weights", type=str, required=True)
+    ap.add_argument("--base-model", type=str, default="yolo11m.pt")
+    ap.add_argument("--img-size", type=str, default="864,1536")
     ap.add_argument("--score-mode", type=str, default="obj*cls", choices=["obj","cls","obj*cls"])
     ap.add_argument("--conf", type=float, default=0.80)
     ap.add_argument("--nms-iou", type=float, default=0.2)
     ap.add_argument("--topk", type=int, default=50)
-    ap.add_argument("--clip-cells", type=float, default=None, help="디코딩 시 tanh clip 반경(셀). None이면 미적용")
+    ap.add_argument("--clip-cells", type=float, default=None)
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--exts", type=str, default=".jpg,.jpeg,.png")
-
-    # (선택) GT와 함께 그리기 + 평가
-    ap.add_argument("--gt-label-dir", type=str, default=None, help="GT 라벨 폴더(원본 해상도 기준)")
-    ap.add_argument("--eval-iou-thr", type=float, default=0.5, help="평가 IoU 임계값 (2D)")
-    ap.add_argument("--labels-are-original-size", action="store_true", default=True, 
-                    help="GT 좌표가 원본 이미지 기준이면 켜세요(평가/오버레이 시 모델 입력 크기로 스케일)")
-    ap.add_argument("--calib-dir", type=str, default=None, help="이미지→지면 투영 H 행렬(.txt/.npy) 폴더")
-    ap.add_argument("--invert-calib", action="store_true", help="H 행렬을 역행렬로 사용(img2ground ↔ ground2img)")
-    ap.add_argument("--bev-scale", type=float, default=1.0, help="BEV 좌표/길이에 곱할 스케일 (예: meter/pixel)")
+    ap.add_argument("--gt-label-dir", type=str, default=None)
+    ap.add_argument("--eval-iou-thr", type=float, default=0.5)
+    ap.add_argument("--labels-are-original-size", action="store_true", default=True)
+    ap.add_argument("--calib-dir", type=str, default=None)
+    ap.add_argument("--invert-calib", action="store_true")
+    ap.add_argument("--bev-scale", type=float, default=1.0)
 
     args = ap.parse_args()
 
     H, W = map(int, args.img_size.split(","))
     device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith("cuda") else "cpu")
 
-    # 모델 로드 (학습과 동일 구조)
     model = YOLO11_2p5D(yolo11_path=args.base_model, num_classes=1, img_size=(H, W)).to(device)
     if isinstance(model.strides, torch.Tensor):
         model.strides = [float(s.item()) for s in model.strides]
@@ -596,7 +562,6 @@ def main():
     model.load_state_dict(state, strict=True)
     model.eval()
 
-    # I/O 준비
     out_img_dir = os.path.join(args.output_dir, "images")
     out_lab_dir = os.path.join(args.output_dir, "labels")
     out_mix_dir = os.path.join(args.output_dir, "images_with_gt")
@@ -622,15 +587,12 @@ def main():
     homography_cache = {} if use_bev else {}
     missing_h_names = set()
 
-    # 이미지 목록
     exts = tuple([e.strip().lower() for e in args.exts.split(",") if e.strip()])
     names = [f for f in os.listdir(args.input_dir) if f.lower().endswith(exts)]
     names.sort()
 
-    # 2D 평가 여부
     do_eval_2d = args.gt_label_dir is not None and os.path.isdir(args.gt_label_dir)
 
-    # 평가 누적 버퍼
     metric_records = []
     total_gt = 0
     metric_records_bev = []
@@ -642,7 +604,6 @@ def main():
     )
 
     with torch.inference_mode():
-        # autocast: GPU면 켠다
         use_amp = device.type == "cuda"
         try:
             amp_ctx = torch.amp.autocast(device_type="cuda", enabled=use_amp)
@@ -656,7 +617,6 @@ def main():
             if img_bgr0 is None:
                 continue
 
-            # 전처리 (resize → RGB → tensor)
             H0, W0 = img_bgr0.shape[:2]
             img_bgr = cv2.resize(img_bgr0, (W, H), interpolation=cv2.INTER_LINEAR)
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -670,7 +630,6 @@ def main():
             with amp_ctx:
                 outs = model(img_t)
 
-            # 디코딩
             dets = decode_predictions(
                 outs,
                 model.strides,
@@ -680,14 +639,14 @@ def main():
                 topk=args.topk,
                 score_mode=args.score_mode,
                 use_gpu_nms=(device.type=="cuda")
-            )[0]  # batch size=1
+            )[0]
 
-            # 저장: pred-only (리사이즈 좌표계 + 원본 좌표 반환)
+            dets = tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
+
             save_img = os.path.join(out_img_dir, name)
             save_txt = os.path.join(out_lab_dir, os.path.splitext(name)[0] + ".txt")
             pred_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
 
-            # GT 준비 (평가/GT 오버레이용 리사이즈 좌표 & BEV용 원본 좌표)
             gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
             gt_tri_orig_for_bev = np.zeros((0, 3, 2), dtype=np.float32)
 
@@ -714,7 +673,6 @@ def main():
                     metric_records.extend(records)
                     total_gt += gt_for_eval.shape[0]
 
-            # BEV 변환/저장/평가
             if use_bev:
                 H_img2ground = load_homography(args.calib_dir, name, homography_cache, invert=args.invert_calib)
                 if H_img2ground is None:
@@ -729,10 +687,10 @@ def main():
                             if not np.all(np.isfinite(tri_bev)):
                                 continue
                             poly_bev = poly_from_tri(tri_bev)
-                            props = compute_bev_properties(poly_bev)
+                            props = compute_bev_properties(tri_bev)  # tri 기반, 앞변 포함
                             if props is None:
                                 continue
-                            center, length, width, yaw = props
+                            center, length, width, yaw, front_edge = props
                             bev_dets.append({
                                 "score": float(det["score"]),
                                 "tri": tri_bev,
@@ -741,6 +699,7 @@ def main():
                                 "length": length,
                                 "width": width,
                                 "yaw": yaw,
+                                "front_edge": front_edge,
                             })
 
                     if gt_tri_orig_for_bev.size > 0:
@@ -763,7 +722,6 @@ def main():
                         metric_records_bev.extend(records_bev)
                         total_gt_bev += gt_tris_bev.shape[0]
 
-    # (선택) 2D 결과 통계 출력
     if do_eval_2d:
         metrics = compute_detection_metrics(metric_records, total_gt)
         print("== 2D Eval (dataset-wide) ==")
