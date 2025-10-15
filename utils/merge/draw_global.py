@@ -3,7 +3,10 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
+'''
+기능: /merge_dist_wbf 의 예측 결과와 /val_dataset45/regions 의 GT를 불러와서 글로벌 좌표계에 맞게 시각화
+출력: /draw_global_dist_wbf/merged_pred_xxxxxx.png(예측만), merged_gt_pred_xxxxxx.png(GT+예측)
+'''
 def parse_pred_file(path):
     """예측 라벨: class cx cy l w yaw_deg"""
     boxes = []

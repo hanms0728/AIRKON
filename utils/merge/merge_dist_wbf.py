@@ -3,6 +3,38 @@ import math
 import glob
 import numpy as np
 from typing import List, Dict, Tuple
+'''
+기능: 여러 카메라에서 예측한 BEV 라벨들을 거리 가중치 기반으로 병합
+규칙:
+- AABB 기준으로 부분 포함 제거
+- AABB IoU 기준으로 클러스터링
+- 클러스터별 대표 라벨 선택:
+    - 같은 카메라만 있으면 간단 평균(yaw는 원형평균)
+    - 여러 카메라가 섞였으면:
+        기본: 카메라-박스 거리가 가장 가까운 라벨 채택  
+        단, 클러스터 내 박스 중심들이 같다면(center_eps), 
+            yaw-중앙성(카메라->객체 bearing과 박스 yaw의 차이가 최소)으로 선택
+입력: /inference_dataset/bev_labels/cam*_frame_000000_-45.txt
+출력: /merge_dist_wbf/merged_frame_000000_-45.txt
+'''
+CAMERA_SETUPS = [
+    {"name": "cam1",  "pos": {"x": -46,  "y": -74, "z": 9}, "rot": {"pitch": -40, "yaw": 90,  "roll": 0}},
+    {"name": "cam2",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 197, "roll": 0}},
+    {"name": "cam3",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 163, "roll": 0}},
+    {"name": "cam4",  "pos": {"x": -35,  "y": 0,   "z": 9}, "rot": {"pitch": -45, "yaw": 190, "roll": 0}},
+    {"name": "cam5",  "pos": {"x": -35,  "y": 5,   "z": 9}, "rot": {"pitch": -45, "yaw": 135, "roll": 0}},
+    {"name": "cam6",  "pos": {"x": -77,  "y": 7,   "z": 9}, "rot": {"pitch": -40, "yaw": 73,  "roll": 0}},
+    {"name": "cam7",  "pos": {"x": -77,  "y": 7,   "z": 9}, "rot": {"pitch": -40, "yaw": 107, "roll": 0}},
+    {"name": "cam8",  "pos": {"x": -122, "y": 19,  "z": 9}, "rot": {"pitch": -40, "yaw": 0,   "roll": 0}},
+    {"name": "cam9",  "pos": {"x": -95,  "y": -20, "z": 9}, "rot": {"pitch": -40, "yaw": 150, "roll": 0}},
+    {"name": "cam10", "pos": {"x": -121, "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw": -17, "roll": 0}},
+    {"name": "cam11", "pos": {"x": -113, "y": -63, "z": 9}, "rot": {"pitch": -40, "yaw": 40,  "roll": 0}},
+    {"name": "cam12", "pos": {"x": -60,  "y": -76, "z": 9}, "rot": {"pitch": -40, "yaw": 120, "roll": 0}},
+    {"name": "cam13", "pos": {"x": -77,  "y": 34,  "z": 9}, "rot": {"pitch": -45, "yaw": -73, "roll": 0}},
+    {"name": "cam14", "pos": {"x": -68,  "y": 34,  "z": 9}, "rot": {"pitch": -45, "yaw": -30, "roll": 0}},
+    {"name": "cam15", "pos": {"x": -120, "y": -40, "z": 9}, "rot": {"pitch": -40, "yaw": 30,  "roll": 0}},
+    {"name": "cam16", "pos": {"x": -61,  "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw": 0,   "roll": 0}},
+]
 
 def load_cam_labels(pred_dir: str, frame_key: str) -> List[Tuple[str, np.ndarray]]:
     """
@@ -24,23 +56,6 @@ def load_cam_labels(pred_dir: str, frame_key: str) -> List[Tuple[str, np.ndarray
         if rows:
             result.append((cam_name, np.array(rows, dtype=float)))
     return result
-
-CAMERA_SETUPS = [
-    {"name": "cam1",  "pos": {"x": -46,  "y": -74, "z": 9}, "rot": {"pitch": -45, "yaw":  90,  "roll": 0}},
-    {"name": "cam2",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 197,  "roll": 0}},
-    {"name": "cam3",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 163,  "roll": 0}},
-    {"name": "cam4",  "pos": {"x": -35,  "y":   5, "z": 9}, "rot": {"pitch": -45, "yaw": 197,  "roll": 0}},
-    {"name": "cam5",  "pos": {"x": -35,  "y":   5, "z": 9}, "rot": {"pitch": -45, "yaw": 135,  "roll": 0}},
-    {"name": "cam6",  "pos": {"x": -77,  "y":   7, "z": 9}, "rot": {"pitch": -45, "yaw":  73,  "roll": 0}},
-    {"name": "cam7",  "pos": {"x": -77,  "y":   7, "z": 9}, "rot": {"pitch": -45, "yaw": 107,  "roll": 0}},
-    {"name": "cam8",  "pos": {"x": -121, "y":  19, "z": 9}, "rot": {"pitch": -45, "yaw":   0,  "roll": 0}},
-    {"name": "cam9",  "pos": {"x": -121, "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw":  17,  "roll": 0}},
-    {"name": "cam10", "pos": {"x": -121, "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw": -17,  "roll": 0}},
-    {"name": "cam11", "pos": {"x": -107, "y": -57, "z": 9}, "rot": {"pitch": -45, "yaw":  40,  "roll": 0}},
-    {"name": "cam12", "pos": {"x": -75,  "y": -74, "z": 9}, "rot": {"pitch": -45, "yaw":  90,  "roll": 0}},
-    {"name": "cam13", "pos": {"x": -77,  "y":  34, "z": 9}, "rot": {"pitch": -45, "yaw": -73,  "roll": 0}},
-    {"name": "cam14", "pos": {"x": -77,  "y":  34, "z": 9}, "rot": {"pitch": -45, "yaw": -107, "roll": 0}},
-]
 
 def aabb_iou_axis_aligned(b1, b2) -> float:
     x1,y1,L1,W1,_ = b1
@@ -177,7 +192,6 @@ def partial_inclusion_suppression_aabb(
 def cluster_by_aabb_iou(boxes: np.ndarray, iou_cluster_thr: float = 0.15) -> List[List[int]]:
     """
     AABB IoU(각도 무시) >= iou_cluster_thr 이면 같은 클러스터
-    반환: 인덱스 리스트들의 리스트 (예: [[0,3,8],[1,5],...])
     """
     if boxes.size == 0:
         return []

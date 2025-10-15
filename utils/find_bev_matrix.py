@@ -1,7 +1,8 @@
 import numpy as np
 import cv2
 from scipy.spatial.transform import Rotation
-
+import argparse
+import os
 
 def _annotate_bev_axes(bev_img, x_min, x_max, z_min, z_max, label_x='X', label_z='Z', camera_pos=None):
     """BEV 이미지에 눈금/축 레이블을 보기 좋게 오버레이합니다."""
@@ -212,14 +213,23 @@ def create_bev_with_remap_final(
 
 # --- 메인 실행 부분 ---
 if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="find_bev_matrix.py")
+    p.add_argument("--carla_camera_position", required=True,
+                   help="Carla 월드 좌표계 기준 카메라 위치 (X_carla, Y_carla, Z_carla)")
+    p.add_argument("--carla_camera_rotation", required=True,
+                   help="Carla 월드 좌표계 기준 카메라 회전 (Pitch_carla, Yaw_carla, Roll_carla)")
+    p.add_argument("--frame_id", type=str, required=True,
+                   help="프레임 ID (예: cam1)") 
+    p.add_argument("--output_dir", type=str, required=True) 
+    args = p.parse_args()
     
     # ==============================================================================
     # ⚙️ 사용자가 수정할 파라미터 영역
     # ==============================================================================
     # Carla 시뮬레이터에서 얻은 '있는 그대로'의 값을 입력하세요.
     # 이제 이 값을 바꾸면 기대하신 대로 정확하게 동작합니다.
-    CARLA_CAMERA_POSITION = (0.0, 0.0, 9.0) # (X_carla, Y_carla, Z_carla)
-    CARLA_CAMERA_ROTATION = (-45.0, -90, 0.0) # (Pitch_carla, Yaw_carla, Roll_carla)
+    CARLA_CAMERA_POSITION = tuple(map(float, args.carla_camera_position.split(',')))
+    CARLA_CAMERA_ROTATION = tuple(map(float, args.carla_camera_rotation.split(','))) 
 
     # 월드 절대 좌표계에서 사용할 BEV 커버리지 (X, Y)
     # 필요에 맞게 최소/최대 값을 조정하세요.
@@ -228,6 +238,7 @@ if __name__ == "__main__":
     # 파일 경로
     INPUT_IMAGE_PATH = 'cam8_frame_000020_-45.jpg'
     OUTPUT_BEV_PATH = 'output_bev.jpg'
+    OUTPUT_MAT_PATH = args.output_dir
     
     # 기타 설정
     BEV_OUTPUT_RESOLUTION = (800, 800)
@@ -252,6 +263,10 @@ if __name__ == "__main__":
 print("\nH_img_to_ground (image -> ground):")
 for row in H_img_to_ground:
     print(" ".join(f"{val:.8e}" for val in row))
+
+os.makedirs(OUTPUT_MAT_PATH, exist_ok=True)
+save_path = os.path.join(OUTPUT_MAT_PATH, f"{args.frame_id}.txt")
+np.savetxt(save_path, H_img_to_ground, fmt="%.8e")
 
 #print("\nH_img_to_bev (image -> BEV pixels):\n", H_img_to_bev)
 print("\n--- 모든 작업 완료 ---")
