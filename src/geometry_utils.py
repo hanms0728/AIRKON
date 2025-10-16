@@ -28,3 +28,30 @@ def iou_aabb_xywh(a, b):
     inter = iw * ih
     union = aw * ah + bw * bh - inter + 1e-9
     return inter / union
+
+def tiny_filter_on_dets(dets_img, min_area=20.0, min_edge=3.0):
+    """
+    아주 작은 평행사변형(너무 작은 면적/짧은 변)을 제거.
+    dets_img: decode_predictions가 반환한 단일 이미지의 detection 리스트.
+    각 item은 최소한 'tri' (3,2) 좌표를 포함한다고 가정. 없으면 필터 스킵.
+    """
+    filtered = []
+    for d in dets_img:
+        tri = None
+        if isinstance(d, dict):
+            if 'tri' in d:
+                tri = np.asarray(d['tri'], dtype=np.float32)
+            elif 'points' in d:
+                tri = np.asarray(d['points'], dtype=np.float32)
+        if tri is None or tri.shape != (3, 2):
+            filtered.append(d)  # 좌표 없으면 필터 불가 → 그대로 통과
+            continue
+        try:
+            poly4 = safe_parallelogram_from_triangle(tri)  # (4,2)
+            area = polygon_area(poly4)
+            edges = np.linalg.norm(np.roll(poly4, -1, axis=0) - poly4, axis=1)
+            if area >= min_area and edges.min() >= min_edge:
+                filtered.append(d)
+        except Exception:
+            filtered.append(d)
+    return filtered
