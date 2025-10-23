@@ -603,7 +603,11 @@ def main():
                     continue
 
                 if USE_GUI:
-                    cv2.imshow(f"cam{cam_id}", frame)
+                    window_name = f"cam{cam_id}"
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 창 크기 조절 허용
+                    cv2.resizeWindow(window_name, 640, 360)          # 원하는 크기 (가로 x 세로)
+                    cv2.imshow(window_name, frame)
+                    # cv2.imshow(f"cam{cam_id}", frame)
                     if (cam_id == camera_cfgs[0]["camera_id"]) and (cv2.waitKey(1) & 0xFF) == 27:
                         running = False; break
 
