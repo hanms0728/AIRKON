@@ -432,7 +432,7 @@ class EdgeInfer:
         save_txt = os.path.join(dirs["lab"], Path(name).with_suffix(".txt").name)
 
         # 시각화 + 2D 라벨(원본 이미지 크기 기준 좌표)
-        _ = draw_pred_only(
+        result_img = draw_pred_only(
             image_bgr=img_bgr, dets=dets,
             save_path_img=save_img, save_path_txt=save_txt,
             W=self.W_infer, H=self.H_infer, W0=W_img, H0=H_img
@@ -493,6 +493,7 @@ class EdgeInfer:
                     self.udp_sender.send(cam_id, stamp, bev_lab, bev_dets)
                 except Exception as e:
                     print(f"[UDP] send error: {e}")
+        return result_img
 
 # ===================== 메인 (스트리머와 결합) =====================
 def main():
@@ -616,8 +617,12 @@ def main():
                     continue
 
                 # 추론
-                infer.process_frame(cam_id, frame, now)
-
+                img = infer.process_frame(cam_id, frame, now)
+                if USE_GUI and img:
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 창 크기 조절 허용
+                    cv2.resizeWindow(window_name, 640, 360)          # 원하는 크기 (가로 x 세로)
+                    cv2.imshow(window_name, img)
+                    
             time.sleep(0.002)
             if args.dummy_cam_dirs:
                 no_frames = all(streamer.get_latest(cid) is None for cid in active_cam_ids)
