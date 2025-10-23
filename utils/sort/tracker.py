@@ -381,4 +381,4 @@ def main_tracking():
     else:
         print("\n⚠️ 추적된 객체가 없습니다. (모든 프레임에서 Confirmed/Lost 상태의 트랙이 없었음)")
 
-main_tracking() 
+# main_tracking() 

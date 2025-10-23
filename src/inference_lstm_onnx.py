@@ -11,7 +11,8 @@ from typing import List, Tuple, Optional
 import torch
 from tqdm import tqdm
 import onnxruntime as ort
-
+import sys, os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # ====== 기존 유틸 그대로 재사용 ======
 from geometry_utils import parallelogram_from_triangle, tiny_filter_on_dets
 from evaluation_utils import (
@@ -20,6 +21,13 @@ from evaluation_utils import (
     compute_detection_metrics,
     orientation_error_deg,
 )
+# from geometry_utils import parallelogram_from_triangle, tiny_filter_on_dets
+# from evaluation_utils import (
+#     decode_predictions,
+#     evaluate_single_image,
+#     compute_detection_metrics,
+#     orientation_error_deg,
+# )
 
 try:
     import matplotlib
