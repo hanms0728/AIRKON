@@ -15,12 +15,12 @@ from typing import Dict, List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 
-from zzz.AIRKON.utils.combine.coop_bev_labels import obb_to_quad, distinct_colors  
-from zzz.AIRKON.utils.merge.merge_dist_wbf import (  
+from utils.combine.coop_bev_labels import obb_to_quad, distinct_colors  
+from utils.merge.merge_dist_wbf import (  
     CAMERA_SETUPS, cluster_by_aabb_iou, fuse_cluster_weighted
 ) 
-from zzz.AIRKON.utils.sort.draw import color_for_track, obb_to_quad as obb_to_quad_draw  
-from zzz.AIRKON.utils.sort.tracker import SortTracker  
+from utils.sort.draw import color_for_track, obb_to_quad as obb_to_quad_draw  
+from utils.sort.tracker import SortTracker  
 
 # ---일단 저장용---
 import os, gzip, json, csv, hashlib, threading, queue, time
@@ -651,8 +651,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051",
                     help="카메라명:UDP포트 목록 (쉼표로 구분)")
-    ap.add_argument("--xlim", default="-120,-30", help="글로벌 X축 표시 범위 (예: -120,-30)")
-    ap.add_argument("--ylim", default="-80,40", help="글로벌 Y축 표시 범위 (예: -80,40)")
+    ap.add_argument("--xlim", default="0,20", help="글로벌 X축 표시 범위 (예: -120,-30)")
+    ap.add_argument("--ylim", default="0,20", help="글로벌 Y축 표시 범위 (예: -80,40)")
     ap.add_argument("--fps", type=float, default=10.0, help="갱신 FPS")
     ap.add_argument("--iou-thr", type=float, default=0.25, help="AABB IoU 군집 임계값(융합 단계)")
     ap.add_argument("--bg", default=None, help="배경 이미지 경로(선택)")

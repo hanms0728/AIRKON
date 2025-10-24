@@ -120,7 +120,7 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
     cv2.imwrite(save_path_img, img)
     with open(save_path_txt, "w") as f:
         f.write("\n".join(lines))
-    return tri_orig_list
+    return img, tri_orig_list
 
 def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mix, iou_thr=0.5):
     os.makedirs(os.path.dirname(save_path_img_mix), exist_ok=True)
@@ -630,7 +630,7 @@ def main():
 
         save_img = os.path.join(out_img_dir, name)
         save_txt = os.path.join(out_lab_dir, os.path.splitext(name)[0] + ".txt")
-        pred_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
+        _, red_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
 
         gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
         gt_tri_orig_for_bev = np.zeros((0, 3, 2), dtype=np.float32)

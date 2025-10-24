@@ -14,7 +14,7 @@ from typing import Dict, Optional, Tuple, List
 from collections import deque
 from collections import defaultdict
 
-from zzz.AIRKON.src.inference_lstm_onnx import (
+from src.inference_lstm_onnx import (
     ONNXTemporalRunner,
     decode_predictions,          # evaluation_utils에서 import됨
     tiny_filter_on_dets,        # geometry_utils 경유
@@ -432,7 +432,7 @@ class EdgeInfer:
         save_txt = os.path.join(dirs["lab"], Path(name).with_suffix(".txt").name)
 
         # 시각화 + 2D 라벨(원본 이미지 크기 기준 좌표)
-        _ = draw_pred_only(
+        img, _= draw_pred_only(
             image_bgr=img_bgr, dets=dets,
             save_path_img=save_img, save_path_txt=save_txt,
             W=self.W_infer, H=self.H_infer, W0=W_img, H0=H_img
@@ -493,6 +493,8 @@ class EdgeInfer:
                     self.udp_sender.send(cam_id, stamp, bev_lab, bev_dets)
                 except Exception as e:
                     print(f"[UDP] send error: {e}")
+            
+        return img
 
 # ===================== 메인 (스트리머와 결합) =====================
 def main():
@@ -502,7 +504,7 @@ def main():
     ap.add_argument("--output-dir", default="./inference_results_realtime", type=str)
     ap.add_argument("--img-size", default="864,1536", type=str)
     ap.add_argument("--strides", default="8,16,32", type=str)
-    ap.add_argument("--conf", default=0.80, type=float)
+    ap.add_argument("--conf", default=0.30, type=float)
     ap.add_argument("--nms-iou", default=0.20, type=float)
     ap.add_argument("--topk", default=50, type=int)
     ap.add_argument("--score-mode", default="obj*cls", choices=["obj","cls","obj*cls"])
@@ -538,8 +540,8 @@ def main():
 
     # 카메라 설정(예시: IP/계정/경로 후보) 근데 이거 직접 찾으셔야돼 이게 맞나??
     camera_cfgs = [
-        {"camera_id": 1, "ip": "192.168.0.4", "port": 554, "username": "admin", "password": "zjsxmfhf"},
-        {"camera_id": 2, "ip": "192.168.0.6", "port": 554, "username": "admin", "password": "zjsxmfhf"},
+        {"camera_id": 1, "ip": "192.168.0.3", "port": 554, "username": "admin", "password": "zjsxmfhf"},
+        {"camera_id": 2, "ip": "192.168.0.4", "port": 554, "username": "admin", "password": "zjsxmfhf"},
     ]
 
     streamer = None
@@ -597,26 +599,48 @@ def main():
         while running:
             now = time.time()
             for cam_id in active_cam_ids:
+
                 frame = streamer.get_latest(cam_id)
                 if frame is None:
                     # print(f"[Main] cam{cam_id} 프레임 없ㄷ다")
                     continue
 
-                if USE_GUI:
-                    window_name = f"cam{cam_id}"
-                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 창 크기 조절 허용
-                    cv2.resizeWindow(window_name, 640, 360)          # 원하는 크기 (가로 x 세로)
-                    cv2.imshow(window_name, frame)
-                    # cv2.imshow(f"cam{cam_id}", frame)
-                    if (cam_id == camera_cfgs[0]["camera_id"]) and (cv2.waitKey(1) & 0xFF) == 27:
-                        running = False; break
+                # if USE_GUI:
+                #     window_name = f"cam{cam_id}"
+                #     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 창 크기 조절 허용
+                #     cv2.resizeWindow(window_name, 640, 360)          # 원하는 크기 (가로 x 세로)
+                #     cv2.imshow(window_name, frame)
+                #     print("뿌림")
+                #     # cv2.imshow(f"cam{cam_id}", frame)
+                #     if (cam_id == camera_cfgs[0]["camera_id"]) and (cv2.waitKey(1) & 0xFF) == 27:
+                #         running = False; break
 
                 counters[cam_id] += 1
                 if counters[cam_id] % max(1, args.every_n) != 0:
                     continue
 
                 # 추론
-                infer.process_frame(cam_id, frame, now)
+                img = infer.process_frame(cam_id, frame, now)
+
+                # if USE_GUI and img:
+                #     window_name = f"cam{cam_id}"
+                #     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 창 크기 조절 허용
+                #     cv2.resizeWindow(window_name, 640, 360)          # 원하는 크기 (가로 x 세로)
+                #     cv2.imshow(window_name, img)
+                #     # cv2.imshow(f"cam{cam_id}", img)
+                #     if (cam_id == camera_cfgs[0]["camera_id"]) and (cv2.waitKey(1) & 0xFF) == 27:
+                #         running = False; break
+                if USE_GUI and img is not None:
+                    window_name = f"cam{cam_id}"
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow(window_name, 1600, 900)
+                    cv2.imshow(window_name, img)
+                    if (cam_id == camera_cfgs[0]["camera_id"]) and (cv2.waitKey(1) & 0xFF) == 27:
+                        running = False
+                        break
+
+                
+
 
             time.sleep(0.002)
             if args.dummy_cam_dirs:
