@@ -22,3 +22,4 @@ dependencies:
       - pyquaternion
       - sympy
       - jinja2
+      - open3d
