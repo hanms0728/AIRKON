@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import argparse
 import json
 import math
@@ -437,7 +434,7 @@ class RealtimeFusionServer:
         ax.grid(True, ls="--", alpha=0.4)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
-        ax.set_title(title)
+        # ax.set_title(title)
         # 배경 이미지(선택)
         if self.bg_path and Path(self.bg_path).exists():
             try:
@@ -465,6 +462,7 @@ class RealtimeFusionServer:
                     self._register_cam_if_needed(cam)
                     self.buffer[cam].clear()
                     self.buffer[cam].append({"ts": ts, "dets": dets})
+                    print(dets)
             except queue.Empty:
                 pass
 
@@ -544,7 +542,7 @@ class RealtimeFusionServer:
         ax.set_xlim(*self.xlim); ax.set_ylim(*self.ylim)
         ax.grid(True, ls="--", alpha=0.4)
         ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
-        ax.set_title("① 통합(카메라별)")
+        # ax.set_title("① 통합(카메라별)")
 
         # 배경
         if self.bg_path and Path(self.bg_path).exists():
@@ -567,7 +565,7 @@ class RealtimeFusionServer:
         # 범례 와근데 이거 4개밖에 안뜨던데ㅋㅎ
         for cam in self.cam_order:
             ax.plot([], [], color=self.color_map.get(cam, (0,0,1,1)), lw=2, label=cam)
-        ax.legend(loc="upper right", fontsize=9, ncol=2)
+        # ax.legend(loc="upper right", fontsize=9, ncol=2)
 
     def _draw_fused(self, fused_boxes: List[List[float]]):
         ax = self.ax_fused
@@ -576,7 +574,7 @@ class RealtimeFusionServer:
         ax.set_xlim(*self.xlim); ax.set_ylim(*self.ylim)
         ax.grid(True, ls="--", alpha=0.4)
         ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
-        ax.set_title("② 융합(중복 제거)")
+        # ax.set_title("② 융합(중복 제거)")
 
         if self.bg_path and Path(self.bg_path).exists():
             try:
@@ -600,7 +598,7 @@ class RealtimeFusionServer:
         ax.set_xlim(*self.xlim); ax.set_ylim(*self.ylim)
         ax.grid(True, ls="--", alpha=0.4)
         ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
-        ax.set_title("③ 추적 결과(ID)")
+        # ax.set_title("③ 추적 결과(ID)")
 
         if self.bg_path and Path(self.bg_path).exists():
             try:
@@ -651,9 +649,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051",
                     help="카메라명:UDP포트 목록 (쉼표로 구분)")
-    ap.add_argument("--xlim", default="0,20", help="글로벌 X축 표시 범위 (예: -120,-30)")
-    ap.add_argument("--ylim", default="0,20", help="글로벌 Y축 표시 범위 (예: -80,40)")
-    ap.add_argument("--fps", type=float, default=10.0, help="갱신 FPS")
+    ap.add_argument("--xlim", default="-20,25", help="글로벌 X축 표시 범위 (예: -120,-30)")
+    ap.add_argument("--ylim", default="20,50", help="글로벌 Y축 표시 범위 (예: -80,40)")
+    ap.add_argument("--fps", type=float, default=30.0, help="갱신 FPS")
     ap.add_argument("--iou-thr", type=float, default=0.25, help="AABB IoU 군집 임계값(융합 단계)")
     ap.add_argument("--bg", default=None, help="배경 이미지 경로(선택)")
     ap.add_argument("--no-gui", action="store_true", help="시각화 창 없이 서버만 구동")
