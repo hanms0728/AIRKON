@@ -7,8 +7,9 @@ from AIRKON.src.inference_lstm_onnx_pointcloud import (
     poly_from_tri,
     compute_bev_properties
 )
+from AIRKON.pointcloud.overlay_obj_on_ply import _flip_y_T
 from pathlib import Path
-import argparse, signal, time, threading
+import argparse, signal, time, threading, math
 import onnxruntime as ort
 import numpy as np
 import cv2
@@ -17,7 +18,189 @@ from typing import Optional, Dict
 import socket, json
 import os
 from contextlib import contextmanager
+import open3d as o3d
 
+# ---- 3D viewer (legacy O3D) -----------------------------------------------
+def _unitize_mesh(mesh):
+    # car.glb 같은 메쉬를 중심정렬 + 최대변=1.0, Y-up→Z-up 보정
+    mesh = mesh.compute_vertex_normals()
+    bb = mesh.get_axis_aligned_bounding_box()
+    extent = np.asarray(bb.get_extent())
+    scale = 1.0 / max(1e-9, extent.max())
+    mesh.translate(-bb.get_center())
+    mesh.scale(scale, center=(0, 0, 0))
+    Rx90 = mesh.get_rotation_matrix_from_axis_angle([math.radians(90.0), 0.0, 0.0])
+    mesh.rotate(Rx90, center=(0, 0, 0))
+    return mesh
+
+def _build_T(length, width, yaw_deg, center_xyz, pitch_deg=0.0, roll_deg=0.0, height_scale=1.0):
+    sx = max(1e-4, float(length))
+    sy = max(1e-4, float(width))
+    sz = max(1e-4, float(width) * float(height_scale))
+
+    S = np.diag([sx, sy, sz, 1.0]).astype(np.float64)
+    y, p, r = map(math.radians, [yaw_deg, pitch_deg, roll_deg])
+    cz, szn = math.cos(y), math.sin(y)
+    cp, sp  = math.cos(p), math.sin(p)
+    cr, sr  = math.cos(r), math.sin(r)
+    Rz = np.array([[ cz,-szn,0,0],[szn,cz,0,0],[0,0,1,0],[0,0,0,1]])
+    Ry = np.array([[ cp,0,sp,0],[0,1,0,0],[-sp,0,cp,0],[0,0,0,1]])
+    Rx = np.array([[1,0,0,0],[0,cr,-sr,0],[0,sr,cr,0],[0,0,0,1]])
+    R = (Rz @ Ry @ Rx)
+    Tt = np.eye(4); Tt[:3,3] = np.asarray(center_xyz, dtype=np.float64)
+    return (Tt @ R @ S)
+
+class PerCam3DViewer:
+    """
+    - 글로벌 PLY + 차량 GLB를 한 번 로드
+    - 슬롯 메쉬들을 미리 add
+    - update(bev_dets)에서 각 슬롯 transform만 갱신
+    """
+    def __init__(self, title, global_ply, vehicle_glb, invert_ply_y=True, invert_bev_y=True,
+                 size_mode="dynamic", fixed_length=5.0, fixed_width=4.0, height_scale=1.0,
+                 estimate_z=False, z_radius=0.8, z_offset=0.0, max_slots=32, window=(1200,800), _O3D_AVAILABLE=False):
+        self.enabled = _O3D_AVAILABLE
+        if not self.enabled:
+            print(f"[3D] Open3D not available → viewer disabled")
+            return
+
+        import numpy as np
+        self.invert_bev_y = bool(invert_bev_y)
+        self.size_mode = size_mode
+        self.fixed_length = float(fixed_length)
+        self.fixed_width  = float(fixed_width)
+        self.height_scale = float(height_scale)
+        self.estimate_z   = bool(estimate_z)
+        self.z_radius = float(z_radius)
+        self.z_offset = float(z_offset)
+
+        self.vis = o3d.visualization.VisualizerWithKeyCallback()
+        self.vis.create_window(window_name=title, width=window[0], height=window[1])
+        self.lock = threading.Lock()
+
+        # 글로벌 포인트클라우드
+        cloud = o3d.io.read_point_cloud(global_ply)
+        if cloud.is_empty():
+            raise RuntimeError(f"[3D] Empty PLY: {global_ply}")
+        if invert_ply_y:
+            cloud = o3d.geometry.PointCloud(cloud); cloud.transform(_flip_y_T())
+        self.vis.add_geometry(cloud, reset_bounding_box=True)
+
+        # z 추정용 KDTree
+        if self.estimate_z:
+            self.kdtree = o3d.geometry.KDTreeFlann(cloud)
+            self.xyz_pts = np.asarray(cloud.points)
+        else:
+            self.kdtree = None; self.xyz_pts = None
+
+        # 차량 유닛 메쉬 & 슬롯 생성
+        mesh_ref = o3d.io.read_triangle_mesh(vehicle_glb, enable_post_processing=True)
+        if mesh_ref.is_empty():
+            raise RuntimeError(f"[3D] Cannot load mesh: {vehicle_glb}")
+        mesh_unit = _unitize_mesh(mesh_ref)
+        self.base_vertices = np.asarray(mesh_unit.vertices).copy()
+        self.base_triangles = np.asarray(mesh_unit.triangles).copy()
+        mesh_unit.compute_vertex_normals()
+        self.base_normals = np.asarray(mesh_unit.vertex_normals).copy()
+
+        self.FAR_HIDE_T = np.diag([1e-6,1e-6,1e-6,1.0]); self.FAR_HIDE_T[:3,3] = np.array([0,0,-9999.0])
+        self.meshes = []
+        for _ in range(int(max_slots)):
+            m = o3d.geometry.TriangleMesh()
+            m.vertices  = o3d.utility.Vector3dVector(self.base_vertices.copy())
+            m.triangles = o3d.utility.Vector3iVector(self.base_triangles.copy())
+            m.vertex_normals = o3d.utility.Vector3dVector(self.base_normals.copy())
+            m.transform(self.FAR_HIDE_T)  # 숨김
+            self.vis.add_geometry(m, reset_bounding_box=False)
+            self.meshes.append(m)
+
+        # 폴링 스레드
+        self._stop = False
+        import threading, time
+        def _pump():
+            while not self._stop:
+                with self.lock:
+                    self.vis.poll_events()
+                    self.vis.update_renderer()
+                time.sleep(0.01)
+        self._thr = threading.Thread(target=_pump, daemon=True); self._thr.start()
+
+    def close(self):
+        if not self.enabled: return
+        self._stop = True
+        try: self._thr.join(timeout=0.5)
+        except: pass
+        try:
+            with self.lock:
+                self.vis.destroy_window()
+        except: pass
+
+    def _apply_slot(self, slot_mesh, T, reset=False):
+        # 레거시는 transform setter가 없으므로 vertices를 원본으로 되돌리고 transform 적용
+        if reset:
+            slot_mesh.vertices  = o3d.utility.Vector3dVector(self.base_vertices.copy())
+            slot_mesh.triangles = o3d.utility.Vector3iVector(self.base_triangles.copy())
+            slot_mesh.vertex_normals = o3d.utility.Vector3dVector(self.base_normals.copy())
+        slot_mesh.transform(T)
+        self.vis.update_geometry(slot_mesh)
+
+    def update(self, bev_dets):
+        """
+        bev_dets: [{'center':(x,y), 'length':L, 'width':W, 'yaw':deg, 'cz':..., 'pitch':..., 'roll':...}, ...]
+        """
+        if (not self.enabled) or bev_dets is None:
+            return
+        import numpy as np
+        with self.lock:
+            N = min(len(bev_dets), len(self.meshes))
+            # 우선 모두 숨김
+            for i in range(len(self.meshes)):
+                self._apply_slot(self.meshes[i], self.FAR_HIDE_T, reset=True)
+
+            if N == 0:
+                return
+
+            xy = np.array([d["center"] for d in bev_dets[:N]], dtype=np.float64)
+            yaw = np.array([d.get("yaw", 0.0) for d in bev_dets[:N]], dtype=np.float64)
+            pitch = np.array([d.get("pitch", 0.0) for d in bev_dets[:N]], dtype=np.float64)
+            roll  = np.array([d.get("roll", 0.0) for d in bev_dets[:N]], dtype=np.float64)
+            cz    = np.array([d.get("cz", 0.0) for d in bev_dets[:N]], dtype=np.float64)
+            L     = np.array([d["length"] for d in bev_dets[:N]], dtype=np.float64)
+            W     = np.array([d["width"]  for d in bev_dets[:N]], dtype=np.float64)
+
+            # 옵션: BEV 좌표계 Y 플립 (라벨계→월드계 정합) — yaw/pitch/roll도 부호 반전
+            if self.invert_bev_y:
+                xy[:,1] *= -1.0; yaw *= -1.0; pitch *= -1.0; roll *= -1.0
+
+            # z 결정: (1) 추정, (2) 라벨 cz + 오프셋
+            if self.estimate_z and self.kdtree is not None and self.xyz_pts is not None:
+                zs = []
+                for i in range(N):
+                    center = np.array([xy[i,0], xy[i,1], 0.0], dtype=np.float64)
+                    [_, idxs, _] = self.kdtree.search_hybrid_vector_3d(center, self.z_radius, 512)
+                    if len(idxs) == 0:
+                        zs.append(float(cz[i]))
+                    else:
+                        zs.append(float(np.median(self.xyz_pts[idxs, 2])))
+                z_here = np.asarray(zs, dtype=np.float64) + self.z_offset
+            else:
+                z_here = cz + self.z_offset
+
+            for i in range(N):
+                if self.size_mode == "fixed":
+                    Li, Wi = self.fixed_length, self.fixed_width
+                else:
+                    Li, Wi = float(L[i]), float(W[i])
+
+                # 바닥 접지: center z는 “모델 중앙”이므로 (높이/2) 만큼 올려줌
+                height = Wi * self.height_scale
+                center3 = np.array([xy[i,0], xy[i,1], z_here[i] + height*0.5], dtype=np.float64)
+                T = _build_T(Li, Wi, float(yaw[i]), center3,
+                             pitch_deg=float(pitch[i]), roll_deg=float(roll[i]),
+                             height_scale=self.height_scale)
+                self._apply_slot(self.meshes[i], T, reset=True)
+
+# ---
 def load_LUT_for_cam(calib_dir: str, cam_id: int) -> Optional[dict]:
     """
     calib_dir 안에서 cam{cam_id} 관련 LUT npz 찾기.
@@ -52,7 +235,7 @@ class InferWorker(threading.Thread):
     """
     def __init__(self, *, streamer, cam_ids, img_hw, strides, onnx_path,
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
-                 calib_dir=None, bev_scale=1.0, providers=None,
+                 calib_dir=None, bev_scale=1.0, providers=None, viewer3d_map=None,
                  gui_queue=None, udp_sender=None):
         super().__init__(daemon=True)
         self.streamer = streamer
@@ -63,6 +246,7 @@ class InferWorker(threading.Thread):
         self.conf = float(conf)
         self.nms_iou = float(nms_iou)
         self.topk = int(topk)
+        self.viewer3d_map = viewer3d_map or {}   # {cam_id: PerCam3DViewer}
         self.gui_queue = gui_queue
         self.udp_sender = udp_sender
         self.stop_evt = threading.Event()
@@ -203,6 +387,14 @@ class InferWorker(threading.Thread):
 
                 with wrk.span("bev"):
                     bev = self._make_bev(dets, self.LUT_cache.get(cid)) 
+                
+                # 3D 시각화 업데이트
+                try:
+                    v = self.viewer3d_map.get(cid)
+                    if v is not None:
+                        v.update(bev)   # center/length/width/yaw/cz/pitch/roll 사용
+                except Exception as e:
+                    print(f"[3D] update error cam{cid}: {e}")
 
                 if self.udp_sender is not None:
                     with wrk.span("udp"):
@@ -392,7 +584,7 @@ def main():
     ap.add_argument("--topk", default=50, type=int)
     ap.add_argument("--score-mode", default="obj*cls", choices=["obj","cls","obj*cls"])
     ap.add_argument("--bev-scale", default=1.0, type=float)
-    ap.add_argument("--calib-dir", default="./calib", type=str)
+    ap.add_argument("--lut-path", default="./calib", type=str)
     ap.add_argument("--transport", default="tcp", choices=["tcp","udp"])
     ap.add_argument("--no-cuda", action="store_true")
     ap.add_argument("--udp-enable", action="store_true")
@@ -401,6 +593,18 @@ def main():
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    # 3d
+    ap.add_argument("--global-ply", type=str, default="pointcloud/global_fused_small.ply")
+    ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
+    ap.add_argument("--viewer3d", action="store_true")           # ← 3D 창 켜기
+    ap.add_argument("--viewer3d-fixed-size", action="store_true")# ← 객체 스케일 고정 모드
+    ap.add_argument("--viewer3d-height-scale", type=float, default=1.0)
+    ap.add_argument("--viewer3d-estimate-z", action="store_true")
+    ap.add_argument("--viewer3d-z-radius", type=float, default=0.8)
+    ap.add_argument("--viewer3d-z-offset", type=float, default=0.0)
+    ap.add_argument("--viewer3d-invert-bev-y", action="store_true")
+    ap.add_argument("--viewer3d-no-invert-bev-y", dest="viewer3d_invert_bev_y", action="store_false")
+    ap.set_defaults(viewer3d_invert_bev_y=True)
     args = ap.parse_args()
     
     # GUI 여부
@@ -413,6 +617,13 @@ def main():
             print("GUI 사용 불가")
             return False
     USE_GUI = gui_available()
+
+    try:
+        
+        _O3D_AVAILABLE = True
+    except Exception:
+        _O3D_AVAILABLE = False
+
     
     H, W = map(int, args.img_size.split(","))
     strides = tuple(float(s) for s in args.strides.split(","))
@@ -465,6 +676,31 @@ def main():
     if args.udp_enable:
         udp_sender = UDPSender(args.udp_host, args.udp_port, fmt=args.udp_format)
 
+    # 3D 뷰어 준비(카메라별 한 개씩)
+    viewer3d_map = {}
+    if args.viewer3d:
+        for cfg in camera_configs:
+            cid = cfg["camera_id"]
+            try:
+                viewer3d_map[cid] = PerCam3DViewer(
+                    title=f"cam{cid} • 3D",
+                    global_ply=args.global_ply,
+                    vehicle_glb=args.vehicle_glb,
+                    invert_ply_y=True,
+                    invert_bev_y=args.viewer3d_invert_bev_y,
+                    size_mode=("fixed" if args.viewer3d_fixed_size else "dynamic"),
+                    fixed_length=5.0, fixed_width=4.0,
+                    height_scale=args.viewer3d_height_scale,
+                    estimate_z=args.viewer3d_estimate_z,
+                    z_radius=args.viewer3d_z_radius,
+                    z_offset=args.viewer3d_z_offset,
+                    max_slots=64,
+                    window=(1000, 700),
+                    _O3D_AVAILABLE = _O3D_AVAILABLE
+                )
+            except Exception as e:
+                print(f"[3D] cam{cid} viewer init failed: {e}")
+
     # 시작
     streamer.start()
     # -------- GUI 큐 & 워커 --------
@@ -472,7 +708,7 @@ def main():
     worker = InferWorker(
         streamer=streamer, cam_ids=cam_ids, img_hw=(H, W), strides=strides,
         onnx_path=args.weights, score_mode=args.score_mode, conf=args.conf, nms_iou=args.nms_iou, topk=args.topk,
-        calib_dir=args.calib_dir, bev_scale=args.bev_scale, providers=providers,
+        calib_dir=args.lut_path, bev_scale=args.bev_scale, providers=providers, viewer3d_map=viewer3d_map, 
         gui_queue=gui_queue, udp_sender=udp_sender  
     )
     worker.start()
