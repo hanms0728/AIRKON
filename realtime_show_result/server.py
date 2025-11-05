@@ -31,20 +31,20 @@ class Settings:
     global_ply: str
     bev_label_dir: str
     vehicle_glb: str
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = 8000
     fps: float = 10.0
     height_scale: float = 0.5
     z_offset: float = 0.0
-    invert_bev_y: bool = False
-    size_mode: str = "bbox"
+    invert_bev_y: bool = True
+    size_mode: str = "mesh"
     fixed_length: float = 4.5
     fixed_width: float = 1.8
     mesh_scale: float = 1.0
-    mesh_height: float = 1.5
+    mesh_height: float = 0.0
     normalize_vehicle: bool = True
     vehicle_y_up: bool = True
-    flip_ply_y: bool = False
+    flip_ply_y: bool = True
     show_debug_marker: bool = False
     show_scene_axes: bool = False
 
@@ -329,16 +329,17 @@ def parse_args(args: Optional[List[str]] = None) -> Settings:
     parser = argparse.ArgumentParser(description="Launch web service for 3D overlay viewer.")
     parser.add_argument("--global-ply", required=True, help="Path to global point cloud PLY file")
     parser.add_argument("--bev-label-dir", required=True, help="Directory containing BEV label txt files")
-    parser.add_argument("--vehicle-glb", required=True, help="Path to vehicle GLB mesh file")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
+    parser.add_argument("--vehicle-glb", default="pointcloud/car.glb", help="Path to vehicle GLB mesh file")
+    parser.add_argument("--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
     parser.add_argument("--height-scale", type=float, default=0.5, help="Vehicle height = width * height_scale")
     parser.add_argument("--z-offset", type=float, default=0.0, help="Offset added to cz label for ground alignment")
-    parser.add_argument("--invert-bev-y", action="store_true", help="Invert BEV Y axis and yaw/pitch/roll sign")
+    parser.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true", help="Invert BEV Y axis and yaw/pitch/roll sign")
+    parser.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false", help="Do not invert BEV Y axis")
     parser.add_argument(
         "--size-mode",
         choices=["bbox", "fixed", "mesh"],
-        default="bbox",
+        default="mesh",
         help="Use bbox dimensions or fixed fallback size for the vehicle mesh",
     )
     parser.add_argument("--fixed-length", type=float, default=4.5, help="Fixed vehicle length when size-mode=fixed")
@@ -347,7 +348,7 @@ def parse_args(args: Optional[List[str]] = None) -> Settings:
     parser.add_argument(
         "--mesh-height",
         type=float,
-        default=1.5,
+        default=0.0,
         help="Estimated vehicle height when size-mode=mesh (used for ground offset)",
     )
     parser.add_argument(
@@ -386,9 +387,9 @@ def parse_args(args: Optional[List[str]] = None) -> Settings:
         "--no-flip-ply-y",
         dest="flip_ply_y",
         action="store_false",
-        help="Do not flip global PLY's Y axis (default)",
+        help="Do not flip global PLY's Y axis",
     )
-    parser.set_defaults(flip_ply_y=False)
+    parser.set_defaults(flip_ply_y=True, invert_bev_y=True)
     parser.add_argument(
         "--show-debug-marker",
         dest="show_debug_marker",
@@ -402,6 +403,7 @@ def parse_args(args: Optional[List[str]] = None) -> Settings:
         help="Show grid and axis helpers in the scene",
     )
     parser.add_argument("--fps", type=float, default=10.0, help="Playback FPS hint (used by frontend only)")
+    parser.set_defaults(show_scene_axes=False)
 
     parsed = parser.parse_args(args=args)
 
@@ -443,8 +445,8 @@ def load_settings_from_env() -> Optional[Settings]:
     """Allow uvicorn imports with environment variables."""
     global_ply = os.getenv("AIRKON_GLOBAL_PLY")
     bev_dir = os.getenv("AIRKON_BEV_LABEL_DIR")
-    vehicle_glb = os.getenv("AIRKON_VEHICLE_GLB")
-    if not (global_ply and bev_dir and vehicle_glb):
+    vehicle_glb = os.getenv("AIRKON_VEHICLE_GLB", "pointcloud/car.glb")
+    if not (global_ply and bev_dir):
         return None
 
     def _env_float(name: str, default: float) -> float:
@@ -454,13 +456,13 @@ def load_settings_from_env() -> Optional[Settings]:
         except ValueError:
             return default
 
-    size_mode = os.getenv("AIRKON_SIZE_MODE", "bbox")
-    invert_flag = os.getenv("AIRKON_INVERT_BEV_Y", "0").lower() in {"1", "true", "yes"}
+    size_mode = os.getenv("AIRKON_SIZE_MODE", "mesh")
+    invert_flag = os.getenv("AIRKON_INVERT_BEV_Y", "1").lower() in {"1", "true", "yes"}
     mesh_scale = _env_float("AIRKON_MESH_SCALE", 1.0)
-    mesh_height = _env_float("AIRKON_MESH_HEIGHT", 1.5)
+    mesh_height = _env_float("AIRKON_MESH_HEIGHT", 0.0)
     normalize_env = os.getenv("AIRKON_NORMALIZE_VEHICLE")
     vehicle_y_up_flag = os.getenv("AIRKON_VEHICLE_Y_UP", "1").lower() in {"1", "true", "yes"}
-    flip_ply_y_flag = os.getenv("AIRKON_FLIP_PLY_Y", "0").lower() in {"1", "true", "yes"}
+    flip_ply_y_flag = os.getenv("AIRKON_FLIP_PLY_Y", "1").lower() in {"1", "true", "yes"}
     debug_marker_flag = os.getenv("AIRKON_SHOW_DEBUG_MARKER", "0").lower() in {"1", "true", "yes"}
     show_axes_flag = os.getenv("AIRKON_SHOW_SCENE_AXES", "0").lower() in {"1", "true", "yes"}
 
@@ -473,7 +475,7 @@ def load_settings_from_env() -> Optional[Settings]:
         global_ply=os.path.abspath(global_ply),
         bev_label_dir=os.path.abspath(bev_dir),
         vehicle_glb=os.path.abspath(vehicle_glb),
-        host=os.getenv("AIRKON_HOST", "127.0.0.1"),
+        host=os.getenv("AIRKON_HOST", "0.0.0.0"),
         port=int(os.getenv("AIRKON_PORT", "8000")),
         height_scale=_env_float("AIRKON_HEIGHT_SCALE", 0.5),
         z_offset=_env_float("AIRKON_Z_OFFSET", 0.0),
@@ -513,5 +515,8 @@ if __name__ == "__main__":
     run_with_settings(settings)
 
 """
-python realtime_show_result/server.py   --global-ply pointcloud/cloud_rgb_ply/cloud_rgb_9.ply   --bev-label-dir dataset_exmple_pointcloud_9/bev_labels   --vehicle-glb pointcloud/car.glb   --host 0.0.0.0 --port 8000   --size-mode mesh   --mesh-scale 1.0   --mesh-height 0   --flip-ply-y   --invert-bev-y
+python realtime_show_result/server.py \
+    --global-ply pointcloud/cloud_rgb_ply/cloud_rgb_9.ply \
+    --bev-label-dir dataset_exmple_pointcloud_9/bev_labels \
+    --vehicle-glb pointcloud/car.glb 
 """
