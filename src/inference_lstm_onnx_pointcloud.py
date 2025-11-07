@@ -842,6 +842,7 @@ def main():
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--nms-iou", type=float, default=0.2)
     ap.add_argument("--topk", type=int, default=50)
+    ap.add_argument("--contain-thr", type=float, default=0.85)
     ap.add_argument("--clip-cells", type=float, default=None)
     ap.add_argument("--exts", type=str, default=".jpg,.jpeg,.png")
 
@@ -972,6 +973,7 @@ def main():
             conf_th=args.conf,
             nms_iou=args.nms_iou,
             topk=args.topk,
+            contain_thr=args.contain_thr,
             score_mode=args.score_mode,
             use_gpu_nms=True
         )[0]
@@ -1128,13 +1130,13 @@ if __name__ == "__main__":
 
 """
 python ./src/inference_lstm_onnx_pointcloud.py \
-  --input-dir /media/ubuntu24/T7/coshow_dataset_1/cam8_1/images \
-  --output-dir ./inference_results_npz_8 \
-  --weights ./runs/2_5d_lstm_coshow/onnx/yolo11m_2_5d_epoch_015.onnx \
+  --input-dir ./dataset_example_pointcloud_9/images \
+  --output-dir ./inference_results_npz_9\
+  --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
   --temporal lstm \
   --seq-mode by_prefix --reset-per-seq \
   --conf 0.8 --nms-iou 0.2 --topk 50 \
-  --gt-label-dir /media/ubuntu24/T7/coshow_dataset_1/cam8_1/labels \
-  --lut-path /media/ubuntu24/T7/coshow_dataset_1/cam8_1/calib.npz \
+  --gt-label-dir ./dataset_example_pointcloud_9/labels \
+  --lut-path ./pointcloud/cloud_rgb_npz/cloud_rgb_9.npz \
   --bev-scale 1.0
 """
