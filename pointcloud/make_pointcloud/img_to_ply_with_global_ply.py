@@ -25,6 +25,23 @@ import random
 import threading
 from collections import deque
 
+# --- Helper: integer disk offsets for splatting ---
+def _disk_offsets(radius: int):
+    """
+    Return list of (dx, dy) integer offsets inside a filled disk of given radius.
+    radius=1 → only center pixel (no expansion). radius=2 → ~5px, radius=3 → ~13px, etc.
+    """
+    r = int(radius)
+    if r <= 1:
+        return [(0, 0)]
+    off = []
+    r2 = r * r
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx*dx + dy*dy <= r2:
+                off.append((dx, dy))
+    return off
+
 # Deterministic RNG for stable sampling (prevents frame-to-frame flicker)
 _RNG = np.random.default_rng(42)
 # ---------------- main ----------------
@@ -380,9 +397,18 @@ def pose_to_extrinsic(x, y, z, yaw, pitch, roll):
     return Rt, R_world_to_cam, cam_pos_cv
 
 
+
 def K_from_fov(W, H, fov_x_deg):
     fx = (W / 2.0) / math.tan(math.radians(fov_x_deg * 0.5))
     fy = fx
+    cx, cy = W / 2.0, H / 2.0
+    return np.array([[fx, 0, cx],
+                     [0, fy, cy],
+                     [0,  0,  1]], dtype=np.float64)
+
+def K_from_fov_hv(W, H, fov_x_deg, fov_y_deg):
+    fx = (W / 2.0) / math.tan(math.radians(fov_x_deg * 0.5))
+    fy = (H / 2.0) / math.tan(math.radians(fov_y_deg * 0.5))
     cx, cy = W / 2.0, H / 2.0
     return np.array([[fx, 0, cx],
                      [0, fy, cy],
@@ -556,10 +582,21 @@ def project_visible_points(pts_world, img_bgr, K, Rt, z_near=0.05, z_far=200.0, 
     depth = np.full((H, W), np.inf)
     pidx = np.full((H, W), -1, np.int32)
 
-    for uu, vv, zz, wi in zip(u, v, Z, idx):
-        if zz < depth[vv, uu]:
-            depth[vv, uu] = zz
-            pidx[vv, uu] = wi
+    if int(splat) <= 1:
+        for uu, vv, zz, wi in zip(u, v, Z, idx):
+            if zz < depth[vv, uu]:
+                depth[vv, uu] = zz
+                pidx[vv, uu] = wi
+    else:
+        offsets = _disk_offsets(int(splat))
+        for uu, vv, zz, wi in zip(u, v, Z, idx):
+            for dx, dy in offsets:
+                xx = uu + dx
+                yy = vv + dy
+                if 0 <= xx < W and 0 <= yy < H:
+                    if zz < depth[yy, xx]:
+                        depth[yy, xx] = zz
+                        pidx[yy, xx] = wi
 
     hit_mask = pidx >= 0
     ys, xs = np.nonzero(hit_mask)
@@ -576,6 +613,90 @@ def project_visible_points(pts_world, img_bgr, K, Rt, z_near=0.05, z_far=200.0, 
     pts_final = pts_world[uniq_idx]
     cols_final = color_accum
     return pts_final, cols_final
+
+
+# ---- Added: Per-pixel XYZ map/z-buffer helper ----
+def project_visible_points_with_maps(pts_world, img_bgr, K, Rt, z_near=0.05, z_far=200.0, splat=1):
+    """
+    Same as project_visible_points, but also returns dense per-pixel maps (and honors `splat` as a disk radius for pixel fill):
+      - Xmap, Ymap, Zmap in WORLD frame of pts_world (same frame as pts_world)
+      - hit_mask (H,W) where True means a 3D point was visible at that pixel
+    Non-hit pixels in the maps are set to NaN.
+    """
+    H, W = img_bgr.shape[:2]
+    R = Rt[:, :3]
+    t = Rt[:, 3:4]
+    Xc = (R @ pts_world.T) + t
+    Z = Xc[2, :]
+    valid = (Z > z_near) & (Z < z_far)
+    if not np.any(valid):
+        return np.empty((0,3)), np.empty((0,3)), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.zeros((H, W), dtype=bool)
+    Xc = Xc[:, valid]
+    if Xc.shape[1] == 0:
+        return np.empty((0,3)), np.empty((0,3)), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.zeros((H, W), dtype=bool)
+
+    uv_h = K @ Xc
+    w = uv_h[2, :]
+    finite = np.isfinite(uv_h).all(axis=0) & np.isfinite(w)
+    if not np.any(finite):
+        return np.empty((0,3)), np.empty((0,3)), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.zeros((H, W), dtype=bool)
+    uv_h = uv_h[:, finite]
+    Xc = Xc[:, finite]
+    w = uv_h[2, :]
+
+    u = (uv_h[0, :] / w).astype(np.int32)
+    v = (uv_h[1, :] / w).astype(np.int32)
+
+    inside = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    u, v = u[inside], v[inside]
+    Z, idx = Z[valid][finite][inside], np.nonzero(valid)[0][finite][inside]
+
+    depth = np.full((H, W), np.inf)
+    pidx = np.full((H, W), -1, np.int32)
+
+    # z-buffer resolve with optional splat (disk) fill
+    if int(splat) <= 1:
+        for uu, vv, zz, wi in zip(u, v, Z, idx):
+            if zz < depth[vv, uu]:
+                depth[vv, uu] = zz
+                pidx[vv, uu] = wi
+    else:
+        offsets = _disk_offsets(int(splat))
+        for uu, vv, zz, wi in zip(u, v, Z, idx):
+            for dx, dy in offsets:
+                xx = uu + dx
+                yy = vv + dy
+                if 0 <= xx < W and 0 <= yy < H:
+                    if zz < depth[yy, xx]:
+                        depth[yy, xx] = zz
+                        pidx[yy, xx] = wi
+
+    hit_mask = pidx >= 0
+    ys, xs = np.nonzero(hit_mask)
+    if ys.size == 0:
+        return np.empty((0,3)), np.empty((0,3)), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.full((H, W), np.nan, dtype=np.float32), np.zeros((H, W), dtype=bool)
+
+    hit_indices = pidx[ys, xs]
+    colors = img_bgr[ys, xs][:, ::-1] / 255.0  # BGR→RGB
+
+    # Average colors if multiple pixels hit the same 3D point
+    uniq_idx, inv, counts = np.unique(hit_indices, return_inverse=True, return_counts=True)
+    color_accum = np.zeros((len(uniq_idx), 3), dtype=np.float64)
+    np.add.at(color_accum, inv, colors)
+    color_accum /= counts[:, None]
+    pts_final = pts_world[uniq_idx]
+    cols_final = color_accum.astype(np.float64)
+
+    # Build dense XYZ maps (WORLD frame same as pts_world)
+    Xmap = np.full((H, W), np.nan, dtype=np.float32)
+    Ymap = np.full((H, W), np.nan, dtype=np.float32)
+    Zmap = np.full((H, W), np.nan, dtype=np.float32)
+    # For pixels, use their selected winning point coords
+    Xmap[ys, xs] = pts_world[hit_indices, 0].astype(np.float32)
+    Ymap[ys, xs] = pts_world[hit_indices, 1].astype(np.float32)
+    Zmap[ys, xs] = pts_world[hit_indices, 2].astype(np.float32)
+
+    return pts_final, cols_final, Xmap, Ymap, Zmap, hit_mask
 
 
 # ---------------- I/O ----------------
@@ -604,9 +725,10 @@ def main():
     ap.add_argument("--pos", type=str, required=True, help="x,y,z (m)")
     ap.add_argument("--rot", type=str, required=True, help="yaw,pitch,roll (deg)")
     ap.add_argument("--fov", type=float, required=True)
+    ap.add_argument("--fov-y", type=float, default=None, help="(optional) vertical field of view in degrees; if set, use both HFOV/VFOV")
     ap.add_argument("--z-near", type=float, default=0.05)
     ap.add_argument("--z-far", type=float, default=300.0)
-    ap.add_argument("--splat", type=int, default=1)
+    ap.add_argument("--splat", type=int, default=3)
     ap.add_argument("--strict-carla", action="store_true",
                     help="Interpret --pos/--rot strictly as CARLA world pose (default). Matches compute_H_img_to_ground mapping.")
     ap.add_argument("--debug-pos", action="store_true",
@@ -629,7 +751,7 @@ def main():
                     help="Position step (meters) for interactive mode. Default: 0.20")
     ap.add_argument("--step-ang", type=float, default=1.0,
                     help="Angle step (degrees) for interactive mode. Default: 1.0")
-    ap.add_argument("--subsample", type=int, default=150000,
+    ap.add_argument("--subsample", type=int, default=1000000,
                     help="Max points to use for live preview (random subsample, lower = smoother UI). Use all points when saving with Enter.")
     ap.add_argument("--live-save-dir", type=str, default=None,
                     help="If set, pressing Enter saves PLY/coverage PNG/JSON here with a timestamped filename.")
@@ -669,7 +791,10 @@ def main():
         raise FileNotFoundError(args.image)
     H, W = img.shape[:2]
 
-    K = K_from_fov(W, H, args.fov)
+    if args.fov_y is not None:
+        K = K_from_fov_hv(W, H, args.fov, args.fov_y)
+    else:
+        K = K_from_fov(W, H, args.fov)
     x,y,z = [float(v) for v in args.pos.split(",")]
     yaw,pitch,roll = [float(v) for v in args.rot.split(",")]
 
@@ -817,22 +942,42 @@ def main():
 
                 # Save current precise result (full-resolution projection, not subsampled)
                 if key == 13:  # Enter
+                    from pathlib import Path
+                    # 1) Decide save directory
                     save_dir = args.live_save_dir if args.live_save_dir else os.path.dirname(args.out)
                     os.makedirs(save_dir, exist_ok=True)
-                    stamp = timestamp_str()
-                    out_base = os.path.join(save_dir, f"visible_{stamp}.ply")
 
+                    # 2) Build base stem from --out (e.g., ./out_visible/visible_cam9.ply → visible_cam9)
+                    base_stem = Path(args.out).stem if args.out else "visible"
+
+                    # 3) Compose filename that embeds current pose & FOV
+                    #    Example: visible_cam9_x0.00_y0.00_z10.00_yaw55.00_pit-35.00_rol0.00_f88.80.ply
+                    fname_stem = (
+                        f"{base_stem}"
+                        f"_x{float(x):.2f}_y{float(y):.2f}_z{float(z):.2f}"
+                        f"_yaw{float(yaw):.2f}_pit{float(pitch):.2f}_rol{float(roll):.2f}"
+                        f"_f{float(fov):.2f}"
+                    )
+                    ply_path = os.path.join(save_dir, f"{fname_stem}.ply")
+                    png_path = os.path.join(save_dir, f"{fname_stem}_coverage.png")
+
+                    # 4) Full-resolution visible points with the current intrinsics (respect fov_y if provided)
                     Rt_full, R_wc_full, _ = pose_to_extrinsic(x, y, z, yaw, pitch, roll)
+                    if args.fov_y is not None:
+                        K_full = K_from_fov_hv(W, H, fov, args.fov_y)
+                    else:
+                        K_full = K_from_fov(W, H, fov)
                     pts_vis_full, cols_vis_full = project_visible_points(
-                        pts, img, K_from_fov(W, H, fov), Rt_full, args.z_near, args.z_far, args.splat
+                        pts, img, K_full, Rt_full, args.z_near, args.z_far, args.splat
                     )
 
+                    # 5) Frame transform selection for saving
                     T_CV_TO_CARLA = np.linalg.inv(_T_CARLA_WORLD_TO_CV_WORLD)
                     pts_out = pts_vis_full
-                    save_frame = args.save_frame
-                    if save_frame == "carla":
+                    if args.save_frame == "carla":
                         pts_out = (pts_out @ T_CV_TO_CARLA.T)
-                    # Guard against NaN/Inf before saving
+
+                    # 6) NaN/Inf guard and save PLY
                     if pts_out is None or len(pts_out) == 0:
                         print("[WARN] No points to save (pts_out empty). Skipping PLY save.")
                     else:
@@ -843,14 +988,77 @@ def main():
                         elif cols_vis_full is not None and len(cols_vis_full) != len(pts_out):
                             # fallback if lengths mismatch
                             cols_vis_full = np.ones((len(pts_out), 3), dtype=np.float64)
-                        save_ply(pts_out, cols_vis_full, out_base)
+                        save_ply(pts_out, cols_vis_full, ply_path)
 
-                    bev_png = os.path.splitext(out_base)[0] + "_coverage.png"
-                    bev_img = make_bev_preview(pts, cols, pts_vis_full, cols_vis_full, bev_w=1600, bev_h=780, pad=15,
-                                               cam_alpha=worker.cam_alpha, global_gain=worker.global_gain)
-                    cv2.imwrite(bev_png, bev_img)
-                    print(f"[SAVE] PLY: {out_base}")
-                    print(f"[SAVE] PNG: {bev_png}")
+                    # 7) Save coverage PNG with current overlay settings
+                    bev_img = make_bev_preview(
+                        pts, cols, pts_vis_full, cols_vis_full,
+                        bev_w=1600, bev_h=780, pad=15,
+                        cam_alpha=worker.cam_alpha, global_gain=worker.global_gain
+                    )
+                    cv2.imwrite(png_path, bev_img)
+
+                    print(f"[SAVE] PLY: {ply_path}")
+                    print(f"[SAVE] PNG: {png_path}")
+                    # 8) Also save per-pixel Pixel→World LUT NPZ (same schema as CARLA script)
+                    # --- For NPZ: always save CARLA-frame world coordinates (to match multi-cam script) ---
+                    pts_vis_map, cols_vis_map, Xmap_cv, Ymap_cv, Zmap_cv, hit_mask = project_visible_points_with_maps(
+                        pts, img, K_full, Rt_full, args.z_near, args.z_far, args.splat
+                    )
+                    Xmap_out = Xmap_cv.copy()
+                    Ymap_out = Ymap_cv.copy()
+                    Zmap_out = Zmap_cv.copy()
+                    T_CV_TO_CARLA = np.linalg.inv(_T_CARLA_WORLD_TO_CV_WORLD)
+
+                    valid_pix = hit_mask
+                    if np.any(valid_pix):
+                        flat_cv = np.stack([Xmap_cv[valid_pix], Ymap_cv[valid_pix], Zmap_cv[valid_pix]], axis=1).astype(np.float64)
+                        flat_car = (flat_cv @ T_CV_TO_CARLA.T)
+                        Xmap_out[valid_pix] = flat_car[:, 0].astype(np.float32)
+                        Ymap_out[valid_pix] = flat_car[:, 1].astype(np.float32)
+                        Zmap_out[valid_pix] = flat_car[:, 2].astype(np.float32)
+
+                    # Fill non-hit pixels with 0.0 to avoid NaNs (multi-cam NPZs are dense float arrays)
+                    inv_pix = ~valid_pix
+                    if np.any(inv_pix):
+                        Xmap_out[inv_pix] = 0.0
+                        Ymap_out[inv_pix] = 0.0
+                        Zmap_out[inv_pix] = 0.0
+
+                    # Build auxiliary fields (match multi-cam: valid_mask, floor_mask, ground_valid_mask, floor_ids)
+                    valid_mask = hit_mask.astype(np.uint8)
+                    floor_mask = np.zeros_like(valid_mask, dtype=np.uint8)          # no semantics here; zeros like multi-cam when IDs absent
+                    ground_valid_mask = valid_mask.copy()
+                    floor_ids_arr = np.array([7, 10], dtype=np.int32)               # match multi-cam default
+
+                    # Intrinsics / pose (match multi-cam: cam_pose ordering [x,y,z,pitch,yaw,roll])
+                    K_save = K_full.astype(np.float32)
+                    cam_pose = np.array([x, y, z, pitch, yaw, roll], dtype=np.float32)
+
+                    # Build CARLA-frame camera-to-world 4x4 (matches CARLA Transform matrix)
+                    R_carla = rot_from_yaw_pitch_roll(yaw, pitch, roll)  # CARLA/UE convention
+                    M_c2w_carla = np.eye(4, dtype=np.float64)
+                    M_c2w_carla[:3, :3] = R_carla
+                    M_c2w_carla[:3, 3]  = np.array([x, y, z], dtype=np.float64)
+
+                    npz_path = os.path.join(save_dir, f"{fname_stem}_pixel2world_lut.npz")
+                    np.savez_compressed(
+                        npz_path,
+                        X=Xmap_out.astype(np.float32),
+                        Y=Ymap_out.astype(np.float32),
+                        Z=Zmap_out.astype(np.float32),
+                        valid_mask=valid_mask.astype(np.uint8),
+                        floor_mask=floor_mask.astype(np.uint8),
+                        ground_valid_mask=ground_valid_mask.astype(np.uint8),
+                        K=K_full.astype(np.float32),
+                        cam_pose=cam_pose.astype(np.float32),                            # [x,y,z,pitch,yaw,roll]
+                        width=np.int32(W), height=np.int32(H), fov=np.float32(fov),
+                        ray_model=np.array('forward', dtype='U'),                        # fixed to match multi-cam default
+                        sem_channel=np.array('auto', dtype='U'),                         # fixed to match multi-cam default
+                        floor_ids=floor_ids_arr.astype(np.int32),
+                        M_c2w=M_c2w_carla.astype(np.float64)
+                    )
+                    print(f"[SAVE] NPZ: {npz_path}")
         finally:
             worker.stop()
 
@@ -946,7 +1154,7 @@ if __name__ == "__main__":
     main()
 
 """
-python3.10 img_to_ply_with_global_ply.py \
+python img_to_ply_with_global_ply.py \
   --ply ./global_fused.ply \
   --image ./multi_out_1/cam_cam9/semantic_color.png \
   --out ./out_visible/visible_cam9.ply \

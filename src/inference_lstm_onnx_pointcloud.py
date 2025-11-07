@@ -880,12 +880,12 @@ def main():
                     help="Clamp |pitch| to this maximum (deg)")
 
     # --- sanity filters for 3D dims ---
-    ap.add_argument("--min-length", type=float, default=2.0)
-    ap.add_argument("--max-length", type=float, default=6.0)
-    ap.add_argument("--min-width",  type=float, default=2.0)
-    ap.add_argument("--max-width",  type=float, default=6.0)
-    ap.add_argument("--min-lw-ratio", type=float, default=0.8)
-    ap.add_argument("--max-lw-ratio", type=float, default=4.5)
+    ap.add_argument("--min-length", type=float, default=0.0)
+    ap.add_argument("--max-length", type=float, default=100.0)
+    ap.add_argument("--min-width",  type=float, default=0.0)
+    ap.add_argument("--max-width",  type=float, default=100.0)
+    ap.add_argument("--min-lw-ratio", type=float, default=0.01)
+    ap.add_argument("--max-lw-ratio", type=float, default=100)
 
     # onnxruntime providers
     ap.add_argument("--no-cuda", action="store_true", help="CUDA EP 비활성화")
