@@ -1,20 +1,21 @@
-from AIRKON.realtime.v1.realtime_edge import IPCameraStreamerUltraLL as Streamer
-from AIRKON.realtime.v1.batch_infer import BatchedTemporalRunner
-from AIRKON.src.inference_lstm_onnx_pointcloud import (
+from realtime.v1.realtime_edge import IPCameraStreamerUltraLL as Streamer
+from realtime.v1.batch_infer import BatchedTemporalRunner
+from src.inference_lstm_onnx_pointcloud import (
     decode_predictions,       
     tiny_filter_on_dets,       
     tris_img_to_bev_by_lut, 
     poly_from_tri,
     compute_bev_properties
 )
-from AIRKON.pointcloud.overlay_obj_on_ply import _flip_y_T
+from pointcloud.overlay_obj_on_ply import _flip_y_T
 from pathlib import Path
-import argparse, signal, time, threading, math
+from dataclasses import dataclass
+import argparse, signal, time, threading, math, io
 import onnxruntime as ort
 import numpy as np
 import cv2
 import queue
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 import socket, json
 import os
 from contextlib import contextmanager
@@ -116,7 +117,6 @@ class PerCam3DViewer:
 
         # 폴링 스레드
         self._stop = False
-        import threading, time
         def _pump():
             while not self._stop:
                 with self.lock:
@@ -200,46 +200,231 @@ class PerCam3DViewer:
                              height_scale=self.height_scale)
                 self._apply_slot(self.meshes[i], T, reset=True)
 
-# ---
-def load_LUT_for_cam(calib_dir: str, cam_id: int) -> Optional[dict]:
-    """
-    calib_dir 안에서 cam{cam_id} 관련 LUT npz 찾기.
-    - 우선순위: cam{cid}_*.npz > {cid}_*.npz > cam{cid}.npz > {cid}.npz
-    - np.load 후 dict(...)로 감싸서 반환
-    - 필수 키: 'X','Y','Z' (선택: 'ground_valid_mask' 등)
-    """
-    if not calib_dir:
+# ---- Camera assets / helpers ----------------------------------------------
+@dataclass
+class CameraAssets:
+    camera_id: int
+    name: str
+    lut: Optional[dict]
+    lut_path: Optional[str]
+    undistort_map: Optional[Tuple[np.ndarray, np.ndarray]]
+    visible_cloud: Optional[np.ndarray]
+    raw_config: Dict
+
+
+def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
+    if lut is None:
         return None
-    cands = []
+    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+        if key in lut:
+            mask = np.asarray(lut[key]).astype(bool)
+            if mask.shape == lut["X"].shape:
+                return mask
+    x = np.asarray(lut["X"])
+    y = np.asarray(lut["Y"])
+    z = np.asarray(lut["Z"])
+    return np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+
+
+def _build_visible_cloud(lut: Optional[dict]) -> Optional[np.ndarray]:
+    if lut is None:
+        return None
+    mask = _lut_mask(lut)
+    if mask is None:
+        return None
+    X = np.asarray(lut["X"], dtype=np.float32)
+    Y = np.asarray(lut["Y"], dtype=np.float32)
+    Z = np.asarray(lut["Z"], dtype=np.float32)
+    xyz = np.stack([X[mask], Y[mask], Z[mask]], axis=1)
+    if xyz.size == 0:
+        return None
+    return xyz.astype(np.float32)
+
+
+def draw_detections(image: Optional[np.ndarray], dets, text_scale: float = 0.6):
+    if image is None:
+        return None
+    vis = image.copy()
+    for d in dets or []:
+        tri = np.asarray(d.get("tri"), dtype=np.int32)
+        if tri.shape != (3, 2):
+            continue
+        poly4 = poly_from_tri(tri).astype(np.int32)
+        cv2.polylines(vis, [poly4], isClosed=True, color=(0, 255, 0), thickness=2)
+        s = f"{d.get('score', 0.0):.2f}"
+        p0 = (int(tri[0, 0]), int(tri[0, 1]))
+        cv2.putText(vis, s, p0, cv2.FONT_HERSHEY_SIMPLEX, text_scale, (0, 255, 255), 2, cv2.LINE_AA)
+    return vis
+
+
+def _lut_candidates(calib_dir: Optional[str], cam_id: int) -> List[Path]:
+    if not calib_dir:
+        return []
+    root = Path(calib_dir)
+    if not root.exists():
+        return []
     stems = [f"cam{cam_id}", f"{cam_id}"]
+    cands: List[Path] = []
     for stem in stems:
-        cands += [f for f in Path(calib_dir).glob(f"{stem}_*.npz")]
-        cands += [f for f in Path(calib_dir).glob(f"{stem}.npz")]
-    for p in cands:
-        try:
-            lut = dict(np.load(str(p)))
-            # 최소 키 체크
-            if all(k in lut for k in ("X","Y","Z")):
-                print(f"[EdgeInfer] cam{cam_id}: Using LUT {p.name}")
-                return lut
-        except Exception:
-            pass
-    print(f"[EdgeInfer] WARN: cam{cam_id} LUT not found in {calib_dir}")
+        cands += sorted(root.glob(f"{stem}_*.npz"))
+        cands += sorted(root.glob(f"{stem}.npz"))
+    return cands
+
+
+def load_lut(explicit_path: Optional[str], calib_dir: Optional[str], cam_id: int) -> Tuple[Optional[dict], Optional[str]]:
+    path = None
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.is_file():
+            path = p
+    if path is None:
+        cands = _lut_candidates(calib_dir, cam_id)
+        path = cands[0] if cands else None
+    if path is None:
+        print(f"[EdgeInfer] WARN: cam{cam_id} LUT not found")
+        return None, None
+    try:
+        lut = dict(np.load(str(path), allow_pickle=False))
+        if not all(k in lut for k in ("X", "Y", "Z")):
+            raise ValueError("Missing XYZ keys")
+        print(f"[EdgeInfer] cam{cam_id}: Using LUT {path}")
+        return lut, str(path)
+    except Exception as exc:
+        print(f"[EdgeInfer] WARN: cam{cam_id} failed to load LUT {path}: {exc}")
+        return None, str(path)
+
+
+def _pick_matrix(data: dict, keys: List[str]) -> Optional[np.ndarray]:
+    for k in keys:
+        if k in data:
+            arr = np.asarray(data[k])
+            if arr.size:
+                return arr
     return None
 
+
+def load_undistort_map(desc, frame_hw: Tuple[int, int]) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    if not desc:
+        return None
+    data = None
+    if isinstance(desc, (str, Path)):
+        path = Path(desc)
+        if not path.exists():
+            print(f"[EdgeInfer] WARN: undistort file missing → {path}")
+            return None
+        try:
+            data = dict(np.load(str(path), allow_pickle=False))
+        except Exception as exc:
+            print(f"[EdgeInfer] WARN: failed to load undistort npz {path}: {exc}")
+            return None
+    elif isinstance(desc, dict):
+        data = desc
+    else:
+        return None
+
+    K = _pick_matrix(data, ["K", "camera_matrix", "intrinsic", "intrinsics"])
+    dist = _pick_matrix(data, ["dist", "distCoeffs", "dist_coeffs", "distortion", "D"])
+    if K is None or dist is None:
+        print("[EdgeInfer] WARN: undistort config missing K/dist")
+        return None
+    K = K.astype(np.float32).reshape(3, 3)
+    dist = dist.astype(np.float32).ravel()
+    newK = _pick_matrix(data, ["new_K", "K_new", "rectified_K"])
+    if newK is not None:
+        newK = newK.astype(np.float32).reshape(3, 3)
+    else:
+        newK = K
+
+    height, width = frame_hw
+    if "size" in data:
+        size = data["size"]
+        if isinstance(size, (list, tuple)) and len(size) >= 2:
+            width = int(size[0])
+            height = int(size[1])
+        elif isinstance(size, dict):
+            width = int(size.get("width", width))
+            height = int(size.get("height", height))
+    map1, map2 = cv2.initUndistortRectifyMap(
+        K, dist, None, newK, (int(width), int(height)), cv2.CV_32FC1
+    )
+    return map1, map2
+
+
+def load_camera_config_file(path: str, default_hw: Tuple[int, int]) -> List[Dict]:
+    cfg_path = Path(path)
+    raw = json.loads(cfg_path.read_text())
+    entries = raw.get("cameras") if isinstance(raw, dict) and "cameras" in raw else raw
+    if not isinstance(entries, list):
+        raise ValueError("camera_config must be a list or contain 'cameras'")
+    result = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("camera_id", item.get("id"))
+        if cid is None:
+            raise ValueError("camera entry missing camera_id")
+        cid = int(cid)
+        rtsp = item.get("rtsp", {})
+        ip = item.get("ip", rtsp.get("ip"))
+        if not ip:
+            raise ValueError(f"camera {cid} missing IP")
+        port = int(item.get("port", rtsp.get("port", 554)))
+        username = item.get("username", rtsp.get("username", "admin"))
+        password = item.get("password", rtsp.get("password", ""))
+        w = int(item.get("width", default_hw[1]))
+        h = int(item.get("height", default_hw[0]))
+        lut_rel = item.get("lut")
+        undist_rel = item.get("undistort") or item.get("undistort_npz")
+        cfg = {
+            "ip": ip,
+            "port": port,
+            "username": username,
+            "password": password,
+            "camera_id": cid,
+            "width": w,
+            "height": h,
+            "force_tcp": bool(item.get("force_tcp", False) or (rtsp.get("transport") == "tcp")),
+            "lut_path": str((cfg_path.parent / lut_rel).resolve()) if lut_rel else None,
+            "undistort_path": str((cfg_path.parent / undist_rel).resolve()) if undist_rel else None,
+            "name": item.get("name") or item.get("label") or f"cam{cid}",
+            "group": item.get("group"),
+        }
+        result.append(cfg)
+    return result
+
+
+def build_camera_assets(camera_cfgs: List[Dict], lut_root: Optional[str]) -> Dict[int, CameraAssets]:
+    assets: Dict[int, CameraAssets] = {}
+    for cfg in camera_cfgs:
+        cid = int(cfg["camera_id"])
+        lut, lut_path = load_lut(cfg.get("lut_path"), lut_root, cid)
+        undist = load_undistort_map(cfg.get("undistort_path"), (cfg["height"], cfg["width"]))
+        assets[cid] = CameraAssets(
+            camera_id=cid,
+            name=cfg.get("name", f"cam{cid}"),
+            lut=lut,
+            lut_path=lut_path,
+            undistort_map=undist,
+            visible_cloud=_build_visible_cloud(lut),
+            raw_config=cfg,
+        )
+    return assets
+
+# ---
 class InferWorker(threading.Thread):
     """
     - Streamer에서 최신 프레임을 모아 배치 추론
     - UDP 전송(옵션)
     - GUI 큐에 (cam_id, resized_bgr, dets) 전달
     """
-    def __init__(self, *, streamer, cam_ids, img_hw, strides, onnx_path,
+    def __init__(self, *, streamer, camera_assets: Dict[int, CameraAssets], img_hw, strides, onnx_path,
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
-                 calib_dir=None, bev_scale=1.0, providers=None, viewer3d_map=None,
-                 gui_queue=None, udp_sender=None):
+                 bev_scale=1.0, providers=None, viewer3d_map=None,
+                 gui_queue=None, udp_sender=None, web_publisher=None):
         super().__init__(daemon=True)
         self.streamer = streamer
-        self.cam_ids = list(cam_ids)
+        self.camera_assets = camera_assets
+        self.cam_ids = sorted(camera_assets.keys())
         self.H, self.W = img_hw
         self.strides = list(map(float, strides))
         self.score_mode = score_mode
@@ -249,10 +434,10 @@ class InferWorker(threading.Thread):
         self.viewer3d_map = viewer3d_map or {}   # {cam_id: PerCam3DViewer}
         self.gui_queue = gui_queue
         self.udp_sender = udp_sender
+        self.web_publisher = web_publisher
         self.stop_evt = threading.Event()
         self.bev_scale = float(bev_scale)
-        # 호모그래피대신 LUT
-        self.LUT_cache: Dict[int, Optional[dict]] = {cid: load_LUT_for_cam(calib_dir, cid) for cid in self.cam_ids}
+        self.LUT_cache: Dict[int, Optional[dict]] = {cid: camera_assets[cid].lut for cid in self.cam_ids}
 
         if providers is None:
             providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
@@ -267,13 +452,18 @@ class InferWorker(threading.Thread):
             state_stride_hint=32,
             default_hidden_ch=256,
         )
-        
         for cid in self.cam_ids:
-            if self.H_cache[cid] is None:
-                    print(f"[EdgeInfer] WARN: cam{cid} H not found in {calib_dir}") 
+            if self.LUT_cache[cid] is None:
+                print(f"[EdgeInfer] WARN: cam{cid} has no LUT – BEV/3D disabled")
+        self.undist_timer = StageTimer(name="UND", print_every=5.0)
 
-    def _preprocess(self, frame_bgr):
+    def _preprocess(self, cam_id: int, frame_bgr):
         """BGR → (H,W) 리사이즈 → RGB CHW float32[0,1] + 리사이즈 BGR(시각화용)"""
+        assets = self.camera_assets.get(cam_id)
+        if assets and assets.undistort_map is not None:
+            map1, map2 = assets.undistort_map
+            with self.undist_timer.span(f"cam{cam_id}"): # 아 왜곡 지연 로그가 안 찍힘 
+                frame_bgr = cv2.remap(frame_bgr, map1, map2, interpolation=cv2.INTER_LINEAR)
         if frame_bgr.shape[:2] != (self.H, self.W):
             bgr = cv2.resize(frame_bgr, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
         else:
@@ -356,7 +546,7 @@ class InferWorker(threading.Thread):
                         break
                     with wrk.span("preproc"):
                         fr, ts_capture = fr
-                        chw, bgr = self._preprocess(fr)
+                        chw, bgr = self._preprocess(cid, fr)
                     imgs_chw[cid] = chw
                     bgr_for_gui[cid] = bgr
 
@@ -387,6 +577,7 @@ class InferWorker(threading.Thread):
 
                 with wrk.span("bev"):
                     bev = self._make_bev(dets, self.LUT_cache.get(cid)) 
+                overlay_frame = draw_detections(bgr_for_gui[cid], dets)
                 
                 # 3D 시각화 업데이트
                 try:
@@ -396,26 +587,40 @@ class InferWorker(threading.Thread):
                 except Exception as e:
                     print(f"[3D] update error cam{cid}: {e}")
 
+                if self.web_publisher is not None:
+                    try:
+                        self.web_publisher.update(
+                            cam_id=cid,
+                            ts=ts,
+                            capture_ts=ts_capture,
+                            bev_dets=bev,
+                            overlay_bgr=overlay_frame,
+                        )
+                    except Exception as e:
+                        print(f"[WEB] publish error cam{cid}: {e}")
+
                 if self.udp_sender is not None:
                     with wrk.span("udp"):
                         try:
-                            self.udp_sender.send(cam_id=cid, ts=ts, bev_dets=bev)
-                            print(bev)
+                            self.udp_sender.send(cam_id=cid, ts=ts, bev_dets=bev, capture_ts=ts_capture)
                         except Exception as e:
                             print(f"[UDP] send error cam{cid}: {e}")
 
                 # GUI 큐로 전달(여기서 큐 대기/드롭이 발생할 수 있음)
-                with wrk.span("gui.put"):
-                    try:
-                        self.gui_queue.put_nowait((cid, bgr_for_gui[cid], dets, ts_capture))
-                    except queue.Full:
+                if self.gui_queue is not None:
+                    with wrk.span("gui.put"):
                         try:
-                            _ = self.gui_queue.get_nowait()
-                            self.gui_queue.put_nowait((cid, bgr_for_gui[cid], dets))
-                        except Exception:
-                            pass
+                            self.gui_queue.put_nowait((cid, overlay_frame, dets, ts_capture))
+                        except queue.Full:
+                            try:
+                                _ = self.gui_queue.get_nowait()
+                                self.gui_queue.put_nowait((cid, overlay_frame, dets, ts_capture))
+                            except Exception:
+                                pass
 
             wrk.bump()
+            if self.undist_timer:
+                self.undist_timer.bump()
 
     def stop(self):
         self.stop_evt.set()
@@ -437,7 +642,7 @@ class UDPSender:
         try: self.sock.close()
         except: pass
 
-    def _pack_json(self, cam_id: int, ts: float, bev_dets):
+    def _pack_json(self, cam_id: int, ts: float, bev_dets, capture_ts: Optional[float]):
         """
         bev_dets 항목 예시(필요 최소 필드만): 
         [{"center":[x,y],"length":L,"width":W,"yaw":deg,"score":s}, ...]
@@ -446,6 +651,7 @@ class UDPSender:
             "type": "bev_labels",
             "camera_id": cam_id,
             "timestamp": ts,
+            "capture_ts": capture_ts,
             "items": [
                 {
                     "center": [float(d["center"][0]), float(d["center"][1])],
@@ -461,14 +667,14 @@ class UDPSender:
         }
         return json.dumps(msg, ensure_ascii=False).encode("utf-8")
 
-    def send(self, cam_id: int, ts: float, bev_dets=None):
+    def send(self, cam_id: int, ts: float, bev_dets=None, capture_ts: Optional[float] = None):
         """
         fmt='json'이면 파싱된 bev_dets를 JSON으로,
         fmt='text'면 bev_labels 텍스트 파일 내용을 그대로 보냄.
         큰 페이로드는 조각내서 순차 전송(간단한 분할 헤더 포함).
         """
         if self.fmt == "json":
-            payload = self._pack_json(cam_id, ts, bev_dets or [])
+            payload = self._pack_json(cam_id, ts, bev_dets or [], capture_ts)
         # else:
             # payload = self._pack_text(cam_id, ts, fname, bev_txt_path)
 
@@ -484,6 +690,208 @@ class UDPSender:
             # 1줄짜리 헤더: chunk_id,total,idx\n + part
             prefix = f"CHUNK {chunk_id} {total} {idx}\n".encode("utf-8")
             self.sock.sendto(prefix + part, self.addr)
+
+class EdgeWebBridge:
+    def __init__(self, *, host: str, port: int, global_ply: str, vehicle_glb: str,
+                 camera_assets: Dict[int, CameraAssets], site_name: str = "edge",
+                 jpeg_quality: int = 85, static_root: Optional[str] = None):
+        try:
+            from fastapi import FastAPI, HTTPException
+            from fastapi.middleware.cors import CORSMiddleware
+            from fastapi.responses import Response, FileResponse
+            from fastapi.staticfiles import StaticFiles
+            import uvicorn
+        except ImportError as exc:
+            raise RuntimeError("FastAPI + uvicorn required for --web-enable") from exc
+
+        self.FastAPI = FastAPI
+        self.HTTPException = HTTPException
+        self.Response = Response
+        self.FileResponse = FileResponse
+        self.uvicorn = uvicorn
+        self.host = host
+        self.port = int(port)
+        self.site_name = site_name
+        self.jpeg_quality = int(jpeg_quality)
+        self.global_ply = str(Path(global_ply).resolve())
+        self.vehicle_glb = str(Path(vehicle_glb).resolve())
+        self.camera_assets = camera_assets
+        self.started_at = time.time()
+        self._lock = threading.Lock()
+        self._latest: Dict[int, Dict] = {
+            cid: {"timestamp": None, "capture_ts": None, "detections": [], "overlay": None}
+            for cid in camera_assets.keys()
+        }
+        self._visible_bytes: Dict[int, Optional[bytes]] = {}
+        self._visible_arrays: Dict[int, Optional[np.ndarray]] = {}
+        self._visible_meta: Dict[int, Optional[dict]] = {}
+        for cid, asset in camera_assets.items():
+            if asset.visible_cloud is None:
+                self._visible_bytes[cid] = None
+                self._visible_arrays[cid] = None
+                self._visible_meta[cid] = None
+                continue
+            arr32 = np.asarray(asset.visible_cloud, dtype=np.float32)
+            buf = io.BytesIO()
+            np.savez_compressed(buf, xyz=arr32)
+            self._visible_bytes[cid] = buf.getvalue()
+            self._visible_arrays[cid] = arr32
+            self._visible_meta[cid] = {"count": int(arr32.shape[0])}
+        self.static_root = Path(static_root) if static_root else (Path(__file__).resolve().parent / "realtime_show_result" / "static")
+        self.index_html = None
+        self.app = self.FastAPI(title="Edge Web Bridge", version="0.1.0")
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        if self.static_root.exists():
+            self.index_html = self.static_root / "live.html"
+            self.app.mount("/static", StaticFiles(directory=str(self.static_root), html=True), name="static")
+        self._configure_routes()
+        self._server = None
+        self._thread = None
+
+    def _configure_routes(self):
+        @self.app.get("/")
+        def _root():
+            if self.index_html and self.index_html.exists():
+                return self.FileResponse(str(self.index_html))
+            return {"status": "ok", "message": "Edge Web Bridge"}
+
+        @self.app.get("/healthz")
+        def _health():
+            return {"ok": True, "since": self.started_at}
+
+        @self.app.get("/api/site")
+        def _site():
+            return {
+                "site": self.site_name,
+                "started_at": self.started_at,
+                "cameras": list(self.camera_assets.keys()),
+            }
+
+        @self.app.get("/api/cameras")
+        def _cameras():
+            return [
+                {
+                    "camera_id": cid,
+                    "name": asset.name,
+                    "lut": asset.lut_path,
+                    "resolution": [asset.raw_config.get("width"), asset.raw_config.get("height")],
+                }
+                for cid, asset in sorted(self.camera_assets.items())
+            ]
+
+        @self.app.get("/api/cameras/{camera_id}/detections")
+        def _detections(camera_id: int):
+            entry = self._latest.get(camera_id)
+            if entry is None:
+                raise self.HTTPException(status_code=404, detail="unknown camera id")
+            payload = {k: v for k, v in entry.items() if k != "overlay"}
+            return payload
+
+        @self.app.get("/api/cameras/{camera_id}/overlay.jpg")
+        def _overlay(camera_id: int):
+            entry = self._latest.get(camera_id)
+            if entry is None or entry.get("overlay") is None:
+                raise self.HTTPException(status_code=404, detail="overlay not ready")
+            return self.Response(content=entry["overlay"], media_type="image/jpeg")
+
+        @self.app.get("/api/cameras/{camera_id}/visible-cloud.npz")
+        def _visible(camera_id: int):
+            data = self._visible_bytes.get(camera_id)
+            if data is None:
+                raise self.HTTPException(status_code=404, detail="visible cloud missing")
+            return self.Response(content=data, media_type="application/octet-stream")
+
+        @self.app.get("/api/cameras/{camera_id}/visible-meta")
+        def _visible_meta(camera_id: int):
+            meta = self._visible_meta.get(camera_id)
+            if meta is None:
+                raise self.HTTPException(status_code=404, detail="visible cloud missing")
+            return meta
+
+        @self.app.get("/api/cameras/{camera_id}/visible.bin")
+        def _visible_bin(camera_id: int):
+            arr = self._visible_arrays.get(camera_id)
+            if arr is None:
+                raise self.HTTPException(status_code=404, detail="visible cloud missing")
+            return self.Response(
+                content=arr.tobytes(),
+                media_type="application/octet-stream",
+                headers={"X-Point-Count": str(arr.shape[0])},
+            )
+
+        @self.app.get("/assets/global.ply")
+        def _global():
+            if not os.path.exists(self.global_ply):
+                raise self.HTTPException(status_code=404, detail="global PLY missing")
+            return self.FileResponse(self.global_ply, filename="global.ply")
+
+        @self.app.get("/assets/vehicle.glb")
+        def _vehicle():
+            if not os.path.exists(self.vehicle_glb):
+                raise self.HTTPException(status_code=404, detail="vehicle mesh missing")
+            return self.FileResponse(self.vehicle_glb, filename="vehicle.glb")
+
+    def _serialize_bev(self, bev_dets):
+        items = []
+        for d in bev_dets or []:
+            center = d.get("center")
+            tri = d.get("tri")
+            front_edge = d.get("front_edge")
+            if hasattr(front_edge, "tolist"):
+                front_edge = front_edge.tolist()
+            items.append({
+                "center": [float(center[0]), float(center[1])] if center is not None else None,
+                "length": float(d.get("length", 0.0)),
+                "width": float(d.get("width", 0.0)),
+                "yaw": float(d.get("yaw", 0.0)),
+                "score": float(d.get("score", 0.0)),
+                "cz": float(d.get("cz", 0.0)),
+                "pitch": float(d.get("pitch", 0.0)),
+                "roll": float(d.get("roll", 0.0)),
+                "front_edge": front_edge,
+                "tri": tri.tolist() if hasattr(tri, "tolist") else tri,
+            })
+        return items
+
+    def update(self, cam_id: int, ts: float, capture_ts: float, bev_dets, overlay_bgr: Optional[np.ndarray]):
+        overlay_bytes = None
+        if overlay_bgr is not None:
+            ok, buf = cv2.imencode(".jpg", overlay_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
+            if ok:
+                overlay_bytes = buf.tobytes()
+        payload = {
+            "timestamp": ts,
+            "capture_ts": capture_ts,
+            "detections": self._serialize_bev(bev_dets),
+        }
+        with self._lock:
+            state = self._latest.setdefault(cam_id, {})
+            state.update(payload)
+            if overlay_bytes is not None:
+                state["overlay"] = overlay_bytes
+
+    def start(self):
+        if self._server is not None:
+            return
+        config = self.uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info", access_log=False)
+        self._server = self.uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        print(f"[WEB] serving http://{self.host}:{self.port}")
+
+    def stop(self):
+        if self._server is None:
+            return
+        self._server.should_exit = True
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        self._server = None
+        self._thread = None
 
 class FPSTicker:
     """
@@ -585,6 +993,8 @@ def main():
     ap.add_argument("--score-mode", default="obj*cls", choices=["obj","cls","obj*cls"])
     ap.add_argument("--bev-scale", default=1.0, type=float)
     ap.add_argument("--lut-path", default="./calib", type=str)
+    ap.add_argument("--lut-dir", dest="lut_path", type=str, help="Alias for --lut-path (directory with cam*.npz)")
+    ap.add_argument("--camera-config", type=str, help="JSON file describing RTSP/LUT/undistort per camera")
     ap.add_argument("--transport", default="tcp", choices=["tcp","udp"])
     ap.add_argument("--no-cuda", action="store_true")
     ap.add_argument("--udp-enable", action="store_true")
@@ -593,6 +1003,12 @@ def main():
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    # web bridge
+    ap.add_argument("--web-enable", action="store_true")
+    ap.add_argument("--web-host", default="0.0.0.0")
+    ap.add_argument("--web-port", type=int, default=18080)
+    ap.add_argument("--web-site-name", default="edge-site")
+    ap.add_argument("--web-jpeg-quality", type=int, default=85)
     # 3d
     ap.add_argument("--global-ply", type=str, default="pointcloud/global_fused_small.ply")
     ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
@@ -630,31 +1046,51 @@ def main():
     vis_H, vis_W = map(int, args.visual_size.split(","))
     Target_fps = args.target_fps
     
-    # 카메라에서 프레임 받아오기 
-    camera_configs = [
-        {
-            'ip': '192.168.0.3',
-            'port': 554,
-            'username': 'admin',
-            'password': 'zjsxmfhf',
-            'camera_id': 1,
-            'width': W,
-            'height': H,
-            'force_tcp': (args.transport == "tcp"),   # UDP 우선(저지연)
-        },
-        {
-            'ip': '192.168.0.2',
-            'port': 554,
-            'username': 'admin',
-            'password': 'zjsxmfhf',
-            'camera_id': 2,
-            'width': W,
-            'height': H,
-            'force_tcp': (args.transport == "tcp"),    # 이 카메라만 TCP 강제(손실/초록깨짐 방지)
-        },
-    ]
+    # 카메라 설정 불러오기
+    if args.camera_config:
+        try:
+            camera_configs = load_camera_config_file(args.camera_config, (H, W))
+        except Exception as exc:
+            raise SystemExit(f"[Main] failed to parse camera_config: {exc}")
+    else:
+        camera_configs = [
+            {
+                'ip': '192.168.0.210',
+                'port': 554,
+                'username': 'admin',
+                'password': 'zjsxmfhf',
+                'camera_id': 1,
+                'width': W,
+                'height': H,
+                'force_tcp': (args.transport == "tcp"),
+                "lut": "pointcloud/cloud_rgb_npz/cam1.npz",
+                "undistort": "realtime/disto/cam1.npz",
+                'name': 'cam1',
+            },
+            {
+                'ip': '192.168.0.2',
+                'port': 554,
+                'username': 'admin',
+                'password': 'zjsxmfhf',
+                'camera_id': 2,
+                'width': W,
+                'height': H,
+                'force_tcp': (args.transport == "tcp"),
+                "lut": "pointcloud/cloud_rgb_npz/cam2.npz",
+                "undistort": "realtime/disto/cam2.npz",
+                'name': 'cam2',
+            },
+        ]
+    if not camera_configs:
+        raise SystemExit("[Main] no cameras configured")
+
+    cam_cfg_map = {int(cfg["camera_id"]): cfg for cfg in camera_configs}
+    camera_assets = build_camera_assets(camera_configs, args.lut_path)
+    for cid, asset in camera_assets.items():
+        cfg = asset.raw_config
+        print(f"[Main] slot cam{cid} ({asset.name}): rtsp={cfg['ip']}:{cfg['port']} size={cfg['width']}x{cfg['height']} LUT={asset.lut_path}")
     
-    cam_ids  = sorted([cfg["camera_id"] for cfg in camera_configs])
+    cam_ids  = sorted(camera_assets.keys())
     shutdown_evt = threading.Event()
     
     streamer = Streamer(
@@ -679,11 +1115,12 @@ def main():
     # 3D 뷰어 준비(카메라별 한 개씩)
     viewer3d_map = {}
     if args.viewer3d:
-        for cfg in camera_configs:
-            cid = cfg["camera_id"]
+        for cid in cam_ids:
+            cfg = cam_cfg_map[cid]
+            asset = camera_assets.get(cid)
             try:
                 viewer3d_map[cid] = PerCam3DViewer(
-                    title=f"cam{cid} • 3D",
+                    title=f"{asset.name if asset else f'cam{cid}'} • 3D",
                     global_ply=args.global_ply,
                     vehicle_glb=args.vehicle_glb,
                     invert_ply_y=True,
@@ -701,15 +1138,43 @@ def main():
             except Exception as e:
                 print(f"[3D] cam{cid} viewer init failed: {e}")
 
+    web_bridge = None
+    if args.web_enable:
+        try:
+            web_bridge = EdgeWebBridge(
+                host=args.web_host,
+                port=args.web_port,
+                global_ply=args.global_ply,
+                vehicle_glb=args.vehicle_glb,
+                camera_assets=camera_assets,
+                site_name=args.web_site_name,
+                jpeg_quality=args.web_jpeg_quality,
+            )
+            web_bridge.start()
+        except Exception as e:
+            print(f"[WEB] disabled: {e}")
+            web_bridge = None
+
     # 시작
     streamer.start()
     # -------- GUI 큐 & 워커 --------
     gui_queue = queue.Queue(maxsize=128)
     worker = InferWorker(
-        streamer=streamer, cam_ids=cam_ids, img_hw=(H, W), strides=strides,
-        onnx_path=args.weights, score_mode=args.score_mode, conf=args.conf, nms_iou=args.nms_iou, topk=args.topk,
-        calib_dir=args.lut_path, bev_scale=args.bev_scale, providers=providers, viewer3d_map=viewer3d_map, 
-        gui_queue=gui_queue, udp_sender=udp_sender  
+        streamer=streamer,
+        camera_assets=camera_assets,
+        img_hw=(H, W),
+        strides=strides,
+        onnx_path=args.weights,
+        score_mode=args.score_mode,
+        conf=args.conf,
+        nms_iou=args.nms_iou,
+        topk=args.topk,
+        bev_scale=args.bev_scale,
+        providers=providers,
+        viewer3d_map=viewer3d_map,
+        gui_queue=gui_queue,
+        udp_sender=udp_sender,
+        web_publisher=web_bridge,
     )
     worker.start()
     # -------- 메인 스레드: 오직 GUI --------
@@ -744,8 +1209,6 @@ def main():
                 with gui_timer.span("gui.get"):
                     try:
                         cid, bgr, dets, ts_capture = gui_queue.get(timeout=0.005) 
-                    except ValueError:
-                        cid, bgr, dets = gui_queue.get(timeout=0.005) 
                     except queue.Empty:
                         if USE_GUI: cv2.waitKey(1)
                         if not ticker.tick():
@@ -760,15 +1223,11 @@ def main():
                     gui_timer.bump()
                     continue
 
-                with gui_timer.span("gui.draw"):
-                    vis = bgr.copy()
-                    for d in dets:
-                        tri = np.asarray(d["tri"], dtype=np.int32)
-                        poly4 = poly_from_tri(tri).astype(np.int32)
-                        cv2.polylines(vis, [poly4], isClosed=True, color=(0,255,0), thickness=2)
-                        s = f"{d.get('score', 0.0):.2f}"
-                        p0 = (int(tri[0,0]), int(tri[0,1]))
-                        cv2.putText(vis, s, p0, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2, cv2.LINE_AA)
+                vis = bgr
+                if vis is None:
+                    with gui_timer.span("gui.draw"):
+                        blank = np.zeros((H, W, 3), dtype=np.uint8)
+                        vis = draw_detections(blank, dets)
 
                 with gui_timer.span("gui.show"):
                     cv2.imshow(f"cam{cid}", vis)
@@ -783,6 +1242,8 @@ def main():
         worker.join(timeout=1)
         streamer.stop()
         if udp_sender: udp_sender.close()
+        if web_bridge:
+            web_bridge.stop()
         if USE_GUI:
             try: cv2.destroyAllWindows()
             except: pass

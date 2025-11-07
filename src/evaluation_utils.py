@@ -7,7 +7,7 @@ import torch
 import torchvision.ops as tvops  # GPU NMS
 import torchvision
 
-from geometry_utils import parallelogram_from_triangle, aabb_of_poly4, iou_aabb_xywh
+from src.geometry_utils import parallelogram_from_triangle, aabb_of_poly4, iou_aabb_xywh
 
 def orientation_from_triangle(tri: np.ndarray) -> float:
     tri = np.asarray(tri)

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>AIRKON Fusion Viewer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: #050505;
+            font-family: "Segoe UI", Arial, sans-serif;
+            color: #e6e6e6;
+        }
+        #app {
+            display: flex;
+            height: 100%;
+            width: 100%;
+        }
+        #viewer {
+            flex: 3;
+            position: relative;
+        }
+        #sidebar {
+            flex: 1;
+            background: #0e0e0e;
+            border-left: 1px solid #1f1f1f;
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+        #status {
+            margin-bottom: 12px;
+            font-size: 0.9rem;
+            color: #9dd6ff;
+        }
+        #tracks {
+            flex: 1;
+            overflow-y: auto;
+            border: 1px solid #1f1f1f;
+            padding: 12px;
+            border-radius: 6px;
+            background: #0b0b0b;
+        }
+        .track-item {
+            padding: 6px 0;
+            border-bottom: 1px solid #1f1f1f;
+        }
+        .track-item:last-child {
+            border-bottom: none;
+        }
+        .track-id {
+            font-weight: bold;
+            color: #ffde7a;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="viewer"></div>
+        <div id="sidebar">
+            <div id="status">Initializing…</div>
+            <div id="tracks"></div>
+        </div>
+    </div>
+    <script type="module" src="/static/global_live.js"></script>
+</body>
+</html>

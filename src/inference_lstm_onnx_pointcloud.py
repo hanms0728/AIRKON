@@ -15,8 +15,8 @@ from tqdm import tqdm
 import onnxruntime as ort
 
 # ====== 기존 유틸 ======
-from geometry_utils import parallelogram_from_triangle, tiny_filter_on_dets
-from evaluation_utils import (
+from src.geometry_utils import parallelogram_from_triangle, tiny_filter_on_dets
+from src.evaluation_utils import (
     decode_predictions,
     evaluate_single_image,
     compute_detection_metrics,

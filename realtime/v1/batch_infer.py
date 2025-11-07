@@ -114,3 +114,18 @@ class BatchedTemporalRunner:
         # 배치 완료 → pending 클리어
         self.pending[:] = False # 이번 프레임 완료했으니까 펜딩 리셋 
         return per_cam # 캠별로 예측한 값이 나옴
+
+def splitnum(s):
+    acc=""
+    out=[]
+    for ch in s:
+        if ch.isdigit():
+            acc += ch
+        else:
+            if acc:
+                out.append(acc)
+                acc=""
+                out.append(ch)
+    if acc:
+        out.append(acc)
+    return out

@@ -1,0 +1,1 @@
+python main.py --weights onnx/yolo11m_2_5d_epoch_005.onnx --lut-path pointcloud/cloud_rgb_npz --web-enable --viewer3d
