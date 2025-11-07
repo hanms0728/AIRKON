@@ -29,6 +29,11 @@ def iou_aabb_xywh(a, b):
     union = aw * ah + bw * bh - inter + 1e-9
     return inter / union
 
+def polygon_area(poly4: np.ndarray) -> float:
+    a = poly4[1] - poly4[0]
+    b = poly4[3] - poly4[0]
+    return float(abs(np.cross(a, b)))
+
 def tiny_filter_on_dets(dets_img, min_area=20.0, min_edge=3.0):
     """
     아주 작은 평행사변형(너무 작은 면적/짧은 변)을 제거.
@@ -46,12 +51,9 @@ def tiny_filter_on_dets(dets_img, min_area=20.0, min_edge=3.0):
         if tri is None or tri.shape != (3, 2):
             filtered.append(d)  # 좌표 없으면 필터 불가 → 그대로 통과
             continue
-        try:
-            poly4 = safe_parallelogram_from_triangle(tri)  # (4,2)
-            area = polygon_area(poly4)
-            edges = np.linalg.norm(np.roll(poly4, -1, axis=0) - poly4, axis=1)
-            if area >= min_area and edges.min() >= min_edge:
-                filtered.append(d)
-        except Exception:
+        poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2])  # (4,2)
+        area = polygon_area(poly4)
+        edges = np.linalg.norm(np.roll(poly4, -1, axis=0) - poly4, axis=1)
+        if area >= min_area and edges.min() >= min_edge:
             filtered.append(d)
     return filtered

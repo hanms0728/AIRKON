@@ -28,13 +28,45 @@ def orientation_error_deg(pred_tri: np.ndarray, gt_tri: np.ndarray) -> float:
     diff = min(diff, math.pi - diff)
     return math.degrees(diff)
 
-def _torch_aabb_from_poly4_torch(poly4_t: torch.Tensor) -> torch.Tensor:
-    # poly4_t: (N,4,2) on device
-    x0, _ = poly4_t[:,:,0].min(dim=1)
-    y0, _ = poly4_t[:,:,1].min(dim=1)
-    x1, _ = poly4_t[:,:,0].max(dim=1)
-    y1, _ = poly4_t[:,:,1].max(dim=1)
-    return torch.stack([x0,y0,x1,y1], dim=1)  # (N,4) xyxy
+def _aabb_metrics(boxA_xywh, boxB_xywh):
+    """네 기존 iou_aabb_xywh() 재사용 + IoS만 추가 계산"""
+    iou = iou_aabb_xywh(boxA_xywh, boxB_xywh)
+
+    ax0, ay0, aw, ah = boxA_xywh
+    bx0, by0, bw, bh = boxB_xywh
+    ax1, ay1 = ax0 + aw, ay0 + ah
+    bx1, by1 = bx0 + bw, by0 + bh
+
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+
+    areaA = max(0.0, aw) * max(0.0, ah)
+    areaB = max(0.0, bw) * max(0.0, bh)
+    ios = inter / max(min(areaA, areaB), 1e-9)  # Intersection over Smaller
+
+    return iou, ios
+
+
+def _nms_iou_or_ios(dets, iou_thr=0.5, contain_thr=None, topk=300):
+    dets_sorted = sorted(dets, key=lambda d: d["score"], reverse=True)
+    keep = []
+    for d in dets_sorted:
+        boxA = aabb_of_poly4(d["poly4"]) 
+        suppress = False
+        for k in keep:
+            boxB = aabb_of_poly4(k["poly4"]) 
+            iou, ios = _aabb_metrics(boxA, boxB)
+            if (iou >= iou_thr) or (contain_thr is not None and ios >= contain_thr):
+                suppress = True
+                break
+        if not suppress:
+            keep.append(d)
+        if len(keep) >= topk:
+            break
+    return keep
+
 
 def decode_predictions(
     outputs,
@@ -43,6 +75,7 @@ def decode_predictions(
     conf_th=0.15,
     nms_iou=0.5,
     topk=300,
+    contain_thr=0.7,     #작은 객체의 큰 객체 대비 겹침 정도
     score_mode="obj",      # "obj" | "cls" | "obj*cls"
     use_gpu_nms=False      # True면 torchvision.ops.nms 사용
 ):
@@ -126,11 +159,19 @@ def decode_predictions(
             keep_idx = torchvision.ops.nms(boxes_t, scores_t, nms_iou)
             keep_idx = keep_idx[:topk].detach().cpu().tolist()
             dets = [dets[i] for i in keep_idx]
+            # ← GPU NMS 이후 "포함율" 후처리(선택)
+            if contain_thr is not None:
+                dets = _nms_iou_or_ios(dets, iou_thr=1.1, contain_thr=contain_thr, topk=topk)
+                # iou_thr=1.1로 두면 사실상 IoU 조건은 무시되고 IoS만 적용하는 후처리
+                    
             batch_results.append(dets)
         else:
-            # CPU 단순 NMS (AABB IoU) – 기존 함수 재사용
-            from math import inf
-            dets_nms = simple_aabb_nms(dets, iou_thr=nms_iou, topk=topk)
+            dets_nms = _nms_iou_or_ios(
+                dets,
+                iou_thr=nms_iou,
+                contain_thr=(float(contain_thr) if isinstance(contain_thr, (int, float)) else None),
+                topk=topk
+            )
             batch_results.append(dets_nms)
 
     return batch_results

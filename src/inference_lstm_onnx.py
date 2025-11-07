@@ -120,7 +120,7 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
     cv2.imwrite(save_path_img, img)
     with open(save_path_txt, "w") as f:
         f.write("\n".join(lines))
-    return img, tri_orig_list
+    return tri_orig_list
 
 def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mix, iou_thr=0.5):
     os.makedirs(os.path.dirname(save_path_img_mix), exist_ok=True)
@@ -513,6 +513,7 @@ def main():
     ap.add_argument("--conf", type=float, default=0.80)
     ap.add_argument("--nms-iou", type=float, default=0.2)
     ap.add_argument("--topk", type=int, default=50)
+    ap.add_argument("--contain-thr", type=float, default=0.85)
     ap.add_argument("--clip-cells", type=float, default=None)
     ap.add_argument("--exts", type=str, default=".jpg,.jpeg,.png")
 
@@ -622,6 +623,7 @@ def main():
             conf_th=args.conf,
             nms_iou=args.nms_iou,
             topk=args.topk,
+            contain_thr=args.contain_thr,
             score_mode=args.score_mode,
             use_gpu_nms=True
         )[0]
@@ -630,7 +632,7 @@ def main():
 
         save_img = os.path.join(out_img_dir, name)
         save_txt = os.path.join(out_lab_dir, os.path.splitext(name)[0] + ".txt")
-        _, red_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
+        pred_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
 
         gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
         gt_tri_orig_for_bev = np.zeros((0, 3, 2), dtype=np.float32)
@@ -731,13 +733,13 @@ def main():
 if __name__ == "__main__":
     main()
 """
-python ./src/inference_lstm_onnx.py \
-  --input-dir /media/ubuntu24/T7/val_dataset_lstm/cam14_-30/images \
+python3.10 ./src/inference_lstm_onnx.py \
+  --input-dir ./dataset_example/images \
   --output-dir ./inference_results_onnx \
-  --weights ./runs/2_5d_lstm/onnx/yolo11m_2_5d_epoch_005.onnx \
+  --weights ./onnx/yolo11m_2_5d_epoch_005.onnx \
   --temporal lstm \
   --seq-mode by_prefix --reset-per-seq \
   --conf 0.8 --nms-iou 0.2 --topk 50 \
-  --gt-label-dir /media/ubuntu24/T7/val_dataset_lstm/cam14_-30/labels \
-  --calib-dir /media/ubuntu24/T7/val_dataset_lstm/cam14_-30/calib
+  --gt-label-dir ./dataset_example/labels \
+  --calib-dir ./dataset_example/calib
 """
