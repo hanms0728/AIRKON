@@ -48,7 +48,7 @@ scene.add(dirLight);
 
 const grid = new THREE.GridHelper(100, 50, 0x333333, 0x1f1f1f);
 grid.rotation.x = Math.PI / 2;
-scene.add(grid);
+// scene.add(grid);
 const axes = new THREE.AxesHelper(4);
 scene.add(axes);
 
@@ -217,33 +217,7 @@ function ensureVehiclePool(size) {
 }
 
 function loadPointCloud() {
-    return new Promise((resolve, reject) => {
-        const loader = new PLYLoader();
-        loader.load(
-            "/assets/global.ply",
-            (geometry) => {
-                geometry.computeBoundingBox();
-                geometry.computeVertexNormals();
-                const hasColor = Boolean(geometry.getAttribute("color"));
-                const material = new THREE.PointsMaterial({
-                    size: 0.05,
-                    vertexColors: hasColor,
-                    color: hasColor ? 0xffffff : 0x9f9f9f,
-                });
-                const points = new THREE.Points(geometry, material);
-                points.name = "GlobalCloud";
-                scene.add(points);
-                state.globalCloud = points;
-                if (geometry.boundingBox) {
-                    geometry.boundingBox.getCenter(tmpCenter);
-                    controls.target.copy(tmpCenter);
-                }
-                resolve();
-            },
-            undefined,
-            (err) => reject(err)
-        );
-    });
+    return Promise.resolve();
 }
 
 function loadVehiclePrototype() {
@@ -295,14 +269,34 @@ async function loadVisibleCloudForCamera(camId) {
             throw new Error(`${resp.status} ${resp.statusText}`);
         }
         const buffer = await resp.arrayBuffer();
-        const positions = new Float32Array(buffer);
-        if (!positions.length) {
+        const data = new Float32Array(buffer);
+        if (!data.length) {
             setVisibleMeshesVisibility(false, camId);
             if (state.globalCloud) state.globalCloud.visible = true;
             return;
         }
+        const stride = meta.stride || 3;
+        const count = meta.count || Math.floor(data.length / stride);
+        const hasColor = Boolean(meta.has_rgb) && stride >= 6;
+        const positionArray = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+            const base = i * stride;
+            positionArray[i * 3 + 0] = data[base + 0] || 0;
+            positionArray[i * 3 + 1] = data[base + 1] || 0;
+            positionArray[i * 3 + 2] = data[base + 2] || 0;
+        }
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute("position", new THREE.BufferAttribute(positionArray, 3));
+        if (hasColor) {
+            const colorArray = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const base = i * stride;
+                colorArray[i * 3 + 0] = data[base + 3] ?? 0.5;
+                colorArray[i * 3 + 1] = data[base + 4] ?? 0.5;
+                colorArray[i * 3 + 2] = data[base + 5] ?? 0.5;
+            }
+            geometry.setAttribute("color", new THREE.BufferAttribute(colorArray, 3));
+        }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
 
@@ -310,9 +304,8 @@ async function loadVisibleCloudForCamera(camId) {
         if (!mesh) {
             const material = new THREE.PointsMaterial({
                 size: 0.06,
-                color: 0x4cc9f0,
-                opacity: 0.92,
                 transparent: true,
+                opacity: 0.95,
             });
             mesh = new THREE.Points(geometry, material);
             mesh.name = `VisibleCloud-${camId}`;
@@ -322,6 +315,9 @@ async function loadVisibleCloudForCamera(camId) {
             mesh.geometry.dispose();
             mesh.geometry = geometry;
         }
+        mesh.material.vertexColors = hasColor;
+        mesh.material.color.set(hasColor ? 0xffffff : 0x4cc9f0);
+
         setVisibleMeshesVisibility(true, camId);
         if (state.globalCloud) {
             state.globalCloud.visible = false;
