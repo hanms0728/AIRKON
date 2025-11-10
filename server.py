@@ -489,6 +489,30 @@ class UDPReceiverSingle:
         self.running = False
         self.q = queue.Queue(maxsize=4096)
 
+    def _log_packet(self, cam: str, dets: List[dict], meta: Optional[dict] = None):
+        """
+        수신 데이터 확인용 로그. meta는 JSON payload 전체(dict)일 수도 있고 None일 수도 있다.
+        """
+        try:
+            cnt = len(dets) if dets else 0
+            ts = meta.get("timestamp") if isinstance(meta, dict) else None
+            capture_ts = meta.get("capture_ts") if isinstance(meta, dict) else None
+            camera_id = meta.get("camera_id") if isinstance(meta, dict) else None
+            print(
+                "[UDPReceiverSingle] recv",
+                f"cam={cam}",
+                f"camera_id={camera_id}",
+                f"timestamp={ts}",
+                f"capture_ts={capture_ts}",
+                f"detections={cnt}",
+            )
+            if dets:
+                # 한 건만 찍어도 값 흐름을 확인할 수 있으므로 첫 항목만 노출
+                sample = json.dumps(dets[0], ensure_ascii=False)
+                print(f"  sample_det={sample}")
+        except Exception as exc:
+            print(f"[UDPReceiverSingle] log error: {exc}")
+
     def start(self):
         if self.running: return
         self.running = True
@@ -540,6 +564,7 @@ class UDPReceiverSingle:
                         "pitch": float(it.get("pitch", 0.0)),
                         "roll": float(it.get("roll", 0.0)),
                     })
+                self._log_packet(cam, dets if dets else [], meta=msg)
                 return cam, dets if dets else []
         except Exception:
             pass
@@ -573,6 +598,7 @@ class UDPReceiverSingle:
                     "score": score,
                 })
             # 텍스트만으로는 cam 판별 불가 → cam=?, 필요하면 헤더에 cam 넣어 보내도록 확장
+            self._log_packet("cam?", dets if dets else [])
             return "cam?", dets if dets else []
         except Exception:
             return "cam?", None
@@ -642,11 +668,37 @@ class RealtimeFusionServer:
 
         # 추적기
         self.tracker = SortTracker(max_age=10, min_hits=3, iou_threshold=0.15)  # :contentReference[oaicite:11]{index=11}
-    
+        self._log_interval = 1.0
+        self._next_log_ts = 0.0
+
     def _register_cam_if_needed(self, cam_name: str): # 수신 시 신규카메라 등록 
         if cam_name not in self.buffer:
             self.buffer[cam_name] = deque(maxlen=1)
         self.active_cams.add(cam_name)
+
+    def _should_log(self) -> bool:
+        now = time.time()
+        if now >= self._next_log_ts:
+            self._next_log_ts = now + self._log_interval
+            return True
+        return False
+
+    def _log_pipeline(self, raw_stats: Dict[str, int], fused: List[dict], tracks: List[dict], timestamp: float):
+        total_raw = sum(raw_stats.values())
+        fused_count = len(fused)
+        track_count = len(tracks)
+        cams_str = ", ".join([f"{cam}:{cnt}" for cam, cnt in sorted(raw_stats.items())]) or "-"
+        print(
+            f"[Fusion] ts={timestamp:.3f} total_raw={total_raw} cams=({cams_str}) "
+            f"clusters={fused_count} tracks={track_count}"
+        )
+        if fused_count:
+            sample_keys = ["cx","cy","length","width","yaw","score","source_cams"]
+            sample_fused = {k: fused[0][k] for k in sample_keys if k in fused[0]}
+            print(f"  fused_sample={json.dumps(sample_fused, ensure_ascii=False)}")
+        if track_count:
+            sample_track = json.dumps(tracks[0], ensure_ascii=False)
+            print(f"  track_sample={sample_track}")
 
     def start(self):
         self.receiver.start()
@@ -697,6 +749,13 @@ class RealtimeFusionServer:
                     timestamp=now,
                     cameras=list(self.active_cams),
                 )
+
+            if self._should_log():
+                stats = {}
+                for det in raw_dets:
+                    cam = det.get("cam", "?")
+                    stats[cam] = stats.get(cam, 0) + 1
+                self._log_pipeline(stats, fused_payload, tracks_for_output, now)
 
             # ==== 저장(롤링) ====
             if self.saver:
@@ -865,7 +924,7 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp", help="추적 결과 전송 프로토콜")
     ap.add_argument("--carla-host", default=None, help="CARLA 나 다른 시뮬레이터로 보낼 호스트 (선택)")
     ap.add_argument("--carla-port", type=int, default=61000, help="CARLA/시각화 전용 포트")
-    ap.add_argument("--global-ply", default="pointcloud/global_fused_small.ply", help="웹뷰에서 사용할 글로벌 PLY")
+    ap.add_argument("--global-ply", default="pointcloud/merged.ply", help="웹뷰에서 사용할 글로벌 PLY")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb", help="웹뷰 차량 GLB 경로")
     ap.add_argument("--web-host", default="0.0.0.0", help="웹 서버 호스트")
     ap.add_argument("--web-port", type=int, default=18090, help="웹 서버 포트")

@@ -8,9 +8,9 @@
       "password": "zjsxmfhf",
       "width": 1536,
       "height": 864,
-      "lut": "pointcloud/cloud_rgb_npz/und_remap_pixel2world_lut1.npz",
-      "undistort": "realtime/disto/cam1.npz",
-      "visible_ply": "pointcloud/cloud_rgb_ply/cloud_rgb_1.ply",
+      "lut": "pointcloud/cloud_rgb_npz/und_remap_pixel2world_lut_1_05.npz",
+      "undistort": "realtime/disto/cam1_calibration_results.npz",
+      "visible_ply": "pointcloud/cloud_rgb_ply/und_remap_reconstructed_1_05.ply",
       "force_tcp": true,
       "name": "camwww"
     },
@@ -22,9 +22,9 @@
       "password": "zjsxmfhf",
       "width": 1536,
       "height": 864,
-      "lut": "pointcloud/cloud_rgb_npz/und_remap2_reconstructed2.npz",
-      "undistort": "realtime/disto/cam2.npz",
-      "visible_ply": "pointcloud/cloud_rgb_ply/und_remap2_reconstructed2.ply",
+      "lut": "pointcloud/cloud_rgb_npz/und_remap2_pixel2world_lut_2_05.npz",
+      "undistort": "realtime/disto/cam2_calibration_results.npz",
+      "visible_ply": "pointcloud/cloud_rgb_ply/und_remap2_reconstructed_2_05.ply",
       "force_tcp": true,
       "name": "gate-north"
     }

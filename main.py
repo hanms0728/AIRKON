@@ -1075,7 +1075,7 @@ def main():
     ap.add_argument("--web-site-name", default="edge-site")
     ap.add_argument("--web-jpeg-quality", type=int, default=85)
     # 3d
-    ap.add_argument("--global-ply", type=str, default="pointcloud/global_fused_small.ply")
+    ap.add_argument("--global-ply", type=str, default="pointcloud/merged.ply")
     ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
     ap.add_argument("--viewer3d", action="store_true")           # ← 3D 창 켜기
     ap.add_argument("--viewer3d-fixed-size", action="store_true")# ← 객체 스케일 고정 모드
