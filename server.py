@@ -19,6 +19,7 @@ from utils.merge.merge_dist_wbf import (
     CAMERA_SETUPS, cluster_by_aabb_iou, fuse_cluster_weighted
 )
 from utils.sort.tracker import SortTracker
+from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
 # ---일단 저장용---
 import os, gzip, json, csv, hashlib, threading, queue, time
@@ -252,7 +253,7 @@ class GlobalWebServer:
     FastAPI 기반 웹 서버.
     - /assets/global.ply, /assets/vehicle.glb 제공
     - /api/raw, /api/fused, /api/tracks 로 최신 결과 반환
-    - /static/global_live.html 프론트엔드 제공
+    - /fusion/raw, /fusion/fused, /fusion/tracks 페이지에서 공용 뷰어(main.js) 사용
     """
     def __init__(
         self,
@@ -261,7 +262,9 @@ class GlobalWebServer:
         vehicle_glb: str,
         host: str = "0.0.0.0",
         port: int = 18090,
-        static_root: Optional[Path] = None
+        static_root: Optional[Path] = None,
+        viz_config: VizSizeConfig = VizSizeConfig(),
+        client_config: Optional[dict] = None,
     ):
         self.global_ply = str(Path(global_ply).resolve())
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
@@ -279,7 +282,20 @@ class GlobalWebServer:
         if static_root is None:
             static_root = Path(__file__).resolve().parent / "realtime_show_result" / "static"
         self.static_root = static_root
-        self.index_html = self.static_root / "global_live.html"
+        self.page_map = {
+            "raw": self.static_root / "fusion_raw.html",
+            "fused": self.static_root / "fusion_fused.html",
+            "tracks": self.static_root / "fusion_tracks.html",
+        }
+        self.viz_cfg = viz_config
+        self.client_config = dict(client_config or {})
+        self.client_config.setdefault("normalizeVehicle", True)
+        self.client_config.setdefault("vehicleYAxisUp", True)
+        self.client_config.setdefault("flipPlyY", False)
+        self.client_config.setdefault("showSceneAxes", False)
+        self.client_config.setdefault("showDebugMarker", False)
+        self.client_config.setdefault("mode", "fusion")
+        self.client_config["vizConfig"] = self.viz_cfg.as_client_dict()
 
         self.app = FastAPI(title="AIRKON Fusion Server", version="0.1.0")
         self.app.add_middleware(
@@ -302,9 +318,31 @@ class GlobalWebServer:
     def _register_routes(self):
         @self.app.get("/")
         def _root():
-            if self.index_html.exists():
-                return FileResponse(str(self.index_html))
-            return {"status": "ok", "message": "global_live.html missing"}
+            page = self.page_map.get("raw")
+            if page and page.exists():
+                return FileResponse(str(page))
+            return {"status": "ok", "message": "fusion_raw.html missing"}
+
+        @self.app.get("/fusion/raw")
+        def _view_raw():
+            page = self.page_map.get("raw")
+            if page and page.exists():
+                return FileResponse(str(page))
+            raise HTTPException(status_code=404, detail="fusion_raw.html missing")
+
+        @self.app.get("/fusion/fused")
+        def _view_fused():
+            page = self.page_map.get("fused")
+            if page and page.exists():
+                return FileResponse(str(page))
+            raise HTTPException(status_code=404, detail="fusion_fused.html missing")
+
+        @self.app.get("/fusion/tracks")
+        def _view_tracks():
+            page = self.page_map.get("tracks")
+            if page and page.exists():
+                return FileResponse(str(page))
+            raise HTTPException(status_code=404, detail="fusion_tracks.html missing")
 
         @self.app.get("/healthz")
         def _health():
@@ -317,7 +355,12 @@ class GlobalWebServer:
                     "started_at": self.started_at,
                     "timestamp": self._state["timestamp"],
                     "cameras": self._state["cameras"],
+                    "config": self.client_config,
                 }
+
+        @self.app.get("/api/config")
+        def _config():
+            return self.client_config.copy()
 
         @self.app.get("/api/raw")
         def _raw():
@@ -622,6 +665,8 @@ class RealtimeFusionServer:
         web_host: str = "0.0.0.0",
         web_port: int = 18090,
         enable_web: bool = True,
+        viz_config: VizSizeConfig = VizSizeConfig(),
+        client_config: Optional[dict] = None,
     ):
         self.fps = fps
         self.dt = 1.0 / max(1e-3, fps)
@@ -641,11 +686,15 @@ class RealtimeFusionServer:
 
         self.track_tx = TrackBroadcaster(tx_host, tx_port, tx_protocol) if tx_host else None
         self.carla_tx = TrackBroadcaster(carla_host, carla_port) if carla_host else None
+        self.viz_cfg = viz_config
+        self.client_config = client_config or {}
         self.web = GlobalWebServer(
             global_ply=global_ply,
             vehicle_glb=vehicle_glb,
             host=web_host,
             port=web_port,
+            viz_config=self.viz_cfg,
+            client_config=self.client_config,
         ) if enable_web else None
 
         if self.save_dir:
@@ -740,7 +789,7 @@ class RealtimeFusionServer:
             self._broadcast_tracks(tracks, now)
             tracks_for_output = self._tracks_to_dicts(tracks)
             raw_payload = self._serialize_raw(raw_dets)
-            fused_payload = [det.copy() for det in fused]
+            fused_payload = self._serialize_fused(fused)
             if self.web:
                 self.web.update(
                     raw=raw_payload,
@@ -858,16 +907,49 @@ class RealtimeFusionServer:
     def _serialize_raw(self, raw_detections: List[dict]) -> List[dict]:
         payload = []
         for det in raw_detections:
-            payload.append({
-                "cam": det.get("cam"),
-                "timestamp": float(det.get("ts", 0.0)),
-                "cx": float(det.get("cx", 0.0)),
-                "cy": float(det.get("cy", 0.0)),
-                "length": float(det.get("length", 0.0)),
-                "width": float(det.get("width", 0.0)),
-                "yaw": float(det.get("yaw", 0.0)),
-                "score": float(det.get("score", 0.0)),
-            })
+            vis = prepare_visual_item(
+                class_id=int(det.get("cls", 0)),
+                cx=float(det.get("cx", 0.0)),
+                cy=float(det.get("cy", 0.0)),
+                cz=float(det.get("cz", 0.0)),
+                length=float(det.get("length", 0.0)),
+                width=float(det.get("width", 0.0)),
+                yaw_deg=float(det.get("yaw", 0.0)),
+                pitch_deg=float(det.get("pitch", 0.0)),
+                roll_deg=float(det.get("roll", 0.0)),
+                cfg=self.viz_cfg,
+                score=det.get("score", 0.0),
+            )
+            vis["cam"] = det.get("cam")
+            vis["timestamp"] = float(det.get("ts", 0.0))
+            vis["cx"] = float(det.get("cx", 0.0))
+            vis["cy"] = float(det.get("cy", 0.0))
+            vis["cz"] = float(det.get("cz", 0.0))
+            payload.append(vis)
+        return payload
+
+    def _serialize_fused(self, fused_list: List[dict]) -> List[dict]:
+        payload = []
+        for det in fused_list:
+            vis = prepare_visual_item(
+                class_id=int(det.get("cls", 0)),
+                cx=float(det.get("cx", 0.0)),
+                cy=float(det.get("cy", 0.0)),
+                cz=float(det.get("cz", 0.0)),
+                length=float(det.get("length", 0.0)),
+                width=float(det.get("width", 0.0)),
+                yaw_deg=float(det.get("yaw", 0.0)),
+                pitch_deg=float(det.get("pitch", 0.0)),
+                roll_deg=float(det.get("roll", 0.0)),
+                cfg=self.viz_cfg,
+                score=det.get("score", 0.0),
+            )
+            vis["sources"] = list(det.get("source_cams", []))
+            vis["source_cams"] = list(det.get("source_cams", []))
+            vis["cx"] = float(det.get("cx", 0.0))
+            vis["cy"] = float(det.get("cy", 0.0))
+            vis["cz"] = float(det.get("cz", 0.0))
+            payload.append(vis)
         return payload
 
     def _tracks_to_dicts(self, tracks: np.ndarray) -> List[dict]:
@@ -877,20 +959,26 @@ class RealtimeFusionServer:
             tid = int(row[0]); cls = int(row[1])
             cx, cy, L, W, yaw = map(float, row[2:7])
             extra = self.track_meta.get(tid, {})
-            payload.append({
-                "id": tid,
-                "class": cls,
-                "cx": cx,
-                "cy": cy,
-                "length": L,
-                "width": W,
-                "yaw": yaw,
-                "cz": float(extra.get("cz", 0.0)),
-                "pitch": float(extra.get("pitch", 0.0)),
-                "roll": float(extra.get("roll", 0.0)),
-                "score": float(extra.get("score", 0.0)),
-                "sources": list(extra.get("source_cams", [])),
-            })
+            vis = prepare_visual_item(
+                class_id=cls,
+                cx=cx,
+                cy=cy,
+                cz=float(extra.get("cz", 0.0)),
+                length=L,
+                width=W,
+                yaw_deg=yaw,
+                pitch_deg=float(extra.get("pitch", 0.0)),
+                roll_deg=float(extra.get("roll", 0.0)),
+                cfg=self.viz_cfg,
+                score=extra.get("score", 0.0),
+            )
+            vis["id"] = tid
+            vis["track_id"] = tid
+            vis["class"] = cls
+            vis["sources"] = list(extra.get("source_cams", []))
+            vis["cx"] = cx
+            vis["cy"] = cy
+            payload.append(vis)
         return payload
 
 # -----------------------------
@@ -929,10 +1017,59 @@ def main():
     ap.add_argument("--web-host", default="0.0.0.0", help="웹 서버 호스트")
     ap.add_argument("--web-port", type=int, default=18090, help="웹 서버 포트")
     ap.add_argument("--no-web", action="store_true", help="FastAPI 웹 뷰어 비활성화")
+    ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh",
+                    help="웹 뷰에서 사용할 차량 스케일링 모드")
+    ap.add_argument("--fixed-length", type=float, default=4.5,
+                    help="size-mode=fixed 일 때 차량 길이")
+    ap.add_argument("--fixed-width", type=float, default=1.8,
+                    help="size-mode=fixed 일 때 차량 너비")
+    ap.add_argument("--height-scale", type=float, default=0.5,
+                    help="bbox/fixed 모드일 때 차량 높이 = width * height_scale")
+    ap.add_argument("--mesh-scale", type=float, default=1.0,
+                    help="size-mode=mesh 일 때 GLB에 곱할 유니폼 스케일")
+    ap.add_argument("--mesh-height", type=float, default=0.0,
+                    help="size-mode=mesh 일 때 지면 높이 계산용 높이(0이면 mesh-scale 사용)")
+    ap.add_argument("--z-offset", type=float, default=0.0,
+                    help="모든 박스에 추가할 z 오프셋")
+    ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true",
+                    help="Y축 반전 적용")
+    ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false",
+                    help="Y축 반전 해제")
+    ap.set_defaults(invert_bev_y=True)
+    ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true",
+                    help="GLB를 최대 변 1.0으로 정규화")
+    ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false",
+                    help="GLB 정규화 끄기")
+    ap.set_defaults(normalize_vehicle=True)
+    ap.add_argument("--vehicle-y-up", dest="vehicle_y_up", action="store_true",
+                    help="GLB가 Y-up이면 +90° 회전 적용(기본)")
+    ap.add_argument("--vehicle-z-up", dest="vehicle_y_up", action="store_false",
+                    help="GLB가 이미 Z-up이면 회전 생략")
+    ap.set_defaults(vehicle_y_up=True)
+    ap.add_argument("--flip-ply-y", dest="flip_ply_y", action="store_true",
+                    help="global ply의 Y축을 반전하여 로드")
+    ap.add_argument("--no-flip-ply-y", dest="flip_ply_y", action="store_false",
+                    help="global ply Y축 반전하지 않음")
+    ap.set_defaults(flip_ply_y=False)
 
     args = ap.parse_args()
 
     cam_ports = parse_cam_ports(args.cam_ports)
+    viz_cfg = VizSizeConfig(
+        size_mode=args.size_mode,
+        fixed_length=args.fixed_length,
+        fixed_width=args.fixed_width,
+        height_scale=args.height_scale,
+        mesh_scale=args.mesh_scale,
+        mesh_height=args.mesh_height,
+        z_offset=args.z_offset,
+        invert_bev_y=args.invert_bev_y,
+    )
+    client_config = {
+        "flipPlyY": bool(args.flip_ply_y),
+        "normalizeVehicle": bool(args.normalize_vehicle),
+        "vehicleYAxisUp": bool(args.vehicle_y_up),
+    }
 
     server = RealtimeFusionServer(
         cam_ports=cam_ports,
@@ -952,6 +1089,8 @@ def main():
         web_host=args.web_host,
         web_port=args.web_port,
         enable_web=(not args.no_web),
+        viz_config=viz_cfg,
+        client_config=client_config,
     )
     try:
         server.start()

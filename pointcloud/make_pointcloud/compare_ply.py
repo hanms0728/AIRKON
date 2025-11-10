@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
 
 """
-python3.10 compare_ply.py \
+python compare_ply.py \
   --src ./out_visible/visible_20251104_002444.ply \
   --tgt ./cloud_rgb_9.ply \
   --voxel 0.05 \

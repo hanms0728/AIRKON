@@ -3,6 +3,12 @@ import { OrbitControls } from "./libs/OrbitControls.js";
 import { PLYLoader } from "./libs/PLYLoader.js";
 import { GLTFLoader } from "./libs/GLTFLoader.js";
 
+const mode = window.VIEW_MODE || "playback";
+const isLive = mode === "live";
+const isPlayback = mode === "playback";
+const isFusion = mode.startsWith("fusion");
+const fusionSource = isFusion ? mode.replace("fusion_", "") : null;
+
 const viewerEl = document.getElementById("viewer");
 const detectionListEl = document.getElementById("detection-list");
 const frameIndicatorEl = document.getElementById("frame-indicator");
@@ -10,8 +16,13 @@ const frameSliderEl = document.getElementById("frame-slider");
 const playBtn = document.getElementById("play-btn");
 const prevBtn = document.getElementById("prev-btn");
 const nextBtn = document.getElementById("next-btn");
+const cameraSelectEl = document.getElementById("camera-select");
+const statusEl = document.getElementById("status");
+const overlayImgEl = document.getElementById("overlay-img");
 
 const state = {
+    mode,
+    fusionSource,
     config: null,
     totalFrames: 0,
     frameIndex: 0,
@@ -23,6 +34,21 @@ const state = {
     vehicleCapacity: 0,
     showDebugMarker: false,
     frameRequestId: 0,
+    vehicleCorrection: null,
+    site: null,
+    cameras: [],
+    cameraId: null,
+    pollingHandle: null,
+    overlayToken: 0,
+    overlayUrl: null,
+    visibleMeshes: new Map(),
+    globalCloud: null,
+};
+
+const fusionEndpointMap = {
+    raw: "/api/raw",
+    fused: "/api/fused",
+    tracks: "/api/tracks",
 };
 
 const scene = new THREE.Scene();
@@ -79,6 +105,16 @@ handleResize();
 animate();
 
 async function init() {
+    if (isFusion) {
+        await initFusionMode();
+    } else if (isLive) {
+        await initLiveMode();
+    } else {
+        await initPlaybackMode();
+    }
+}
+
+async function initPlaybackMode() {
     try {
         state.config = await fetchJson("/api/config");
         state.showDebugMarker = Boolean(state.config?.showDebugMarker);
@@ -92,11 +128,13 @@ async function init() {
     }
 
     state.totalFrames = state.config.totalFrames ?? 0;
-    frameSliderEl.max = Math.max(state.totalFrames - 1, 0);
-    frameSliderEl.disabled = state.totalFrames === 0;
-    prevBtn.disabled = state.totalFrames === 0;
-    nextBtn.disabled = state.totalFrames === 0;
-    playBtn.disabled = state.totalFrames === 0;
+    if (frameSliderEl) {
+        frameSliderEl.max = Math.max(state.totalFrames - 1, 0);
+        frameSliderEl.disabled = state.totalFrames === 0;
+    }
+    if (prevBtn) prevBtn.disabled = state.totalFrames === 0;
+    if (nextBtn) nextBtn.disabled = state.totalFrames === 0;
+    if (playBtn) playBtn.disabled = state.totalFrames === 0;
     updateFrameIndicator();
 
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
@@ -106,6 +144,54 @@ async function init() {
     }
 
     wireUi();
+}
+
+async function initFusionMode() {
+    try {
+        state.config = await fetchConfigWithFallback();
+    } catch (err) {
+        console.warn("Failed to load fusion config", err);
+        state.config = {};
+    }
+    try {
+        state.site = await fetchJson("/api/site");
+    } catch (err) {
+        console.warn("site info error", err);
+    }
+    await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
+    startFusionPolling();
+}
+
+async function initLiveMode() {
+    try {
+        state.site = await fetchJson("/api/site");
+        state.config = state.site?.config || {};
+        grid.visible = false;
+        axes.visible = false;
+    } catch (err) {
+        console.error(err);
+        alert("Failed to load site configuration. Check if the backend server is running.");
+        return;
+    }
+
+    try {
+        state.cameras = await fetchJson("/api/cameras");
+    } catch (err) {
+        console.error(err);
+        alert("Failed to load camera list. Edge bridge running?");
+        return;
+    }
+
+    populateCameraSelect();
+
+    await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
+
+    if (state.cameraId != null) {
+        await loadVisibleCloudForCamera(state.cameraId);
+        startLivePolling();
+    } else if (statusEl) {
+        statusEl.textContent = "No camera available";
+    }
 }
 
 function animate() {
@@ -146,6 +232,7 @@ async function loadPointCloud() {
                 const points = new THREE.Points(geometry, material);
                 points.name = "GlobalCloud";
                 scene.add(points);
+                state.globalCloud = points;
 
                 if (geometry.boundingBox) {
                     const center = new THREE.Vector3();
@@ -490,17 +577,14 @@ function renderDetections(detections) {
         }
     }
 
-    detectionListEl.innerHTML = "";
-    detections.forEach((det, idx) => {
-        const center = Array.isArray(det.center) && det.center.length === 3
-            ? det.center
-            : [0, 0, 0];
-        const li = document.createElement("li");
-        li.textContent = `#${idx + 1} | class ${det.class_id} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${
-            (det.yaw_deg ?? 0).toFixed(1)
-        }°`;
-        detectionListEl.appendChild(li);
-    });
+    if (detectionListEl) {
+        detectionListEl.innerHTML = "";
+        detections.forEach((det, idx) => {
+            const li = document.createElement("li");
+            li.textContent = formatDetectionListEntry(det, idx);
+            detectionListEl.appendChild(li);
+        });
+    }
 }
 
 async function fetchJson(url) {
@@ -509,6 +593,278 @@ async function fetchJson(url) {
         throw new Error(`Request failed: ${response.status} ${response.statusText}`);
     }
     return response.json();
+}
+
+async function fetchConfigWithFallback() {
+    try {
+        return await fetchJson("/api/config");
+    } catch (err) {
+        try {
+            const site = await fetchJson("/api/site");
+            return site?.config || {};
+        } catch {
+            throw err;
+        }
+    }
+}
+
+function populateCameraSelect() {
+    if (!cameraSelectEl) {
+        state.cameraId = state.cameras.length ? state.cameras[0].camera_id : null;
+        return;
+    }
+    cameraSelectEl.innerHTML = "";
+    if (!state.cameras.length) {
+        const opt = document.createElement("option");
+        opt.textContent = "No cameras";
+        cameraSelectEl.appendChild(opt);
+        cameraSelectEl.disabled = true;
+        state.cameraId = null;
+        return;
+    }
+    state.cameras.forEach((cam, idx) => {
+        const opt = document.createElement("option");
+        opt.value = cam.camera_id;
+        opt.textContent = `${cam.camera_id} — ${cam.name || "camera"}`;
+        if (idx === 0) {
+            opt.selected = true;
+        }
+        cameraSelectEl.appendChild(opt);
+    });
+    cameraSelectEl.disabled = false;
+    state.cameraId = Number(cameraSelectEl.value);
+    cameraSelectEl.addEventListener("change", async () => {
+        state.cameraId = Number(cameraSelectEl.value);
+        stopLivePolling();
+        await loadVisibleCloudForCamera(state.cameraId);
+        startLivePolling();
+    });
+}
+
+function startLivePolling() {
+    stopLivePolling();
+    if (state.cameraId == null) {
+        if (statusEl) statusEl.textContent = "No camera selected";
+        return;
+    }
+    const poll = async () => {
+        try {
+            await fetchLiveDetections();
+        } catch (err) {
+            console.error(err);
+            if (statusEl) statusEl.textContent = `Error: ${err.message}`;
+        } finally {
+            state.pollingHandle = window.setTimeout(poll, 400);
+        }
+    };
+    poll();
+}
+
+function stopLivePolling() {
+    if (state.pollingHandle) {
+        clearTimeout(state.pollingHandle);
+        state.pollingHandle = null;
+    }
+}
+
+async function fetchLiveDetections() {
+    const camId = state.cameraId;
+    if (camId == null) {
+        return;
+    }
+    const data = await fetchJson(`/api/cameras/${camId}/detections`);
+    renderDetections(data?.detections || []);
+    if (statusEl) {
+        const detCount = data?.detections?.length ?? 0;
+        const ts = data?.capture_ts;
+        const tsText = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
+        statusEl.textContent = `cam${camId} | detections ${detCount} | ts ${tsText}`;
+    }
+    updateOverlayImage(camId);
+}
+
+function startFusionPolling() {
+    stopLivePolling();
+    if (!state.fusionSource) {
+        if (statusEl) statusEl.textContent = "Fusion source not set";
+        return;
+    }
+    const poll = async () => {
+        try {
+            await fetchFusionDetections();
+        } catch (err) {
+            console.error(err);
+            if (statusEl) statusEl.textContent = `Fusion error: ${err.message}`;
+        } finally {
+            state.pollingHandle = window.setTimeout(poll, 400);
+        }
+    };
+    poll();
+}
+
+async function fetchFusionDetections() {
+    const source = state.fusionSource || "raw";
+    const endpoint = fusionEndpointMap[source] || "/api/raw";
+    const data = await fetchJson(endpoint);
+    const detections = data?.items || [];
+    renderDetections(detections);
+    if (statusEl) {
+        const ts = data?.timestamp;
+        const tsText = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
+        statusEl.textContent = `${source.toUpperCase()} | count ${detections.length} | ts ${tsText}`;
+    }
+}
+
+function updateOverlayImage(camId) {
+    if (!overlayImgEl) return;
+    state.overlayToken += 1;
+    const token = state.overlayToken;
+    fetch(`/api/cameras/${camId}/overlay.jpg?cacheBust=${Date.now()}`, { cache: "no-store" })
+        .then((resp) => {
+            if (!resp.ok) {
+                throw new Error("overlay not ready");
+            }
+            return resp.blob();
+        })
+        .then((blob) => {
+            if (token !== state.overlayToken) {
+                return;
+            }
+            if (state.overlayUrl) {
+                URL.revokeObjectURL(state.overlayUrl);
+            }
+            state.overlayUrl = URL.createObjectURL(blob);
+            overlayImgEl.src = state.overlayUrl;
+        })
+        .catch(() => {
+            /* ignore */ 
+        });
+}
+
+async function loadVisibleCloudForCamera(camId) {
+    if (!camId) {
+        return;
+    }
+    try {
+        const meta = await fetchJson(`/api/cameras/${camId}/visible-meta`);
+        if (!meta || !meta.count) {
+            setVisibleMeshesVisibility(false, camId);
+            if (state.globalCloud) state.globalCloud.visible = true;
+            return;
+        }
+        const resp = await fetch(`/api/cameras/${camId}/visible.bin?cacheBust=${Date.now()}`, { cache: "no-store" });
+        if (!resp.ok) {
+            throw new Error(`${resp.status} ${resp.statusText}`);
+        }
+        const buffer = await resp.arrayBuffer();
+        const data = new Float32Array(buffer);
+        if (!data.length) {
+            setVisibleMeshesVisibility(false, camId);
+            if (state.globalCloud) state.globalCloud.visible = true;
+            return;
+        }
+        const stride = meta.stride || 3;
+        const count = meta.count || Math.floor(data.length / stride);
+        const hasColor = Boolean(meta.has_rgb) && stride >= 6;
+        const positionArray = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+            const base = i * stride;
+            positionArray[i * 3 + 0] = data[base + 0] || 0;
+            positionArray[i * 3 + 1] = data[base + 1] || 0;
+            positionArray[i * 3 + 2] = data[base + 2] || 0;
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(positionArray, 3));
+        if (hasColor) {
+            const colorArray = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const base = i * stride;
+                colorArray[i * 3 + 0] = data[base + 3] ?? 0.5;
+                colorArray[i * 3 + 1] = data[base + 4] ?? 0.5;
+                colorArray[i * 3 + 2] = data[base + 5] ?? 0.5;
+            }
+            geometry.setAttribute("color", new THREE.BufferAttribute(colorArray, 3));
+        }
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+
+        let mesh = state.visibleMeshes.get(camId);
+        if (!mesh) {
+            const material = new THREE.PointsMaterial({
+                size: 0.06,
+                transparent: true,
+                opacity: 0.95,
+            });
+            mesh = new THREE.Points(geometry, material);
+            mesh.name = `VisibleCloud-${camId}`;
+            scene.add(mesh);
+            state.visibleMeshes.set(camId, mesh);
+        } else {
+            mesh.geometry.dispose();
+            mesh.geometry = geometry;
+        }
+        mesh.material.vertexColors = hasColor;
+        mesh.material.color.set(hasColor ? 0xffffff : 0x4cc9f0);
+
+        setVisibleMeshesVisibility(true, camId);
+        if (state.globalCloud) {
+            state.globalCloud.visible = false;
+        }
+        focusOnGeometry(geometry);
+    } catch (err) {
+        console.warn("visible cloud load failed", err);
+        if (statusEl) statusEl.textContent = `cam${camId} | visible cloud missing`;
+        setVisibleMeshesVisibility(false, camId);
+        if (state.globalCloud) {
+            state.globalCloud.visible = true;
+        }
+    }
+}
+
+function setVisibleMeshesVisibility(active, camId) {
+    state.visibleMeshes.forEach((mesh, id) => {
+        mesh.visible = active && id === camId;
+    });
+}
+
+function focusOnGeometry(geometry) {
+    if (!geometry.boundingBox) {
+        return;
+    }
+    const center = new THREE.Vector3();
+    geometry.boundingBox.getCenter(center);
+    controls.target.copy(center);
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    const span = Math.max(size.x, size.y, size.z, 1.0);
+    camera.position.set(
+        center.x + span,
+        center.y - span,
+        center.z + span * 0.8
+    );
+}
+
+function formatDetectionListEntry(det, idx) {
+    const center = Array.isArray(det.center) && det.center.length === 3
+        ? det.center
+        : [0, 0, 0];
+    const yaw = det.yaw_deg ?? det.yaw ?? 0;
+    const tags = [];
+    if (det.track_id != null) {
+        tags.push(`track ${det.track_id}`);
+    } else if (det.cam) {
+        tags.push(`cam ${det.cam}`);
+    } else if (det.class_id != null) {
+        tags.push(`class ${det.class_id}`);
+    }
+    if (Array.isArray(det.sources) && det.sources.length) {
+        tags.push(`src ${det.sources.join(",")}`);
+    }
+    if (det.score != null) {
+        tags.push(`score ${(Number(det.score) || 0).toFixed(2)}`);
+    }
+    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
+    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
 
 init().catch((err) => console.error("Initialization error:", err));

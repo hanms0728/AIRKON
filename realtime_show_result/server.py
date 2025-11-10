@@ -12,7 +12,6 @@ Run:
 
 import argparse
 import glob
-import math
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -23,6 +22,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
 
 # ---------------------- 데이터 모델 ----------------------
@@ -48,6 +49,20 @@ class Settings:
     show_debug_marker: bool = False
     show_scene_axes: bool = False
 
+    def to_viz_config(self) -> VizSizeConfig:
+        return VizSizeConfig(
+            size_mode=self.size_mode,
+            fixed_length=self.fixed_length,
+            fixed_width=self.fixed_width,
+            height_scale=self.height_scale,
+            mesh_scale=self.mesh_scale,
+            mesh_height=self.mesh_height,
+            z_offset=self.z_offset,
+            invert_bev_y=self.invert_bev_y,
+            normalize_vehicle=self.normalize_vehicle,
+            vehicle_y_up=self.vehicle_y_up,
+        )
+
 
 class RuntimeData:
     """Preloads labels and serves per-frame overlay metadata."""
@@ -56,6 +71,7 @@ class RuntimeData:
         self.cfg = cfg
         self.frames = load_labels_dir(cfg.bev_label_dir)
         self.total_frames = len(self.frames)
+        self.viz_cfg = cfg.to_viz_config()
 
     def _prepare_detection_dict(self, row: np.ndarray) -> Dict[str, object]:
         # Input row is either 9 (new format) or 6 (legacy) columns (already normalized)
@@ -69,78 +85,19 @@ class RuntimeData:
         pitch_deg = float(row[7]) if row.shape[0] > 7 else 0.0
         roll_deg = float(row[8]) if row.shape[0] > 8 else 0.0
 
-        if self.cfg.invert_bev_y:
-            cy = -cy
-            yaw_deg = -yaw_deg
-            pitch_deg = -pitch_deg
-            roll_deg = -roll_deg
-
-        scale_override: Optional[Tuple[float, float, float]] = None
-
-        if self.cfg.size_mode == "fixed":
-            length_use = float(self.cfg.fixed_length)
-            width_use = float(self.cfg.fixed_width)
-        else:
-            length_use = max(1e-4, length)
-            width_use = max(1e-4, width)
-
-        if self.cfg.size_mode == "mesh":
-            height = float(self.cfg.mesh_height)
-            scale_override = (
-                float(self.cfg.mesh_scale),
-                float(self.cfg.mesh_scale),
-                float(self.cfg.mesh_scale),
-            )
-        else:
-            height = width_use * float(self.cfg.height_scale)
-
-        if scale_override is not None:
-            scale_vec = [
-                float(scale_override[0]),
-                float(scale_override[1]),
-                float(scale_override[2]),
-            ]
-        else:
-            scale_vec = [
-                float(length_use),
-                float(width_use),
-                float(height),
-            ]
-
-        center_world = np.array(
-            [
-                cx,
-                cy,
-                cz_label + float(self.cfg.z_offset) + height * 0.5,
-            ],
-            dtype=np.float64,
+        item = prepare_visual_item(
+            class_id=cls_id,
+            cx=cx,
+            cy=cy,
+            cz=cz_label,
+            length=length,
+            width=width,
+            yaw_deg=yaw_deg,
+            pitch_deg=pitch_deg,
+            roll_deg=roll_deg,
+            cfg=self.viz_cfg,
         )
-
-        T = build_unit_to_world_T(
-            length_use,
-            width_use,
-            yaw_deg,
-            center_world,
-            pitch_deg=float(pitch_deg),
-            roll_deg=float(roll_deg),
-            up_scale_from_width=float(self.cfg.height_scale),
-            scale_override=scale_override,
-        )
-
-        transform_col_major = T.T.reshape(-1).tolist()
-
-        return {
-            "class_id": cls_id,
-            "length": length_use,
-            "width": width_use,
-            "height": height,
-            "center": center_world.tolist(),
-            "yaw_deg": yaw_deg,
-            "pitch_deg": pitch_deg,
-            "roll_deg": roll_deg,
-            "transform": transform_col_major,
-            "scale": scale_vec,
-        }
+        return item
 
     def get_frame(self, index: int) -> Dict[str, object]:
         if index < 0 or index >= self.total_frames:
@@ -193,59 +150,6 @@ def load_labels_dir(label_dir: str) -> List[Tuple[str, np.ndarray]]:
             frames.append((f, np.zeros((0, 9), dtype=np.float32)))
     return frames
 
-
-def build_unit_to_world_T(
-    length: float,
-    width: float,
-    yaw_deg: float,
-    center_xyz: np.ndarray,
-    pitch_deg: float = 0.0,
-    roll_deg: float = 0.0,
-    up_scale_from_width: float = 0.5,
-    scale_override: Optional[Tuple[float, float, float]] = None,
-) -> np.ndarray:
-    """Constructs 4x4 transform from unit mesh space to world coordinates."""
-    if scale_override is not None:
-        sx = max(1e-4, float(scale_override[0]))
-        sy = max(1e-4, float(scale_override[1]))
-        sz = max(1e-4, float(scale_override[2]))
-    else:
-        sx = max(1e-4, float(length))
-        sy = max(1e-4, float(width))
-        sz = max(1e-4, float(width) * up_scale_from_width)
-
-    S = np.diag([sx, sy, sz, 1.0]).astype(np.float64)
-
-    yaw = math.radians(float(yaw_deg))
-    pitch = math.radians(float(pitch_deg))
-    roll = math.radians(float(roll_deg))
-
-    cz = math.cos(yaw)
-    szn = math.sin(yaw)
-    cp = math.cos(pitch)
-    sp = math.sin(pitch)
-    cr = math.cos(roll)
-    sr = math.sin(roll)
-
-    Rz = np.array(
-        [[cz, -szn, 0.0, 0.0], [szn, cz, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-    Ry = np.array(
-        [[cp, 0.0, sp, 0.0], [0.0, 1.0, 0.0, 0.0], [-sp, 0.0, cp, 0.0], [0.0, 0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-    Rx = np.array(
-        [[1.0, 0.0, 0.0, 0.0], [0.0, cr, -sr, 0.0], [0.0, sr, cr, 0.0], [0.0, 0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-
-    R = Rz @ (Ry @ Rx)
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = R[:3, :3]
-    T = T @ S
-    T[:3, 3] = center_xyz[:3]
-    return T
 
 
 def validate_settings(cfg: Settings) -> None:

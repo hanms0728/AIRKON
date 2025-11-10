@@ -8,6 +8,7 @@ from src.inference_lstm_onnx_pointcloud import (
     compute_bev_properties
 )
 from pointcloud.overlay_obj_on_ply import _flip_y_T
+from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 from pathlib import Path
 from dataclasses import dataclass
 import argparse, signal, time, threading, math, io
@@ -34,10 +35,16 @@ def _unitize_mesh(mesh):
     mesh.rotate(Rx90, center=(0, 0, 0))
     return mesh
 
-def _build_T(length, width, yaw_deg, center_xyz, pitch_deg=0.0, roll_deg=0.0, height_scale=1.0):
-    sx = max(1e-4, float(length))
-    sy = max(1e-4, float(width))
-    sz = max(1e-4, float(width) * float(height_scale))
+def _build_T(length, width, yaw_deg, center_xyz, pitch_deg=0.0, roll_deg=0.0,
+             height_scale=1.0, scale_override: Optional[Tuple[float, float, float]] = None):
+    if scale_override is not None:
+        sx = max(1e-4, float(scale_override[0]))
+        sy = max(1e-4, float(scale_override[1]))
+        sz = max(1e-4, float(scale_override[2]))
+    else:
+        sx = max(1e-4, float(length))
+        sy = max(1e-4, float(width))
+        sz = max(1e-4, float(width) * float(height_scale))
 
     S = np.diag([sx, sy, sz, 1.0]).astype(np.float64)
     y, p, r = map(math.radians, [yaw_deg, pitch_deg, roll_deg])
@@ -58,7 +65,8 @@ class PerCam3DViewer:
     - update(bev_dets)에서 각 슬롯 transform만 갱신
     """
     def __init__(self, title, global_ply, vehicle_glb, invert_ply_y=True, invert_bev_y=True,
-                 size_mode="dynamic", fixed_length=5.0, fixed_width=4.0, height_scale=1.0,
+                 size_mode="bbox", fixed_length=5.0, fixed_width=4.0, height_scale=1.0,
+                 mesh_scale=1.0, mesh_height=0.0,
                  estimate_z=False, z_radius=0.8, z_offset=0.0, max_slots=32, window=(1200,800), _O3D_AVAILABLE=False):
         self.enabled = _O3D_AVAILABLE
         if not self.enabled:
@@ -71,6 +79,8 @@ class PerCam3DViewer:
         self.fixed_length = float(fixed_length)
         self.fixed_width  = float(fixed_width)
         self.height_scale = float(height_scale)
+        self.mesh_scale = float(mesh_scale)
+        self.mesh_height = float(mesh_height)
         self.estimate_z   = bool(estimate_z)
         self.z_radius = float(z_radius)
         self.z_offset = float(z_offset)
@@ -187,17 +197,29 @@ class PerCam3DViewer:
                 z_here = cz + self.z_offset
 
             for i in range(N):
+                Li = float(L[i])
+                Wi = float(W[i])
+                scale_override = None
                 if self.size_mode == "fixed":
                     Li, Wi = self.fixed_length, self.fixed_width
-                else:
-                    Li, Wi = float(L[i]), float(W[i])
+                    height = Wi * self.height_scale
+                elif self.size_mode == "mesh":
+                    scale_override = (self.mesh_scale, self.mesh_scale, self.mesh_scale)
+                    height = self.mesh_height if self.mesh_height > 0 else self.mesh_scale
+                else:  # bbox/dynamic
+                    height = Wi * self.height_scale
 
-                # 바닥 접지: center z는 “모델 중앙”이므로 (높이/2) 만큼 올려줌
-                height = Wi * self.height_scale
-                center3 = np.array([xy[i,0], xy[i,1], z_here[i] + height*0.5], dtype=np.float64)
+                height = max(0.0, float(height))
+                center3 = np.array([
+                    xy[i,0],
+                    xy[i,1],
+                    z_here[i] + height * 0.5
+                ], dtype=np.float64)
+
                 T = _build_T(Li, Wi, float(yaw[i]), center3,
                              pitch_deg=float(pitch[i]), roll_deg=float(roll[i]),
-                             height_scale=self.height_scale)
+                             height_scale=self.height_scale,
+                             scale_override=scale_override)
                 self._apply_slot(self.meshes[i], T, reset=True)
 
 # ---- Camera assets / helpers ----------------------------------------------
@@ -736,7 +758,8 @@ class UDPSender:
 class EdgeWebBridge:
     def __init__(self, *, host: str, port: int, global_ply: str, vehicle_glb: str,
                  camera_assets: Dict[int, CameraAssets], site_name: str = "edge",
-                 jpeg_quality: int = 85, static_root: Optional[str] = None):
+                 jpeg_quality: int = 85, static_root: Optional[str] = None,
+                 viz_config: VizSizeConfig):
         try:
             from fastapi import FastAPI, HTTPException
             from fastapi.middleware.cors import CORSMiddleware
@@ -760,6 +783,7 @@ class EdgeWebBridge:
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
         self.camera_assets = camera_assets
         self.started_at = time.time()
+        self.viz_cfg = viz_config
         self._lock = threading.Lock()
         self._latest: Dict[int, Dict] = {
             cid: {"timestamp": None, "capture_ts": None, "detections": [], "overlay": None}
@@ -824,6 +848,7 @@ class EdgeWebBridge:
                 "site": self.site_name,
                 "started_at": self.started_at,
                 "cameras": list(self.camera_assets.keys()),
+                "config": self.viz_cfg.as_client_dict(),
             }
 
         @self.app.get("/api/cameras")
@@ -894,21 +919,34 @@ class EdgeWebBridge:
         items = []
         for d in bev_dets or []:
             center = d.get("center")
+            if center is None or len(center) < 2:
+                continue
+            vis = prepare_visual_item(
+                class_id=int(d.get("class_id", 0)),
+                cx=float(center[0]),
+                cy=float(center[1]),
+                cz=float(d.get("cz", 0.0)),
+                length=float(d.get("length", 0.0)),
+                width=float(d.get("width", 0.0)),
+                yaw_deg=float(d.get("yaw", 0.0)),
+                pitch_deg=float(d.get("pitch", 0.0)),
+                roll_deg=float(d.get("roll", 0.0)),
+                cfg=self.viz_cfg,
+                score=d.get("score"),
+            )
             tri = d.get("tri")
+            if hasattr(tri, "tolist"):
+                tri = tri.tolist()
             front_edge = d.get("front_edge")
             if hasattr(front_edge, "tolist"):
                 front_edge = front_edge.tolist()
             items.append({
-                "center": [float(center[0]), float(center[1])] if center is not None else None,
-                "length": float(d.get("length", 0.0)),
-                "width": float(d.get("width", 0.0)),
+                **vis,
                 "yaw": float(d.get("yaw", 0.0)),
-                "score": float(d.get("score", 0.0)),
-                "cz": float(d.get("cz", 0.0)),
                 "pitch": float(d.get("pitch", 0.0)),
                 "roll": float(d.get("roll", 0.0)),
                 "front_edge": front_edge,
-                "tri": tri.tolist() if hasattr(tri, "tolist") else tri,
+                "tri": tri,
             })
         return items
 
@@ -1068,14 +1106,44 @@ def main():
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    # visualization scaling (shared across web/3d)
+    ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh",
+                    help="Vehicle scaling mode: bbox=use BEV length/width, fixed=use --fixed-*, mesh=uniform scale without distortion")
+    ap.add_argument("--fixed-length", type=float, default=4.5,
+                    help="Fixed vehicle length when --size-mode=fixed")
+    ap.add_argument("--fixed-width", type=float, default=1.8,
+                    help="Fixed vehicle width when --size-mode=fixed")
+    ap.add_argument("--height-scale", type=float, default=0.5,
+                    help="Height = width * height_scale when size-mode in {bbox,fixed}")
+    ap.add_argument("--mesh-scale", type=float, default=1.0,
+                    help="Uniform scale multiplier applied to the normalized GLB when --size-mode=mesh")
+    ap.add_argument("--mesh-height", type=float, default=0.0,
+                    help="Approximate vehicle height used for ground offset when --size-mode=mesh")
+    ap.add_argument("--z-offset", type=float, default=0.0,
+                    help="Additional Z offset applied to cz before placing the mesh")
+    ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true",
+                    help="Invert BEV Y axis and yaw/pitch/roll signs for visualization outputs (default)")
+    ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false",
+                    help="Do not invert BEV Y axis for visualization outputs")
+    ap.set_defaults(invert_bev_y=True)
+    ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true",
+                    help="Normalize vehicle GLB to unit size on the web client")
+    ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false",
+                    help="Keep original GLB scale (no normalization)")
+    ap.set_defaults(normalize_vehicle=True)
+    ap.add_argument("--vehicle-y-up", dest="vehicle_y_up", action="store_true",
+                    help="Treat GLB as Y-up → rotate +90° around X to convert to Z-up (default)")
+    ap.add_argument("--vehicle-z-up", dest="vehicle_y_up", action="store_false",
+                    help="Treat GLB as already Z-up (skip rotation)")
+    ap.set_defaults(vehicle_y_up=True)
     # web bridge
     ap.add_argument("--web-enable", action="store_true")
     ap.add_argument("--web-host", default="0.0.0.0")
-    ap.add_argument("--web-port", type=int, default=18080)
+    ap.add_argument("--web-port", type=int, default=10000)
     ap.add_argument("--web-site-name", default="edge-site")
     ap.add_argument("--web-jpeg-quality", type=int, default=85)
     # 3d
-    ap.add_argument("--global-ply", type=str, default="pointcloud/merged.ply")
+    ap.add_argument("--global-ply", type=str, default="pointcloud/merged_05.ply")
     ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
     ap.add_argument("--viewer3d", action="store_true")           # ← 3D 창 켜기
     ap.add_argument("--viewer3d-fixed-size", action="store_true")# ← 객체 스케일 고정 모드
@@ -1105,6 +1173,18 @@ def main():
     except Exception:
         _O3D_AVAILABLE = False
 
+    viz_cfg = VizSizeConfig(
+        size_mode=args.size_mode,
+        fixed_length=args.fixed_length,
+        fixed_width=args.fixed_width,
+        height_scale=args.height_scale,
+        mesh_scale=args.mesh_scale,
+        mesh_height=args.mesh_height,
+        z_offset=args.z_offset,
+        invert_bev_y=args.invert_bev_y,
+        normalize_vehicle=args.normalize_vehicle,
+        vehicle_y_up=args.vehicle_y_up,
+    )
     
     H, W = map(int, args.img_size.split(","))
     strides = tuple(float(s) for s in args.strides.split(","))
@@ -1216,6 +1296,7 @@ def main():
                 camera_assets=camera_assets,
                 site_name=args.web_site_name,
                 jpeg_quality=args.web_jpeg_quality,
+                viz_config=viz_cfg,
             )
             web_bridge.start()
         except Exception as e:

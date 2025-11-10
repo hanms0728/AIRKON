@@ -733,7 +733,7 @@ def main():
 if __name__ == "__main__":
     main()
 """
-python3.10 ./src/inference_lstm_onnx.py \
+python ./src/inference_lstm_onnx.py \
   --input-dir ./dataset_example/images \
   --output-dir ./inference_results_onnx \
   --weights ./onnx/yolo11m_2_5d_epoch_005.onnx \
