@@ -265,6 +265,8 @@ class GlobalWebServer:
         static_root: Optional[Path] = None,
         viz_config: VizSizeConfig = VizSizeConfig(),
         client_config: Optional[dict] = None,
+        tracker_fixed_length: Optional[float] = None,
+        tracker_fixed_width: Optional[float] = None,
     ):
         self.global_ply = str(Path(global_ply).resolve())
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
@@ -667,6 +669,8 @@ class RealtimeFusionServer:
         enable_web: bool = True,
         viz_config: VizSizeConfig = VizSizeConfig(),
         client_config: Optional[dict] = None,
+        tracker_fixed_length: Optional[float] = None,
+        tracker_fixed_width: Optional[float] = None,
     ):
         self.fps = fps
         self.dt = 1.0 / max(1e-3, fps)
@@ -688,6 +692,8 @@ class RealtimeFusionServer:
         self.carla_tx = TrackBroadcaster(carla_host, carla_port) if carla_host else None
         self.viz_cfg = viz_config
         self.client_config = client_config or {}
+        self.tracker_fixed_length = float(tracker_fixed_length) if tracker_fixed_length is not None else None
+        self.tracker_fixed_width = float(tracker_fixed_width) if tracker_fixed_width is not None else None
         self.web = GlobalWebServer(
             global_ply=global_ply,
             vehicle_glb=vehicle_glb,
@@ -781,7 +787,14 @@ class RealtimeFusionServer:
             # ---- ③ 추적(SORT) ----
             # tracker는 [class, x_c, y_c, l, w, angle] Nx6 입력을 받게 맞춤 :contentReference[oaicite:14]{index=14}
             dets_for_tracker = np.array(
-                [[0, det["cx"], det["cy"], det["length"], det["width"], det["yaw"]] for det in fused],
+                [[
+                    0,
+                    det["cx"],
+                    det["cy"],
+                    (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
+                    (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
+                    det["yaw"],
+                ] for det in fused],
                 dtype=float
             ) if fused else np.zeros((0,6), dtype=float)
             tracks = self.tracker.update(dets_for_tracker)  # shape: [N, 8] = [track_id, class, x, y, l, w, yaw]
@@ -1017,6 +1030,10 @@ def main():
     ap.add_argument("--web-host", default="0.0.0.0", help="웹 서버 호스트")
     ap.add_argument("--web-port", type=int, default=18090, help="웹 서버 포트")
     ap.add_argument("--no-web", action="store_true", help="FastAPI 웹 뷰어 비활성화")
+    ap.add_argument("--tracker-fixed-length", type=float, default=None,
+                    help="SORT Tracker에 입력할 길이를 고정 (미지정 시 detect된 길이 사용)")
+    ap.add_argument("--tracker-fixed-width", type=float, default=None,
+                    help="SORT Tracker에 입력할 너비를 고정 (미지정 시 detect된 너비 사용)")
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh",
                     help="웹 뷰에서 사용할 차량 스케일링 모드")
     ap.add_argument("--fixed-length", type=float, default=4.5,
@@ -1091,6 +1108,8 @@ def main():
         enable_web=(not args.no_web),
         viz_config=viz_cfg,
         client_config=client_config,
+        tracker_fixed_length=args.tracker_fixed_length,
+        tracker_fixed_width=args.tracker_fixed_width,
     )
     try:
         server.start()

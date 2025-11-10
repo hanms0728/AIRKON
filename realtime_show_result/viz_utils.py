@@ -90,8 +90,12 @@ def _compute_length_width(length: float, width: float, cfg: VizSizeConfig) -> Tu
 
 def _compute_scale_and_height(width_use: float, cfg: VizSizeConfig) -> Tuple[float, Tuple[float, float, float]]:
     if cfg.size_mode == "mesh":
-        height = float(cfg.mesh_height) if cfg.mesh_height > 0 else float(cfg.mesh_scale)
-        scale_override = (float(cfg.mesh_scale), float(cfg.mesh_scale), float(cfg.mesh_scale))
+        height = float(cfg.mesh_height)
+        scale_override = (
+            float(cfg.mesh_scale),
+            float(cfg.mesh_scale),
+            float(cfg.mesh_scale),
+        )
     else:
         height = width_use * float(cfg.height_scale)
         scale_override = None
@@ -129,7 +133,7 @@ def prepare_visual_item(
     length_use, width_use = _compute_length_width(length, width, cfg)
     height, scale_override = _compute_scale_and_height(width_use, cfg)
 
-    height_for_center = height if cfg.size_mode == "mesh" else width_use * float(cfg.height_scale)
+    height_for_center = float(height)
     center_world = np.array(
         [
             cx,
