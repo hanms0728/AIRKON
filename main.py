@@ -1283,6 +1283,7 @@ def main():
                         # bump는 루프마다 가볍게 호출해도 부담 거의 없음
                         gui_timer.bump()
                         continue
+                    cv2.imwrite(f'{cid}.jpg', bgr)
 
                 if not USE_GUI:
                     if not ticker.tick():
