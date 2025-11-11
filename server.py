@@ -738,7 +738,8 @@ class RealtimeFusionServer:
             return True
         return False
 
-    def _log_pipeline(self, raw_stats: Dict[str, int], fused: List[dict], tracks: List[dict], timestamp: float):
+    def _log_pipeline(self, raw_stats: Dict[str, int], fused: List[dict], tracks: List[dict], timestamp: float,
+                      timings: Optional[Dict[str, float]] = None):
         total_raw = sum(raw_stats.values())
         fused_count = len(fused)
         track_count = len(tracks)
@@ -754,6 +755,9 @@ class RealtimeFusionServer:
         if track_count:
             sample_track = json.dumps(tracks[0], ensure_ascii=False)
             print(f"  track_sample={sample_track}")
+        if timings:
+            timing_str = " ".join(f"{k}={v:.2f}ms" for k, v in timings.items())
+            print(f"  timings {timing_str}")
 
     def start(self):
         self.receiver.start()
@@ -762,6 +766,7 @@ class RealtimeFusionServer:
     def _main_loop(self):
         last = time.time()
         while True:
+            timings: Dict[str, float] = {}
             # 수신 큐에서 가능한 만큼 비움 → 최신으로 buffer 업데이터
             try:
                 while True:
@@ -781,8 +786,12 @@ class RealtimeFusionServer:
             last = now
 
             # ---- ① 카메라별 최신 → ② 융합 ----
+            t0 = time.perf_counter()
             raw_dets = self._gather_current()
+            timings["gather"] = (time.perf_counter() - t0) * 1000.0
+            t1 = time.perf_counter()
             fused = self._fuse_boxes(raw_dets)
+            timings["fuse"] = (time.perf_counter() - t1) * 1000.0
 
             # ---- ③ 추적(SORT) ----
             # tracker는 [class, x_c, y_c, l, w, angle] Nx6 입력을 받게 맞춤 :contentReference[oaicite:14]{index=14}
@@ -797,7 +806,9 @@ class RealtimeFusionServer:
                 ] for det in fused],
                 dtype=float
             ) if fused else np.zeros((0,6), dtype=float)
+            t2 = time.perf_counter()
             tracks = self.tracker.update(dets_for_tracker)  # shape: [N, 8] = [track_id, class, x, y, l, w, yaw]
+            timings["track"] = (time.perf_counter() - t2) * 1000.0
             self._update_track_metadata(tracks, fused)
             self._broadcast_tracks(tracks, now)
             tracks_for_output = self._tracks_to_dicts(tracks)
@@ -817,7 +828,7 @@ class RealtimeFusionServer:
                 for det in raw_dets:
                     cam = det.get("cam", "?")
                     stats[cam] = stats.get(cam, 0) + 1
-                self._log_pipeline(stats, fused_payload, tracks_for_output, now)
+                self._log_pipeline(stats, fused_payload, tracks_for_output, now, timings)
 
             # ==== 저장(롤링) ====
             if self.saver:
