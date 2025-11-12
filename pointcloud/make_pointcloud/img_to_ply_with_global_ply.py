@@ -418,6 +418,53 @@ def K_from_fov_hv(W, H, fov_x_deg, fov_y_deg):
                      [0, fy, cy],
                      [0,  0,  1]], dtype=np.float64)
 
+def fov_from_K_and_size(K: np.ndarray, W: int, H: int):
+    fx = float(K[0, 0]); fy = float(K[1, 1])
+    hfov = math.degrees(2.0 * math.atan(W / (2.0 * fx)))
+    vfov = math.degrees(2.0 * math.atan(H / (2.0 * fy)))
+    return hfov, vfov
+
+def _npz_get(data, keys, default=None):
+    for k in keys:
+        if k in data:
+            return data[k]
+    return default
+
+def load_intrinsics_from_npz(npz_path: str):
+    """
+    반환: (hfov, vfov, K_rect, W, H)
+      - hfov/vfov: 저장돼 있으면 float, 없으면 None
+      - K_rect: rectified/new K, 없으면 None
+      - W,H: size/img_size 또는 width/height에서 유추 (없으면 None)
+    허용 키:
+      - FOV: 'hfov'/'fov_x', 'vfov'/'fov_y'
+      - K(rect): 'new_K','K_new','rectified_K','newK' (그 외 'K'는 fallback)
+      - 크기: 'size','img_size' 또는 'width','height'
+    """
+    data = np.load(npz_path, allow_pickle=True)
+
+    hfov = _npz_get(data, ["hfov", "fov_x"])
+    vfov = _npz_get(data, ["vfov", "fov_y"])
+
+    K_rect = _npz_get(data, ["new_K", "K_new", "rectified_K", "newK"])
+    if K_rect is None:
+        K_rect = _npz_get(data, ["K"])
+
+    size = _npz_get(data, ["size", "img_size"])
+    W = _npz_get(data, ["width"])
+    H = _npz_get(data, ["height"])
+    if size is not None and (W is None or H is None):
+        W = int(size[0]); H = int(size[1])
+    if W is not None: W = int(np.asarray(W).item())
+    if H is not None: H = int(np.asarray(H).item())
+
+    if hfov is not None:
+        hfov = float(np.asarray(hfov).item())
+    if vfov is not None:
+        vfov = float(np.asarray(vfov).item())
+    if K_rect is not None:
+        K_rect = np.asarray(K_rect, dtype=np.float64)
+    return hfov, vfov, K_rect, W, H
 
 def _axes_pointcloud(origin_xyz, R_axes, scale=5.0, n_pts=100, include_z=True, color_strength=1.0):
     """
@@ -769,6 +816,10 @@ def main():
                     help="Alpha of camera-visible overlay when composing BEV preview (0..1, default 0.70)")
     ap.add_argument("--global-gain", type=float, default=0.60,
                     help="Brightness gain for global PLY layer in BEV preview (e.g., 0.3~1.2, default 0.60)")
+    ap.add_argument("--intrinsic-source", choices=["cli","npz"], default="npz",
+                    help="카메라 내부 파라미터 소스 선택: 'npz'(기본) 또는 'cli'. npz는 undistort 단계에서 저장한 NPZ에서 K/FOV를 읽음")
+    ap.add_argument("--intrinsic-npz", type=str, default=None,
+                    help="--intrinsic-source=npz 인 경우 사용할 NPZ 경로(undistort_params.npz 등)")
     args = ap.parse_args()
     origin_cv = None
 
@@ -795,10 +846,40 @@ def main():
         raise FileNotFoundError(args.image)
     H, W = img.shape[:2]
 
-    if args.fov_y is not None:
-        K = K_from_fov_hv(W, H, args.fov, args.fov_y)
+    # ---- Intrinsics selection (default: NPZ) ----
+    if args.intrinsic_source == "npz":
+        if not args.intrinsic_npz:
+            raise ValueError("--intrinsic-source=npz 사용 시 --intrinsic-npz 경로가 필요합니다.")
+        hfov_npz, vfov_npz, K_rect, W_npz, H_npz = load_intrinsics_from_npz(args.intrinsic_npz)
+
+        if hfov_npz is not None and vfov_npz is not None:
+            # NPZ에 FOV가 있으면 현재 입력 이미지 해상도에 맞춰 K 구성
+            K = K_from_fov_hv(W, H, hfov_npz, vfov_npz)
+            # HUD/저장 경로 일관성을 위해 CLI 값도 업데이트
+            args.fov   = float(hfov_npz)
+            args.fov_y = float(vfov_npz)
+        elif K_rect is not None:
+            # undistort된 이미지를 입력으로 쓰므로 rectified K를 우선 사용
+            if (W_npz is not None and H_npz is not None) and (W != W_npz or H != H_npz):
+                sx = W / float(W_npz); sy = H / float(H_npz)
+                S = np.array([[sx, 0.0, 0.0],
+                            [0.0, sy, 0.0],
+                            [0.0, 0.0, 1.0]], dtype=np.float64)
+                K = S @ K_rect
+            else:
+                K = K_rect
+            # FOV 역산하여 HUD/로그에 사용
+            hf, vf = fov_from_K_and_size(K, W, H)
+            args.fov   = float(hf)
+            args.fov_y = float(vf)
+        else:
+            raise ValueError(f"NPZ({args.intrinsic_npz})에서 FOV도 K도 찾지 못했습니다.")
     else:
-        K = K_from_fov(W, H, args.fov)
+        # 기존 CLI 경로 유지
+        if args.fov_y is not None:
+            K = K_from_fov_hv(W, H, args.fov, args.fov_y)
+        else:
+            K = K_from_fov(W, H, args.fov)
     x,y,z = [float(v) for v in args.pos.split(",")]
     yaw,pitch,roll = [float(v) for v in args.rot.split(",")]
 
@@ -1050,6 +1131,15 @@ def main():
                     M_c2w_carla[:3, :3] = R_carla
                     M_c2w_carla[:3, 3]  = np.array([x, y, z], dtype=np.float64)
 
+                    # --- add: explicit HFOV/VFOV (deg) ---
+                    fx = float(K_full[0, 0]); fy = float(K_full[1, 1])
+                    # 우선순위: 사용자가 --fov-y를 넘겼다면 그 값을 신뢰, 없으면 K로부터 복원
+                    fov_x_deg = float(args.fov)  # --fov 는 수평 FOV
+                    if args.fov_y is not None:
+                        fov_y_deg = float(args.fov_y)
+                    else:
+                        fov_y_deg = math.degrees(2.0 * math.atan(H / (2.0 * fy)))
+
                     npz_path = os.path.join(save_dir, f"{fname_stem}_pixel2world_lut.npz")
                     np.savez_compressed(
                         npz_path,
@@ -1061,7 +1151,10 @@ def main():
                         ground_valid_mask=ground_valid_mask.astype(np.uint8),
                         K=K_full.astype(np.float32),
                         cam_pose=cam_pose.astype(np.float32),                            # [x,y,z,pitch,yaw,roll]
-                        width=np.int32(W), height=np.int32(H), fov=np.float32(fov),
+                        width=np.int32(W), height=np.int32(H),
+                        fov=np.float32(fov),                 # (기존 유지: 수평 FOV) (fov_x와 같음)
+                        hfov=np.float32(fov_x_deg),         # (신규) 수평 FOV
+                        vfov_y=np.float32(fov_y_deg),         # (신규) 수직 FOV
                         ray_model=np.array('forward', dtype='U'),                        # fixed to match multi-cam default
                         sem_channel=np.array('auto', dtype='U'),                         # fixed to match multi-cam default
                         floor_ids=floor_ids_arr.astype(np.int32),
