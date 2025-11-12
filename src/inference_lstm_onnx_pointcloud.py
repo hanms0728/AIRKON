@@ -536,11 +536,15 @@ def _lut_pick_valid_mask(lut):
     return V
 
 
-def _bilinear_lut_xy(lut, u, v):
+def _bilinear_lut_xy(lut, u, v, min_valid_corners: int = 3, boundary_eps: float = 1e-3):
     """
-    lut: dict-like with 'X','Y', and a valid mask (picked by _lut_pick_valid_mask)
+    lut: dict-like with 'X','Y', and a valid mask
     u,v: 1D float arrays (pixel coords, 0..W-1 / 0..H-1)
-    returns: Xw, Yw, valid (all 1D, same shape as u/v)
+    returns: Xw, Yw, valid (same shape as u/v)
+
+    - 경계 클램프(boundary_eps)로 보간 인덱스가 범위를 벗어나는 것을 방지
+    - 4코너 AND 대신, 최소 min_valid_corners개가 유효하면
+      유효 코너만 가중치 재정규화 후 보간 허용
     """
     X = np.asarray(lut["X"])
     Y = np.asarray(lut["Y"])
@@ -550,11 +554,17 @@ def _bilinear_lut_xy(lut, u, v):
     u = np.asarray(u, dtype=np.float64).ravel()
     v = np.asarray(v, dtype=np.float64).ravel()
 
+    # --- 경계 클램프 ---
+    eps = float(boundary_eps)
+    if not np.isfinite(eps) or eps <= 0:
+        eps = 1e-3
+    u = np.clip(u, 0.0, W - 1 - eps)
+    v = np.clip(v, 0.0, H - 1 - eps)
+
     Xw = np.full(u.shape, np.nan, dtype=np.float32)
     Yw = np.full(v.shape, np.nan, dtype=np.float32)
     valid = np.zeros(u.shape, dtype=bool)
 
-    # in-bounds (보간 4코너가 존재하도록 -1 여유)
     u0 = np.floor(u).astype(np.int64)
     v0 = np.floor(v).astype(np.int64)
     u1 = u0 + 1
@@ -564,60 +574,68 @@ def _bilinear_lut_xy(lut, u, v):
     if not np.any(ok):
         return Xw, Yw, valid
 
-    # 부분 집합 (ok 인덱스만)
-    u0_ok = u0[ok]
-    v0_ok = v0[ok]
-    u1_ok = u1[ok]
-    v1_ok = v1[ok]
+    u0_ok = u0[ok]; v0_ok = v0[ok]
+    u1_ok = u1[ok]; v1_ok = v1[ok]
     du = u[ok] - u0_ok
     dv = v[ok] - v0_ok
 
-    # 4 코너 샘플
-    X00 = X[v0_ok, u0_ok]
-    X10 = X[v0_ok, u1_ok]
-    X01 = X[v1_ok, u0_ok]
-    X11 = X[v1_ok, u1_ok]
-    Y00 = Y[v0_ok, u0_ok]
-    Y10 = Y[v0_ok, u1_ok]
-    Y01 = Y[v1_ok, u0_ok]
-    Y11 = Y[v1_ok, u1_ok]
-    V00 = V[v0_ok, u0_ok]
-    V10 = V[v0_ok, u1_ok]
-    V01 = V[v1_ok, u0_ok]
-    V11 = V[v1_ok, u1_ok]
+    X00 = X[v0_ok, u0_ok]; X10 = X[v0_ok, u1_ok]
+    X01 = X[v1_ok, u0_ok]; X11 = X[v1_ok, u1_ok]
+    Y00 = Y[v0_ok, u0_ok]; Y10 = Y[v0_ok, u1_ok]
+    Y01 = Y[v1_ok, u0_ok]; Y11 = Y[v1_ok, u1_ok]
+    V00 = V[v0_ok, u0_ok]; V10 = V[v0_ok, u1_ok]
+    V01 = V[v1_ok, u0_ok]; V11 = V[v1_ok, u1_ok]
 
-    # 4코너 모두 유효해야 보간 허용(필요 시 any로 바꿔도 됨)
-    valid_ok = V00 & V10 & V01 & V11
-    if np.any(valid_ok):
+    # 유효 코너 개수 기준 통과
+    min_c = int(min_valid_corners)
+    min_c = 0 if min_c < 0 else (4 if min_c > 4 else min_c)
+    nvalid = V00.astype(int) + V10.astype(int) + V01.astype(int) + V11.astype(int)
+    allow = nvalid >= min_c
+
+    if np.any(allow):
         w00 = (1.0 - du) * (1.0 - dv)
         w10 = du * (1.0 - dv)
         w01 = (1.0 - du) * dv
         w11 = du * dv
 
+        # 유효 코너만 가중치 반영 + 재정규화
+        w00[~V00] = 0.0; w10[~V10] = 0.0; w01[~V01] = 0.0; w11[~V11] = 0.0
+        wsum = w00 + w10 + w01 + w11
+        wsum[wsum == 0.0] = 1.0
+        w00 /= wsum; w10 /= wsum; w01 /= wsum; w11 /= wsum
+
         Xw_ok = (w00 * X00 + w10 * X10 + w01 * X01 + w11 * X11).astype(np.float32)
         Yw_ok = (w00 * Y00 + w10 * Y10 + w01 * Y01 + w11 * Y11).astype(np.float32)
 
-        # 전체 길이 마스크로 배치
-        whole_mask = np.zeros_like(ok, dtype=bool)
-        whole_mask[ok] = valid_ok
-
-        Xw_ok_valid = Xw_ok[valid_ok]
-        Yw_ok_valid = Yw_ok[valid_ok]
-
-        Xw[whole_mask] = Xw_ok_valid
-        Yw[whole_mask] = Yw_ok_valid
-        valid[whole_mask] = True
+        whole = np.zeros_like(ok, dtype=bool)
+        whole[ok] = allow
+        Xw[whole] = Xw_ok[allow]
+        Yw[whole] = Yw_ok[allow]
+        valid[whole] = True
 
     return Xw, Yw, valid
 
 
-def _bilinear_lut_xyz(lut, u, v):
-    """XY 보간에 Z까지 확장."""
-    Xw, Yw, valid = _bilinear_lut_xy(lut, u, v)
-    Z = np.asarray(lut["Z"])
+def _bilinear_lut_xyz(lut, u, v, min_valid_corners: int = 3, boundary_eps: float = 1e-3):
+    """XY 보간에 Z까지 확장. LUT에 Z가 없으면 Z는 NaN."""
+    Xw, Yw, valid = _bilinear_lut_xy(
+        lut, u, v,
+        min_valid_corners=min_valid_corners,
+        boundary_eps=boundary_eps
+    )
+    Z = lut.get("Z", None)
+    if Z is None:
+        Zw = np.full_like(Xw, np.nan, dtype=np.float32)
+        return Xw, Yw, Zw, valid
+
+    Z = np.asarray(Z)
     H, W = Z.shape
     u = np.asarray(u, dtype=np.float64).ravel()
     v = np.asarray(v, dtype=np.float64).ravel()
+
+    eps = float(boundary_eps) if np.isfinite(boundary_eps) and boundary_eps > 0 else 1e-3
+    u = np.clip(u, 0.0, W - 1 - eps)
+    v = np.clip(v, 0.0, H - 1 - eps)
 
     Zw = np.full(u.shape, np.nan, dtype=np.float32)
     u0 = np.floor(u).astype(np.int64)
@@ -627,17 +645,13 @@ def _bilinear_lut_xyz(lut, u, v):
     ok = (u0 >= 0) & (v0 >= 0) & (u1 < W) & (v1 < H)
 
     if np.any(ok):
-        u0_ok = u0[ok]
-        v0_ok = v0[ok]
-        u1_ok = u1[ok]
-        v1_ok = v1[ok]
+        u0_ok = u0[ok]; v0_ok = v0[ok]
+        u1_ok = u1[ok]; v1_ok = v1[ok]
         du = u[ok] - u0_ok
         dv = v[ok] - v0_ok
 
-        Z00 = Z[v0_ok, u0_ok]
-        Z10 = Z[v0_ok, u1_ok]
-        Z01 = Z[v1_ok, u0_ok]
-        Z11 = Z[v1_ok, u1_ok]
+        Z00 = Z[v0_ok, u0_ok]; Z10 = Z[v0_ok, u1_ok]
+        Z01 = Z[v1_ok, u0_ok]; Z11 = Z[v1_ok, u1_ok]
 
         w00 = (1.0 - du) * (1.0 - dv)
         w10 = du * (1.0 - dv)
@@ -651,7 +665,8 @@ def _bilinear_lut_xyz(lut, u, v):
     return Xw, Yw, Zw, valid
 
 
-def tris_img_to_bev_by_lut(tris_img: np.ndarray, lut_data: dict, bev_scale: float = 1.0):
+def tris_img_to_bev_by_lut(tris_img: np.ndarray, lut_data: dict, bev_scale: float = 1.0,
+                            min_valid_corners: int = 3, boundary_eps: float = 1e-3):
     """
     이미지 좌표의 삼각형들(tris_img: [N,3,2])을 LUT(npz)의 (X,Y,Z)로 보간해 BEV 평면으로 투영.
     - bilinear 보간 (X,Y,Z), 유효하지 않은 점이 있는 tri는 버림
@@ -668,7 +683,11 @@ def tris_img_to_bev_by_lut(tris_img: np.ndarray, lut_data: dict, bev_scale: floa
     u = tris_img[:, :, 0].reshape(-1)
     v = tris_img[:, :, 1].reshape(-1)
 
-    Xw, Yw, Zw, valid = _bilinear_lut_xyz(lut_data, u, v)
+    Xw, Yw, Zw, valid = _bilinear_lut_xyz(
+        lut_data, u, v,
+        min_valid_corners=min_valid_corners,
+        boundary_eps=boundary_eps
+    )
 
     # tri 단위 유효성: 각 tri의 3점 모두 valid
     valid = valid.reshape(-1, 3)
@@ -866,6 +885,12 @@ def main():
     # BEV via LUT
     ap.add_argument("--lut-path", type=str, required=True, help="pixel2world_lut.npz 경로")
     ap.add_argument("--bev-scale", type=float, default=1.0)
+    
+    # LUT interpolation robustness
+    ap.add_argument("--lut-min-corners", type=int, default=3,
+                    help="Min number of valid bilinear corners (0..4) to accept a sample (default: 3)")
+    ap.add_argument("--lut-boundary-eps", type=float, default=1e-3,
+                    help="Clamp (u,v) to [0,W-1-eps]/[0,H-1-eps] (default: 1e-3)")
 
     # BEV 3D label options
     ap.add_argument("--bev-label-3d", action="store_true", default=True,
@@ -1016,7 +1041,9 @@ def main():
         if pred_tris_orig:
             pred_stack_orig = np.asarray(pred_tris_orig, dtype=np.float64)  # [N,3,2]
             pred_tris_bev_xy, pred_tris_bev_z, good_mask = tris_img_to_bev_by_lut(
-                pred_stack_orig, lut_data, bev_scale=float(args.bev_scale)
+                pred_stack_orig, lut_data, bev_scale=float(args.bev_scale),
+                min_valid_corners=int(args.lut_min_corners),
+                boundary_eps=float(args.lut_boundary_eps)
             )
             for idx, det in enumerate(dets):
                 if idx >= pred_tris_bev_xy.shape[0]:
@@ -1076,7 +1103,11 @@ def main():
         if gt_tri_orig_for_bev.size > 0:
             gt_u = gt_tri_orig_for_bev[:, :, 0].reshape(-1)
             gt_v = gt_tri_orig_for_bev[:, :, 1].reshape(-1)
-            Xg, Yg, Zg, Vg = _bilinear_lut_xyz(lut_data, gt_u, gt_v)
+            Xg, Yg, Zg, Vg = _bilinear_lut_xyz(
+                lut_data, gt_u, gt_v,
+                min_valid_corners=int(args.lut_min_corners),
+                boundary_eps=float(args.lut_boundary_eps)
+            )
             Vg = Vg.reshape(-1, 3)
             good_gt = np.all(Vg, axis=1)
             Xg = Xg.reshape(-1, 3)
@@ -1131,12 +1162,13 @@ if __name__ == "__main__":
 """
 python ./src/inference_lstm_onnx_pointcloud.py \
   --input-dir ./dataset_example_pointcloud_9/images \
-  --output-dir ./inference_results_npz_9\
+  --output-dir ./inference_results_npz_9 \
   --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
-  --temporal lstm \
-  --seq-mode by_prefix --reset-per-seq \
+  --temporal lstm --seq-mode by_prefix --reset-per-seq \
   --conf 0.8 --nms-iou 0.2 --topk 50 \
   --gt-label-dir ./dataset_example_pointcloud_9/labels \
   --lut-path ./pointcloud/cloud_rgb_npz/cloud_rgb_9.npz \
-  --bev-scale 1.0
+  --bev-scale 1.0 \
+  --lut-min-corners 3 \
+  --lut-boundary-eps 1e-3
 """

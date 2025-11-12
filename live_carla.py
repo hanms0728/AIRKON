@@ -2,9 +2,6 @@ import carla
 import time
 import socket
 import json
-import signal
-import sys
-import numpy as np
 
 FPS = 30
 UDP_IP = "0.0.0.0"

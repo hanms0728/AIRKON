@@ -51,7 +51,7 @@ class RenderWorker:
     whenever the latest pose/FOV changes. The main UI thread only handles
     key inputs and displays the most recent frame from this worker.
     """
-    def __init__(self, pts_live, cols_live, img_bgr, z_near, z_far, splat, initial_pose, initial_fov, bev_size=(1600, 780), pad=15):
+    def __init__(self, pts_live, cols_live, img_bgr, z_near, z_far, splat, initial_pose, initial_fov, initial_fov_y=None, bev_size=(1600, 780), pad=15):
         self.pts_live = pts_live
         self.cols_live = cols_live
         self.img_bgr = img_bgr
@@ -65,6 +65,7 @@ class RenderWorker:
         self._lock = threading.Lock()
         self._pose = list(initial_pose)  # [x,y,z,yaw,pitch,roll]
         self._fov = float(initial_fov)
+        self._fov_y = None if initial_fov_y is None else float(initial_fov_y)
         self._dirty = True
         self._stop = False
 
@@ -153,7 +154,10 @@ class RenderWorker:
 
             try:
                 # compute projection for current pose
-                K_live = K_from_fov(W, H, fov)
+                if self._fov_y is not None:
+                    K_live = K_from_fov_hv(W, H, fov, self._fov_y)
+                else:
+                    K_live = K_from_fov(W, H, fov)
                 Rt_live, R_wc_live, _ = pose_to_extrinsic(x, y, z, yaw, pitch, roll)
                 pts_vis_live, cols_vis_live = project_visible_points(
                     pts, img, K_live, Rt_live, self.z_near, self.z_far, self.splat
@@ -728,7 +732,7 @@ def main():
     ap.add_argument("--fov-y", type=float, default=None, help="(optional) vertical field of view in degrees; if set, use both HFOV/VFOV")
     ap.add_argument("--z-near", type=float, default=0.05)
     ap.add_argument("--z-far", type=float, default=300.0)
-    ap.add_argument("--splat", type=int, default=3)
+    ap.add_argument("--splat", type=int, default=2)
     ap.add_argument("--strict-carla", action="store_true",
                     help="Interpret --pos/--rot strictly as CARLA world pose (default). Matches compute_H_img_to_ground mapping.")
     ap.add_argument("--debug-pos", action="store_true",
@@ -751,7 +755,7 @@ def main():
                     help="Position step (meters) for interactive mode. Default: 0.20")
     ap.add_argument("--step-ang", type=float, default=1.0,
                     help="Angle step (degrees) for interactive mode. Default: 1.0")
-    ap.add_argument("--subsample", type=int, default=1000000,
+    ap.add_argument("--subsample", type=int, default=150000,
                     help="Max points to use for live preview (random subsample, lower = smoother UI). Use all points when saving with Enter.")
     ap.add_argument("--live-save-dir", type=str, default=None,
                     help="If set, pressing Enter saves PLY/coverage PNG/JSON here with a timestamped filename.")
@@ -834,6 +838,7 @@ def main():
             splat=args.splat,
             initial_pose=(x, y, z, yaw, pitch, roll),
             initial_fov=fov,
+            initial_fov_y=args.fov_y,
             bev_size=(1600, 780),
             pad=15
         )
@@ -850,7 +855,11 @@ def main():
             while True:
                 # Compose HUD text
                 hud_text = "Move A/D X-+ W/S Y+- Q/E Z-+ | Rot J/L Yaw I/K Pitch U/O Roll | FOV Z/X | Step [/] | α -/= | Gain ,/. | Quit ESC"
-                hud_text2 = format_pose(x, y, z, yaw, pitch, roll, fov) + f"  alpha={worker.cam_alpha:.2f}  gain={worker.global_gain:.2f}"
+                if args.fov_y is not None:
+                    fov_info = f"  [fov_x={fov:.2f}°, fov_y={args.fov_y:.2f}°]"
+                else:
+                    fov_info = f"  [fov={fov:.2f}°]"
+                hud_text2 = format_pose(x, y, z, yaw, pitch, roll, fov) + fov_info + f"  alpha={worker.cam_alpha:.2f}  gain={worker.global_gain:.2f}"
 
                 # Push latest pose every loop for immediate responsiveness
                 worker.update(x, y, z, yaw, pitch, roll, fov, hud_text2)
