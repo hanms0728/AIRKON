@@ -479,7 +479,7 @@ class InferWorker(threading.Thread):
     """
     - Streamer에서 최신 프레임을 모아 배치 추론
     - UDP 전송(옵션)
-    - GUI 큐에 (cam_id, resized_bgr, dets) 전달
+    - GUI 큐에 (cam_id, overlay_bgr, ts_capture) 전달
     """
     def __init__(self, *, streamer, camera_assets: Dict[int, CameraAssets], img_hw, strides, onnx_path,
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
@@ -674,11 +674,11 @@ class InferWorker(threading.Thread):
                 if self.gui_queue is not None:
                     with wrk.span("gui.put"):
                         try:
-                            self.gui_queue.put_nowait((cid, overlay_frame, dets, ts_capture))
+                            self.gui_queue.put_nowait((cid, overlay_frame, ts_capture))
                         except queue.Full:
                             try:
                                 _ = self.gui_queue.get_nowait()
-                                self.gui_queue.put_nowait((cid, overlay_frame, dets, ts_capture))
+                                self.gui_queue.put_nowait((cid, overlay_frame, ts_capture))
                             except Exception:
                                 pass
 
@@ -1096,8 +1096,8 @@ def main():
     ap.add_argument("--score-mode", default="obj*cls", choices=["obj","cls","obj*cls"])
     ap.add_argument("--bev-scale", default=1.0, type=float)
     ap.add_argument("--lut-path", default="./calib", type=str)
-    ap.add_argument("--lut-dir", dest="lut_path", type=str, help="Alias for --lut-path (directory with cam*.npz)")
-    ap.add_argument("--camera-config", type=str, help="JSON file describing RTSP/LUT/undistort per camera")
+    ap.add_argument("--lut-dir", dest="lut_path", type=str)
+    ap.add_argument("--camera-config", type=str)
     ap.add_argument("--transport", default="tcp", choices=["tcp","udp"])
     ap.add_argument("--no-cuda", action="store_true")
     ap.add_argument("--udp-enable", action="store_true")
@@ -1107,34 +1107,22 @@ def main():
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
     # visualization scaling (shared across web/3d)
-    ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh",
-                    help="Vehicle scaling mode: bbox=use BEV length/width, fixed=use --fixed-*, mesh=uniform scale without distortion")
-    ap.add_argument("--fixed-length", type=float, default=4.5,
-                    help="Fixed vehicle length when --size-mode=fixed")
-    ap.add_argument("--fixed-width", type=float, default=1.8,
-                    help="Fixed vehicle width when --size-mode=fixed")
-    ap.add_argument("--height-scale", type=float, default=0.5,
-                    help="Height = width * height_scale when size-mode in {bbox,fixed}")
-    ap.add_argument("--mesh-scale", type=float, default=1.0,
-                    help="Uniform scale multiplier applied to the normalized GLB when --size-mode=mesh")
-    ap.add_argument("--mesh-height", type=float, default=0.0,
-                    help="Approximate vehicle height used for ground offset when --size-mode=mesh")
-    ap.add_argument("--z-offset", type=float, default=0.0,
-                    help="Additional Z offset applied to cz before placing the mesh")
-    ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true",
-                    help="Invert BEV Y axis and yaw/pitch/roll signs for visualization outputs (default)")
-    ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false",
-                    help="Do not invert BEV Y axis for visualization outputs")
+    ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
+    ap.add_argument("--fixed-length", type=float, default=4.5)
+    ap.add_argument("--fixed-width", type=float, default=1.8)
+    ap.add_argument("--height-scale", type=float, default=0.5)
+    ap.add_argument("--mesh-scale", type=float, default=1.0)
+    ap.add_argument("--mesh-height", type=float, default=0.0)
+    ap.add_argument("--z-offset", type=float, default=0.0)
+    ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
+    ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")
     ap.set_defaults(invert_bev_y=True)
-    ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true",
-                    help="Normalize vehicle GLB to unit size on the web client")
-    ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false",
-                    help="Keep original GLB scale (no normalization)")
+    ap.set_defaults(no_invert_bev_y=True)
+    ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true")
+    ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false")
     ap.set_defaults(normalize_vehicle=True)
-    ap.add_argument("--vehicle-y-up", dest="vehicle_y_up", action="store_true",
-                    help="Treat GLB as Y-up → rotate +90° around X to convert to Z-up (default)")
-    ap.add_argument("--vehicle-z-up", dest="vehicle_y_up", action="store_false",
-                    help="Treat GLB as already Z-up (skip rotation)")
+    ap.add_argument("--vehicle-y-up", dest="vehicle_y_up", action="store_true")
+    ap.add_argument("--vehicle-z-up", dest="vehicle_y_up", action="store_false")
     ap.set_defaults(vehicle_y_up=True)
     # web bridge
     ap.add_argument("--web-enable", action="store_true")
@@ -1145,6 +1133,7 @@ def main():
     # 3d
     ap.add_argument("--global-ply", type=str, default="pointcloud/merged_05.ply")
     ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
+    # 3d뷰어는 싹 밀 것임 안켜지기 때문 
     ap.add_argument("--viewer3d", action="store_true")           # ← 3D 창 켜기
     ap.add_argument("--viewer3d-fixed-size", action="store_true")# ← 객체 스케일 고정 모드
     ap.add_argument("--viewer3d-height-scale", type=float, default=1.0)
@@ -1172,7 +1161,7 @@ def main():
         _O3D_AVAILABLE = True
     except Exception:
         _O3D_AVAILABLE = False
-
+    # 웹/3d
     viz_cfg = VizSizeConfig(
         size_mode=args.size_mode,
         fixed_length=args.fixed_length,
@@ -1197,39 +1186,10 @@ def main():
             camera_configs = load_camera_config_file(args.camera_config, (H, W))
         except Exception as exc:
             raise SystemExit(f"[Main] failed to parse camera_config: {exc}")
-    else:
-        camera_configs = [
-            {
-                'ip': '192.168.0.210',
-                'port': 554,
-                'username': 'admin',
-                'password': 'zjsxmfhf',
-                'camera_id': 1,
-                'width': W,
-                'height': H,
-                'force_tcp': (args.transport == "tcp"),
-                "lut": "pointcloud/cloud_rgb_npz/cam1.npz",
-                "undistort": "realtime/disto/cam1.npz",
-                'name': 'cam1',
-            },
-            {
-                'ip': '192.168.0.2',
-                'port': 554,
-                'username': 'admin',
-                'password': 'zjsxmfhf',
-                'camera_id': 2,
-                'width': W,
-                'height': H,
-                'force_tcp': (args.transport == "tcp"),
-                "lut": "pointcloud/cloud_rgb_npz/cam2.npz",
-                "undistort": "realtime/disto/cam2.npz",
-                'name': 'cam2',
-            },
-        ]
     if not camera_configs:
         raise SystemExit("[Main] no cameras configured")
 
-    cam_cfg_map = {int(cfg["camera_id"]): cfg for cfg in camera_configs} # 얘땜에 camera_id 무조건 int 들어가야함
+    cam_cfg_map = {int(cfg["camera_id"]): cfg for cfg in camera_configs} 
     camera_assets = build_camera_assets(camera_configs, args.lut_path)
     for cid, asset in camera_assets.items():
         cfg = asset.raw_config
@@ -1238,7 +1198,7 @@ def main():
     
     cam_ids  = sorted(camera_assets.keys())
     shutdown_evt = threading.Event()
-    
+    # RTSP 스트리머 
     streamer = Streamer(
         camera_configs,
         show_windows=False, # 미리보기
@@ -1284,7 +1244,7 @@ def main():
                 )
             except Exception as e:
                 print(f"[3D] cam{cid} viewer init failed: {e}")
-
+    
     web_bridge = None
     if args.web_enable:
         try:
@@ -1305,8 +1265,8 @@ def main():
 
     # 시작
     streamer.start()
-    # -------- GUI 큐 & 워커 --------
     gui_queue = queue.Queue(maxsize=128)
+    # 내부에 배치 러너 존재
     worker = InferWorker(
         streamer=streamer,
         camera_assets=camera_assets,
@@ -1325,8 +1285,7 @@ def main():
         web_publisher=web_bridge,
     )
     worker.start()
-    # -------- 메인 스레드: 오직 GUI --------
-    # 창 준비
+    # 메인 스레드: GUI 
     if USE_GUI:
         for cid in cam_ids:
             cv2.namedWindow(f"cam{cid}", cv2.WINDOW_NORMAL)
@@ -1353,30 +1312,25 @@ def main():
     try:
         while ticker.running:
             with gui_timer.span("gui.frame"):
-                # GUI 큐에서 결과 꺼내 그리기
                 with gui_timer.span("gui.get"):
                     try:
-                        cid, bgr, dets, ts_capture = gui_queue.get(timeout=0.005) 
+                        cid, overlay_bgr, ts_capture = gui_queue.get(timeout=0.005) 
                     except queue.Empty:
                         if USE_GUI: cv2.waitKey(1)
                         if not ticker.tick():
                             break
-                        # bump는 루프마다 가볍게 호출해도 부담 거의 없음
                         gui_timer.bump()
                         continue
-                    cv2.imwrite(f'{cid}.jpg', bgr)
 
                 if not USE_GUI:
                     if not ticker.tick():
                         break
                     gui_timer.bump()
                     continue
-
-                vis = bgr
+                # 여기부터 예상과 다름 vis왜안쓰지 
+                vis = overlay_bgr
                 if vis is None:
-                    with gui_timer.span("gui.draw"):
-                        blank = np.zeros((H, W, 3), dtype=np.uint8)
-                        vis = draw_detections(blank, dets)
+                    vis = np.zeros((H, W, 3), dtype=np.uint8)
 
                 with gui_timer.span("gui.show"):
                     cv2.imshow(f"cam{cid}", vis)
@@ -1384,7 +1338,6 @@ def main():
                     print(f"++++++++++++++캡처시점-렌더시점: {e2e_ms}")
                     if not ticker.tick():
                         break
-
             gui_timer.bump()
     finally:
         worker.stop()
