@@ -34,23 +34,23 @@ def main():
     h, w = img.shape[:2]
 
     if args.mode == "scaled-k":
-        if "K" not in data or "calib_w" not in data or "calib_h" not in data:
-            raise RuntimeError("scaled-k 모드에는 K, calib_w, calib_h가 저장돼 있어야 합니다.")
+        if "K" not in data or "size" not in data:
+            raise RuntimeError("scaled-k 모드에는 K, size가 저장돼 있어야 합니다.")
         K = data["K"].astype(np.float64)
-        K_use = build_scaled_K(K, int(data["calib_w"]), int(data["calib_h"]), w, h)
+        K_use = build_scaled_K(K, int(data["size"][0]), int(data["size"][1]), w, h)
     else:
         # dist만 사용하여 임시 K 구성
         K_use = build_dist_only_K(w, h, focal_ratio=args.focal_ratio)
 
         # --- 로드 직후 Debug 출력 ---
-    print("[DBG] calib_w,h:", int(data["calib_w"]), int(data["calib_h"]))
+    print("[DBG] calib_w,h:", int(data["size"][0]), int(data["size"][1]))
     print("[DBG] target_w,h:", w, h)
     print("[DBG] K (loaded):\n", data["K"])
     print("[DBG] dist:", dist.ravel())
 
     
     K_use = data["K"].astype(np.float64)
-    newK, _ = cv2.getOptimalNewCameraMatrix(K_use, dist, (w, h), alpha=0.0)  # alpha 0~1 시험
+    newK, _ = cv2.getOptimalNewCameraMatrix(K_use, dist, (w, h), alpha=1.0)  # alpha 0~1 시험
     print("[DBG] newK:\n", newK)
 
     map1, map2 = cv2.initUndistortRectifyMap(K_use, dist, None, newK, (w, h), cv2.CV_16SC2)
