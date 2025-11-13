@@ -1,0 +1,1334 @@
+# inference_lstm_onnx_npz.py
+# YOLO11 2.5D temporal inference with ONNX (ConvLSTM/GRU hidden-state carry + seq reset)
+# + BEV by per-pixel LUT (npz) with bilinear sampling (X,Y,Z) & robust masks
+
+import os
+import cv2
+import math
+import argparse
+import numpy as np
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+import torch
+from tqdm import tqdm
+import onnxruntime as ort
+
+# ====== 기존 유틸 ======
+from src.geometry_utils import parallelogram_from_triangle, tiny_filter_on_dets
+from src.evaluation_utils import (
+    decode_predictions,
+    evaluate_single_image,
+    compute_detection_metrics,
+    orientation_error_deg,
+)
+
+# ====== Matplotlib (optional) ======
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon as MplPolygon
+    from matplotlib.lines import Line2D
+    _MATPLOTLIB_AVAILABLE = True
+except Exception:
+    plt = None
+    MplPolygon = None
+    Line2D = None
+    _MATPLOTLIB_AVAILABLE = False
+
+
+# =========================
+# I/O helpers (라벨/BEV/시각화)
+# =========================
+def load_gt_triangles(label_path: str) -> np.ndarray:
+    if not os.path.isfile(label_path):
+        return np.zeros((0,3,2), dtype=np.float32)
+    tris = []
+    with open(label_path, "r") as f:
+        for line in f:
+            p = line.strip().split()
+            if len(p) != 7:
+                continue
+            _, p0x, p0y, p1x, p1y, p2x, p2y = p
+            tris.append([[float(p0x), float(p0y)],
+                         [float(p1x), float(p1y)],
+                         [float(p2x), float(p2y)]])
+    if len(tris) == 0:
+        return np.zeros((0,3,2), dtype=np.float32)
+    return np.asarray(tris, dtype=np.float32)
+
+
+def poly_from_tri(tri: np.ndarray) -> np.ndarray:
+    p0, p1, p2 = tri[0], tri[1], tri[2]
+    return parallelogram_from_triangle(p0, p1, p2).astype(np.float32)
+
+
+def polygon_area(poly: np.ndarray) -> float:
+    x, y = poly[:,0], poly[:,1]
+    return float(abs(np.dot(x, np.roll(y,-1)) - np.dot(y, np.roll(x,-1))) * 0.5)
+
+
+def iou_polygon(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
+    try:
+        pa = poly_a.astype(np.float32)
+        pb = poly_b.astype(np.float32)
+        inter_area, _ = cv2.intersectConvexConvex(pa, pb)
+        if inter_area <= 0:
+            return 0.0
+        ua = polygon_area(pa)
+        ub = polygon_area(pb)
+        union = ua + ub - inter_area
+        return float(inter_area / max(union, 1e-9))
+    except Exception:
+        xa1, ya1 = poly_a[:,0].min(), poly_a[:,1].min()
+        xa2, ya2 = poly_a[:,0].max(), poly_a[:,1].max()
+        xb1, yb1 = poly_b[:,0].min(), poly_b[:,1].min()
+        xb2, yb2 = poly_b[:,0].max(), poly_b[:,1].max()
+        inter_w = max(0.0, min(xa2, xb2) - max(xa1, xb1))
+        inter_h = max(0.0, min(ya2, yb2) - max(ya1, yb1))
+        inter = inter_w * inter_h
+        ua = max(0.0, xa2 - xa1) * max(0.0, ya2 - ya1)
+        ub = max(0.0, xb2 - xb1) * max(0.0, yb2 - yb1)
+        union = ua + ub - inter
+        return float(inter / max(union, 1e-9))
+
+
+def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
+    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
+    os.makedirs(os.path.dirname(save_path_txt), exist_ok=True)
+    img = image_bgr.copy()
+    sx, sy = float(W0) / float(W), float(H0) / float(H)
+
+    lines = []
+    tri_orig_list: List[np.ndarray] = []
+    for d in dets:
+        tri = np.asarray(d["tri"], dtype=np.float32)
+        score = float(d["score"])
+        poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
+        cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
+        cx, cy = int(tri[0][0]), int(tri[0][1])
+        cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+
+        tri_orig = tri.copy()
+        tri_orig[:, 0] *= sx
+        tri_orig[:, 1] *= sy
+        tri_orig_list.append(tri_orig.copy())
+        p0o, p1o, p2o = tri_orig[0], tri_orig[1], tri_orig[2]
+        lines.append(f"0 {p0o[0]:.2f} {p0o[1]:.2f} {p1o[0]:.2f} {p1o[1]:.2f} {p2o[0]:.2f} {p2o[1]:.2f} {score:.4f}")
+
+        det_dims = compute_poly_length_width(poly4)
+        color_info = extract_vehicle_color_patch(image_bgr, tri, det_dims)
+        if color_info is not None:
+            mean_bgr = color_info["mean_bgr"]
+            patch_color = tuple(int(c) for c in mean_bgr)
+            px1, py1, px2, py2 = color_info["patch"]
+            cv2.rectangle(img, (px1, py1), (px2, py2), (0, 255, 255), 1)
+            cv2.line(img, (px1, py1), (px2, py2), (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.line(img, (px1, py2), (px2, py1), (0, 255, 255), 1, cv2.LINE_AA)
+
+            sw_w, sw_h = 18, 12
+            sw_x1 = int(np.clip(px1, 0, W - sw_w))
+            sw_y1 = int(np.clip(py1 - sw_h - 2, 0, H - sw_h))
+            sw_x2 = sw_x1 + sw_w
+            sw_y2 = sw_y1 + sw_h
+            cv2.rectangle(img, (sw_x1, sw_y1), (sw_x2, sw_y2), patch_color, -1)
+            cv2.rectangle(img, (sw_x1, sw_y1), (sw_x2, sw_y2), (0, 0, 0), 1)
+
+            color_text = f"{int(mean_bgr[2])},{int(mean_bgr[1])},{int(mean_bgr[0])}"
+            text_y = max(0, py1 - 4)
+            cv2.putText(img, color_text, (px1, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
+            roi_coords = color_info.get("roi")
+            if roi_coords:
+                rx0, ry0, rx1, ry1 = roi_coords
+                cv2.rectangle(img, (rx0, ry0), (rx1, ry1), (0, 200, 255), 1)
+            d["color_hex"] = bgr_to_hex(mean_bgr)
+        else:
+            d["color_hex"] = d.get("color_hex", None)
+
+    cv2.imwrite(save_path_img, img)
+    with open(save_path_txt, "w") as f:
+        f.write("\n".join(lines))
+    return tri_orig_list
+
+
+def compute_poly_length_width(poly4: np.ndarray) -> Tuple[float, float]:
+    poly4 = np.asarray(poly4, dtype=np.float32)
+    if poly4.shape != (4, 2):
+        return None
+    edges = np.linalg.norm(np.roll(poly4, -1, axis=0) - poly4, axis=1)
+    if edges.size != 4:
+        return None
+    length = float(np.max(edges))
+    width = float(np.min(edges))
+    return length, width
+
+
+def extract_vehicle_color_patch(image_bgr, tri, det_dims=None,
+                                expand_w=1.4, expand_h=1.2,
+                                center_ratio=0.35, min_patch_px=12,
+                                side_extra_h=0.35, side_shift_ratio=0.15,
+                                ratio_min=0.35, ratio_max=0.95):
+    """
+    tri: (3,2) image-space ground triangle.
+    det_dims: (length, width) tuple derived from parallelogram edges.
+    Returns mean BGR color sampled from an expanded ROI above the contact patch,
+    adaptively shifting the ROI higher when the shape indicates a side view.
+    """
+    if image_bgr is None:
+        return None
+    tri = np.asarray(tri, dtype=np.float32)
+    if tri.shape != (3, 2):
+        return None
+
+    H, W = image_bgr.shape[:2]
+    xs = tri[:, 0]
+    ys = tri[:, 1]
+    x_min, x_max = float(xs.min()), float(xs.max())
+    y_min, y_max = float(ys.min()), float(ys.max())
+    width = max(x_max - x_min, 1.0)
+    height = max(y_max - y_min, 1.0)
+    cx = 0.5 * (x_min + x_max)
+    y_bottom = y_max
+    tri_center = tri[0].copy()
+
+    length = max(width, height)
+    det_ratio = 1.0
+    if isinstance(det_dims, tuple) and det_dims[0] is not None:
+        length = max(det_dims[0], 1e-6)
+        width_for_ratio = max(min(det_dims[1], det_dims[0]), 1e-6)
+        det_ratio = width_for_ratio / length
+
+    det_ratio = float(np.clip(det_ratio, 1e-3, 10.0))
+    if ratio_max <= ratio_min:
+        ratio_max = ratio_min + 1e-3
+    view_weight = np.clip((ratio_max - det_ratio) / (ratio_max - ratio_min), 0.0, 1.0)
+    view_weight = view_weight ** 0.6  # soften transition
+
+    width_scale = 0.45 + 0.55 * view_weight
+    roi_w = width * float(expand_w) * width_scale
+    roi_h_base = height * float(expand_h)
+
+    roi_h = roi_h_base + height * float(side_extra_h) * view_weight
+
+    front_center = 0.5 * (tri[1] + tri[2])
+    front_vec = front_center - tri[0]
+    if np.linalg.norm(front_vec) < 1e-6:
+        front_vec = np.array([0.0, -1.0], dtype=np.float32)
+    front_vec /= np.linalg.norm(front_vec) + 1e-6
+
+    cam_up = np.array([0.0, -1.0], dtype=np.float32)
+    yaw_perp = np.array([-front_vec[1], front_vec[0]], dtype=np.float32)
+    if np.linalg.norm(yaw_perp) < 1e-6:
+        yaw_perp = cam_up.copy()
+    yaw_perp /= np.linalg.norm(yaw_perp) + 1e-6
+
+    blend = 0.3 + 0.5 * view_weight
+    height_dir = cam_up * (1.0 - blend) + yaw_perp * blend
+    if np.linalg.norm(height_dir) < 1e-6 or height_dir[1] >= -0.05:
+        height_dir = cam_up.copy()
+    height_dir /= np.linalg.norm(height_dir) + 1e-6
+
+    shift_amount = width * 0.5 * view_weight
+    center = np.array([tri_center[0], tri_center[1]], dtype=np.float32) + shift_amount * height_dir
+
+    x0 = int(np.clip(center[0] - roi_w * 0.5, 0, W - 1))
+    x1 = int(np.clip(center[0] + roi_w * 0.5, 0, W - 1))
+    y0 = int(np.clip(center[1] - roi_h * 0.5, 0, H - 1))
+    y1 = int(np.clip(center[1] + roi_h * 0.5, 0, H - 1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    roi = image_bgr[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+
+    target_size = int(min(roi.shape[0], roi.shape[1]) * float(center_ratio))
+    target_size = int(np.clip(target_size, min_patch_px, min(roi.shape[0], roi.shape[1])))
+    if target_size <= 1:
+        return None
+
+    px0 = int(np.clip(center[0] - target_size * 0.5, x0, max(x0, x1 - target_size)))
+    py0 = int(np.clip(center[1] - target_size * 0.5, y0, max(y0, y1 - target_size)))
+    px1 = px0 + target_size
+    py1 = py0 + target_size
+    px1 = min(px1, x1)
+    py1 = min(py1, y1)
+    px0 = px1 - min(target_size, px1 - x0)
+    py0 = py1 - min(target_size, py1 - y0)
+    if px1 <= px0 or py1 <= py0:
+        return None
+
+    patch = image_bgr[py0:py1, px0:px1]
+    if patch.size == 0:
+        return None
+
+    mean_bgr = cv2.mean(patch)[:3]
+
+    return {
+        "mean_bgr": mean_bgr,
+        "patch": (px0, py0, px1, py1),
+        "roi": (x0, y0, x1, y1),
+    }
+
+
+def bgr_to_hex(mean_bgr) -> str:
+    b, g, r = mean_bgr
+    r = int(np.clip(round(r), 0, 255))
+    g = int(np.clip(round(g), 0, 255))
+    b = int(np.clip(round(b), 0, 255))
+    return f"{r:02X}{g:02X}{b:02X}"
+
+
+def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mix, iou_thr=0.5):
+    os.makedirs(os.path.dirname(save_path_img_mix), exist_ok=True)
+    img = image_bgr_resized.copy()
+    for g in gt_tris_resized:
+        poly_g = poly_from_tri(g).astype(np.int32)
+        cv2.polylines(img, [poly_g], True, (0,255,0), 2)
+        for k in range(3):
+            x = int(round(float(g[k,0]))); y = int(round(float(g[k,1])))
+            cv2.circle(img, (x, y), 3, (0,255,0), -1)
+    for d in dets:
+        tri = np.asarray(d["tri"], dtype=np.float32)
+        score = float(d["score"])
+        poly4 = poly_from_tri(tri).astype(np.int32)
+        cv2.polylines(img, [poly4], True, (0,0,255), 2)
+        p0 = tri[0].astype(int)
+        cv2.putText(img, f"{score:.2f}", (int(p0[0]), max(0, int(p0[1])-4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+
+    if gt_tris_resized.shape[0] > 0 and len(dets) > 0:
+        det_idx_sorted = np.argsort([-float(d["score"]) for d in dets])
+        matched = np.zeros((gt_tris_resized.shape[0],), dtype=bool)
+        for di in det_idx_sorted:
+            d = dets[di]
+            tri_d = np.asarray(d["tri"], dtype=np.float32)
+            poly_d = poly_from_tri(tri_d)
+            best_j, best_iou = -1, 0.0
+            for j, gtri in enumerate(gt_tris_resized):
+                if matched[j]:
+                    continue
+                poly_g = poly_from_tri(gtri)
+                iou = iou_polygon(poly_d, poly_g)
+                if iou > best_iou:
+                    best_iou, best_j = iou, j
+            if best_j >= 0:
+                matched[best_j] = True
+                p0 = tri_d[0].astype(int)
+                cv2.putText(img, f"IoU {best_iou:.2f}",
+                            (int(p0[0]), int(p0[1]) + 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1, cv2.LINE_AA)
+    cv2.imwrite(save_path_img_mix, img)
+
+
+def normalize_angle_deg(angle: float) -> float:
+    while angle <= -180.0:
+        angle += 360.0
+    while angle > 180.0:
+        angle -= 360.0
+    return angle
+
+
+# =========================
+# BEV 시각화 (2D 이미지)
+# =========================
+def _prepare_bev_canvas(polygons: List[np.ndarray], padding: float = 1.0, target: float = 800.0):
+    if not polygons:
+        return None
+    pts = np.concatenate(polygons, axis=0)
+    if pts.size == 0:
+        return None
+    min_x = float(np.nanmin(pts[:, 0]) - padding)
+    max_x = float(np.nanmax(pts[:, 0]) + padding)
+    min_y = float(np.nanmin(pts[:, 1]) - padding)
+    max_y = float(np.nanmax(pts[:, 1]) + padding)
+    range_x = max(max_x - min_x, 1e-3)
+    range_y = max(max_y - min_y, 1e-3)
+    scale = target / max(range_x, range_y)
+    width = int(max(range_x * scale, 300))
+    height = int(max(range_y * scale, 300))
+    return {"min_x":min_x,"max_x":max_x,"min_y":min_y,"max_y":max_y,"scale":scale,"width":width,"height":height}
+
+
+def _to_canvas(points: np.ndarray, params: dict) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    xs = (pts[:, 0] - params["min_x"]) * params["scale"]
+    ys = (params["max_y"] - pts[:, 1]) * params["scale"]
+    return np.stack([xs, ys], axis=1).astype(np.int32)
+
+
+def draw_bev_visualization(preds_bev: List[dict], gt_tris_bev: Optional[np.ndarray], save_path_img: str, title: str):
+    pred_polys = [det["poly"] for det in preds_bev]
+    gt_polys = [poly_from_tri(tri) for tri in gt_tris_bev] if gt_tris_bev is not None else []
+    polygons = pred_polys + gt_polys
+    params = _prepare_bev_canvas(polygons)
+    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
+
+    if params is None:
+        canvas = np.full((360, 360, 3), 240, dtype=np.uint8)
+        cv2.putText(canvas, "No BEV data", (60, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+        cv2.imwrite(save_path_img, canvas)
+        return
+
+    if _MATPLOTLIB_AVAILABLE:
+        try:
+            fig, ax = plt.subplots(figsize=(6.0, 6.0), dpi=220)
+            ax.set_facecolor("#f7f7f7")
+            ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_title(title, fontsize=11, pad=10)
+            ax.set_xlabel("X (m)", fontsize=10)
+            ax.set_ylabel("Y (m)", fontsize=10)
+            ax.set_xlim(params["min_x"], params["max_x"])
+            ax.set_ylim(params["max_y"], params["min_y"])
+            if params["min_x"] <= 0.0 <= params["max_x"]:
+                ax.axvline(0.0, color="#999999", linewidth=0.9, linestyle="--", alpha=0.8)
+            if params["min_y"] <= 0.0 <= params["max_y"]:
+                ax.axhline(0.0, color="#999999", linewidth=0.9, linestyle="--", alpha=0.8)
+            legend_handles = []
+            if gt_polys:
+                for poly in gt_polys:
+                    if not np.all(np.isfinite(poly)):
+                        continue
+                    patch = MplPolygon(poly, closed=True, fill=False, edgecolor="#27ae60", linewidth=1.8)
+                    ax.add_patch(patch)
+                    ax.scatter(poly[:, 0], poly[:, 1], s=8, color="#27ae60", alpha=0.9)
+                legend_handles.append(Line2D([0], [0], color="#27ae60", lw=2, label="GT"))
+            if preds_bev:
+                dy = max(params["max_y"] - params["min_y"], 1e-3)
+                text_offset = 0.015 * dy
+                for det in preds_bev:
+                    poly = det["poly"]
+                    if not np.all(np.isfinite(poly)):
+                        continue
+                    patch = MplPolygon(poly, closed=True, fill=False, edgecolor="#e74c3c", linewidth=1.8)
+                    ax.add_patch(patch)
+                    center = det["center"]
+                    ax.scatter(center[0], center[1], s=20, color="#e74c3c", alpha=0.9)
+                    f1, f2 = det.get("front_edge", (None, None))
+                    if f1 is not None and f2 is not None and np.all(np.isfinite(f1)) and np.all(np.isfinite(f2)):
+                        ax.plot([f1[0], f2[0]], [f1[1], f2[1]], linewidth=2.2, color="#1f77b4")
+                    label = f"{det['score']:.2f} / {det['yaw']:.1f}°"
+                    ax.text(center[0], center[1] + text_offset, label, fontsize=7.5, color="#e74c3c",
+                            ha="center", va="bottom",
+                            bbox=dict(facecolor="#ffffff", alpha=0.6, edgecolor="none", pad=1.5))
+                legend_handles.append(Line2D([0], [0], color="#e74c3c", lw=2, label="Pred"))
+                legend_handles.append(Line2D([0], [0], color="#1f77b4", lw=3, label="Front edge"))
+            if legend_handles:
+                ax.legend(handles=legend_handles, loc="upper right", frameon=True, framealpha=0.75, fontsize=8)
+            fig.tight_layout(pad=0.6)
+            fig.savefig(save_path_img, dpi=220)
+            plt.close(fig)
+            return
+        except Exception:
+            plt.close("all")
+
+    # OpenCV fallback
+    canvas = np.full((params["height"], params["width"], 3), 255, dtype=np.uint8)
+    axis_color = (120, 120, 120)
+    axis_thickness = 1
+    if params["min_x"] <= 0.0 <= params["max_x"]:
+        axis_x = np.array([[0.0, params["min_y"]], [0.0, params["max_y"]]], dtype=np.float64)
+        axis_x_px = _to_canvas(axis_x, params)
+        cv2.line(canvas, tuple(axis_x_px[0]), tuple(axis_x_px[1]), axis_color, axis_thickness, cv2.LINE_AA)
+    if params["min_y"] <= 0.0 <= params["max_y"]:
+        axis_y = np.array([[params["min_x"], 0.0], [params["max_x"], 0.0]], dtype=np.float64)
+        axis_y_px = _to_canvas(axis_y, params)
+        cv2.line(canvas, tuple(axis_y_px[0]), tuple(axis_y_px[1]), axis_color, axis_thickness, cv2.LINE_AA)
+
+    for det in preds_bev:
+        poly = det["poly"]
+        if not np.all(np.isfinite(poly)):
+            continue
+        poly_px = _to_canvas(poly, params)
+        cv2.polylines(canvas, [poly_px], True, (0, 0, 255), 2)
+        center_px = _to_canvas(np.asarray(det["center"]).reshape(1, 2), params)[0]
+        cv2.circle(canvas, tuple(center_px), 4, (0, 0, 255), -1)
+
+    cv2.putText(canvas, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (10, 10, 10), 2)
+    coord_text = f"x:[{params['min_x']:.2f},{params['max_x']:.2f}]  y:[{params['min_y']:.2f},{params['max_y']:.2f}]"
+    cv2.putText(canvas, coord_text, (10, params["height"] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1)
+    cv2.imwrite(save_path_img, canvas)
+
+
+def compute_bev_properties(tri_xy, tri_z=None,
+                           pitch_clamp_deg: float = 15.0,
+                           use_roll: bool = False,
+                           roll_threshold_deg: float = 2.0,
+                           roll_clamp_deg: float = 8.0):
+    """
+    tri_xy: (3,2) with p0 (rear), p1/p2 (front-left/right)
+    tri_z:  (3,) optional Z at the same three points
+    returns:
+      center(x,y), length, width, yaw(deg), front_edge(p1,p2),
+      cz (float), pitch_deg, roll_deg
+    """
+    p0, p1, p2 = np.asarray(tri_xy, dtype=np.float64)
+    if not np.all(np.isfinite(tri_xy)):
+        return None
+
+    # yaw from XY
+    front_center = (p1 + p2) / 2.0
+    front_vec = front_center - p0
+    yaw = math.degrees(math.atan2(front_vec[1], front_vec[0]))
+    yaw = (yaw + 180) % 360 - 180
+
+    poly = parallelogram_from_triangle(p0, p1, p2)
+    edges = [np.linalg.norm(poly[(i+1)%4]-poly[i]) for i in range(4)]
+    length = max(edges)
+    width = min(edges)
+    center = poly.mean(axis=0)
+    front_edge = (p1, p2)
+
+    cz = 0.0
+    pitch_deg = 0.0
+    roll_deg = 0.0
+    if tri_z is not None and np.all(np.isfinite(tri_z)):
+        z0, z1, z2 = float(tri_z[0]), float(tri_z[1]), float(tri_z[2])
+        cz = (z0 + z1 + z2) / 3.0
+
+        # pitch: front vs rear along length
+        z_front = 0.5 * (z1 + z2)
+        dz_len = z_front - z0
+        if length > 1e-6:
+            pitch_rad = math.atan2(dz_len, length)
+            pitch_deg = math.degrees(pitch_rad)
+            pitch_deg = float(np.clip(pitch_deg, -pitch_clamp_deg, pitch_clamp_deg))
+
+        # roll: left-right difference at front edge (optional)
+        if use_roll:
+            dz_lr = z2 - z1  # right - left
+            if width > 1e-6:
+                roll_rad = math.atan2(dz_lr, width)
+                roll_deg = math.degrees(roll_rad)
+                if abs(roll_deg) < roll_threshold_deg:
+                    roll_deg = 0.0
+                roll_deg = float(np.clip(roll_deg, -roll_clamp_deg, roll_clamp_deg))
+
+    return (float(center[0]), float(center[1])), float(length), float(width), float(yaw), front_edge, float(cz), float(pitch_deg), float(roll_deg)
+
+def compute_bev_properties_3d(
+    tri_xy: np.ndarray,
+    tri_z: np.ndarray,
+    pitch_clamp_deg: float = 15.0,
+    use_roll: bool = False,
+    roll_threshold_deg: float = 2.0,
+    roll_clamp_deg: float = 8.0,
+    xy_scale: float = 1.0,
+    z_scale: float = 1.0
+):
+    """
+    3D 평면 위(Local frame)에서 '실제 공간상의' length/width를 계산.
+    tri_xy: (3,2) with p0(rear), p1/p2(front-left/right)  [주의] 여기는 현재 BEV 스케일이 적용된 XY일 수 있음
+    tri_z : (3,)  z for each point (원 단위)
+    xy_scale: tri_xy에 적용된 스케일(예: --bev-scale). pitch/roll 계산에서 분모 보정용
+    z_scale : Z에 적용하고 싶은 스케일(보통 1.0)
+    returns:
+      center(x,y), length, width, yaw(deg), front_edge(p1,p2),
+      cz (float), pitch_deg, roll_deg
+    """
+    if tri_xy is None or tri_z is None:
+        return None
+    tri_xy = np.asarray(tri_xy, dtype=np.float64)
+    tri_z  = np.asarray(tri_z,  dtype=np.float64).reshape(-1)
+    if tri_xy.shape != (3,2) or tri_z.shape != (3,) or not (np.all(np.isfinite(tri_xy)) and np.all(np.isfinite(tri_z))):
+        return None
+
+    # BEV용 XY는 시각화를 위해 scale이 들어있을 수 있음 → 물리 계산 전 보정(원 단위 복원)
+    sxy = float(xy_scale) if xy_scale is not None else 1.0
+    sz  = float(z_scale)  if z_scale  is not None else 1.0
+    if sxy <= 0: sxy = 1.0
+    if sz  <= 0: sz  = 1.0
+
+    tri_xy_unscaled = tri_xy / sxy
+    tri_z_scaled    = tri_z * sz  # 필요 시 Z에도 스케일
+
+    # 3D 포인트 구성(원 단위 좌표계)
+    P0 = np.array([tri_xy_unscaled[0,0], tri_xy_unscaled[0,1], tri_z_scaled[0]], dtype=np.float64)  # rear
+    P1 = np.array([tri_xy_unscaled[1,0], tri_xy_unscaled[1,1], tri_z_scaled[1]], dtype=np.float64)  # front-left
+    P2 = np.array([tri_xy_unscaled[2,0], tri_xy_unscaled[2,1], tri_z_scaled[2]], dtype=np.float64)  # front-right
+    Pf = 0.5 * (P1 + P2)  # front-center
+
+    # 평면 법선
+    n = np.cross(P1 - P0, P2 - P0)
+    n_norm = np.linalg.norm(n)
+    if n_norm < 1e-9:
+        return None
+    n /= n_norm
+
+    # 길이/폭 축(평면 내 직교)
+    L_hat = Pf - P0
+    Ln = np.linalg.norm(L_hat)
+    if Ln < 1e-9:
+        return None
+    L_hat /= Ln
+    W_hat = np.cross(n, L_hat)
+    Wn = np.linalg.norm(W_hat)
+    if Wn < 1e-9:
+        return None
+    W_hat /= Wn
+
+    # 실제 공간 길이/폭(원 단위)
+    length_m = abs(np.dot(Pf - P0, L_hat))
+    width_m  = abs(np.dot(P2 - P1, W_hat))
+
+    # 4번째 코너/센터(Z는 원 단위)
+    P3 = P1 + (P2 - P0)
+    center_3d = 0.25 * (P0 + P1 + P2 + P3)
+    cz = float(center_3d[2])
+
+    # yaw: XY 투영 헤딩(시각화 좌표계 기준) — 시각화 좌표계에 맞추려면 다시 sxy를 곱한 tri_xy 사용
+    yaw = math.degrees(math.atan2(L_hat[1], L_hat[0]))
+    yaw = (yaw + 180) % 360 - 180
+
+    # pitch: front-center vs rear 고저차 / '실제 길이'  → 분모가 스케일 영향 안받도록 length_m 사용
+    v = Pf - P0
+    v = Pf - P0
+    horiz_len = np.linalg.norm([v[0], v[1]])          # ✅ 수평 길이
+    pitch_rad = math.atan2(v[2], max(horiz_len, 1e-9)) # ✅ 올바른 경사각
+    pitch_deg = float(np.clip(math.degrees(pitch_rad), -pitch_clamp_deg, pitch_clamp_deg))
+
+    # roll: 좌/우 고저차 / '실제 폭'
+    roll_deg = 0.0
+    if use_roll and width_m > 1e-6:
+        dz_lr = (P2[2] - P1[2])
+        roll_rad = math.atan2(dz_lr, width_m)
+        roll_deg = math.degrees(roll_rad)
+        if abs(roll_deg) < roll_threshold_deg:
+            roll_deg = 0.0
+        roll_deg = float(np.clip(roll_deg, -roll_clamp_deg, roll_clamp_deg))
+
+    # 2D 시각화/IoU용 폴리곤은 현재 tri_xy(스케일 적용된 좌표)를 그대로 사용
+    p0 = tri_xy[0]; p1 = tri_xy[1]; p2 = tri_xy[2]
+    poly_xy = parallelogram_from_triangle(p0, p1, p2).astype(np.float32)
+    front_edge = (tri_xy[1], tri_xy[2])
+    center_xy = poly_xy.mean(axis=0)
+
+    # 길이/폭 반환은 '실제 길이/폭'(원 단위). 필요하면 상위에서 스케일 변환해서 쓰세요.
+    return (float(center_xy[0]), float(center_xy[1])), float(length_m), float(width_m), float(yaw), front_edge, float(cz), float(pitch_deg), float(roll_deg)
+
+def write_bev_labels(save_path: str, bev_dets: List[dict], write_3d: bool = True):
+    """
+    write_3d=True → 'class cx cy cz length width yaw pitch roll color_hex'
+    write_3d=False → legacy 'class cx cy length width yaw color_hex'
+    """
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    lines = []
+    for det in bev_dets:
+        cx, cy = det["center"]
+        length = det["length"]
+        width = det["width"]
+        yaw = det["yaw"]
+        color_hex = det.get("color_hex") or "FFFFFF"
+        if write_3d:
+            cz = det.get("cz", 0.0)
+            pitch = det.get("pitch", 0.0)
+            roll = det.get("roll", 0.0)
+            lines.append(f"0 {cx:.4f} {cy:.4f} {cz:.4f} {length:.4f} {width:.4f} {yaw:.2f} {pitch:.2f} {roll:.2f} {color_hex}")
+        else:
+            lines.append(f"0 {cx:.4f} {cy:.4f} {length:.4f} {width:.4f} {yaw:.2f} {color_hex}")
+    with open(save_path, "w") as f:
+        f.write("\n".join(lines))
+
+
+def evaluate_single_image_bev(preds_bev: List[dict], gt_tris_bev: np.ndarray, iou_thr=0.5):
+    gt_arr = np.asarray(gt_tris_bev)
+    num_gt = gt_arr.shape[0] if gt_arr.ndim == 3 else 0
+    preds_sorted = sorted(preds_bev, key=lambda d: d["score"], reverse=True)
+    if num_gt == 0:
+        records = [(det["score"], 0, 0.0, None) for det in preds_sorted]
+        return records, 0
+    gt_polys = [poly_from_tri(tri) for tri in gt_arr]
+    matched = np.zeros((num_gt,), dtype=bool)
+    records = []
+    for det in preds_sorted:
+        poly_d = det["poly"]
+        if not np.all(np.isfinite(poly_d)):
+            records.append((det["score"], 0, 0.0, None))
+            continue
+        best_iou, best_idx = 0.0, -1
+        for idx, poly_g in enumerate(gt_polys):
+            if matched[idx] or not np.all(np.isfinite(poly_g)):
+                continue
+            iou = iou_polygon(poly_d, poly_g)
+            if iou > best_iou:
+                best_iou, best_idx = iou, idx
+        if best_idx >= 0 and best_iou >= iou_thr:
+            matched[best_idx] = True
+            orient_err = orientation_error_deg(det["tri"], gt_arr[best_idx])
+            records.append((det["score"], 1, best_iou, orient_err))
+        else:
+            records.append((det["score"], 0, best_iou, None))
+    return records, int(matched.sum())
+
+
+# =========================
+# LUT 기반 보간 (핵심 수정 부)
+# =========================
+def _lut_pick_valid_mask(lut):
+    """
+    LUT에서 사용할 valid mask를 우선순위로 선택:
+    1) ground_valid_mask
+    2) valid_mask
+    3) floor_mask
+    4) fallback: isfinite(X)&isfinite(Y)
+    """
+    X = np.asarray(lut["X"])
+    Y = np.asarray(lut["Y"])
+    H, W = X.shape
+
+    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+        if key in lut:
+            V = np.asarray(lut[key]).astype(bool)
+            break
+    else:
+        V = np.isfinite(X) & np.isfinite(Y)
+
+    if V.ndim == 1 and V.size == H * W:
+        V = V.reshape(H, W)
+    elif V.shape != (H, W):
+        V = np.resize(V.astype(bool), (H, W))
+
+    return V
+
+
+def _bilinear_lut_xy(lut, u, v, min_valid_corners: int = 3, boundary_eps: float = 1e-3):
+    """
+    lut: dict-like with 'X','Y', and a valid mask
+    u,v: 1D float arrays (pixel coords, 0..W-1 / 0..H-1)
+    returns: Xw, Yw, valid (same shape as u/v)
+
+    - 경계 클램프(boundary_eps)로 보간 인덱스가 범위를 벗어나는 것을 방지
+    - 4코너 AND 대신, 최소 min_valid_corners개가 유효하면
+      유효 코너만 가중치 재정규화 후 보간 허용
+    """
+    X = np.asarray(lut["X"])
+    Y = np.asarray(lut["Y"])
+    V = _lut_pick_valid_mask(lut)
+
+    H, W = X.shape
+    u = np.asarray(u, dtype=np.float64).ravel()
+    v = np.asarray(v, dtype=np.float64).ravel()
+
+    # --- 경계 클램프 ---
+    eps = float(boundary_eps)
+    if not np.isfinite(eps) or eps <= 0:
+        eps = 1e-3
+    u = np.clip(u, 0.0, W - 1 - eps)
+    v = np.clip(v, 0.0, H - 1 - eps)
+
+    Xw = np.full(u.shape, np.nan, dtype=np.float32)
+    Yw = np.full(v.shape, np.nan, dtype=np.float32)
+    valid = np.zeros(u.shape, dtype=bool)
+
+    u0 = np.floor(u).astype(np.int64)
+    v0 = np.floor(v).astype(np.int64)
+    u1 = u0 + 1
+    v1 = v0 + 1
+
+    ok = (u0 >= 0) & (v0 >= 0) & (u1 < W) & (v1 < H)
+    if not np.any(ok):
+        return Xw, Yw, valid
+
+    u0_ok = u0[ok]; v0_ok = v0[ok]
+    u1_ok = u1[ok]; v1_ok = v1[ok]
+    du = u[ok] - u0_ok
+    dv = v[ok] - v0_ok
+
+    X00 = X[v0_ok, u0_ok]; X10 = X[v0_ok, u1_ok]
+    X01 = X[v1_ok, u0_ok]; X11 = X[v1_ok, u1_ok]
+    Y00 = Y[v0_ok, u0_ok]; Y10 = Y[v0_ok, u1_ok]
+    Y01 = Y[v1_ok, u0_ok]; Y11 = Y[v1_ok, u1_ok]
+    V00 = V[v0_ok, u0_ok]; V10 = V[v0_ok, u1_ok]
+    V01 = V[v1_ok, u0_ok]; V11 = V[v1_ok, u1_ok]
+
+    # 유효 코너 개수 기준 통과
+    min_c = int(min_valid_corners)
+    min_c = 0 if min_c < 0 else (4 if min_c > 4 else min_c)
+    nvalid = V00.astype(int) + V10.astype(int) + V01.astype(int) + V11.astype(int)
+    allow = nvalid >= min_c
+
+    if np.any(allow):
+        w00 = (1.0 - du) * (1.0 - dv)
+        w10 = du * (1.0 - dv)
+        w01 = (1.0 - du) * dv
+        w11 = du * dv
+
+        # 유효 코너만 가중치 반영 + 재정규화
+        w00[~V00] = 0.0; w10[~V10] = 0.0; w01[~V01] = 0.0; w11[~V11] = 0.0
+        wsum = w00 + w10 + w01 + w11
+        wsum[wsum == 0.0] = 1.0
+        w00 /= wsum; w10 /= wsum; w01 /= wsum; w11 /= wsum
+
+        Xw_ok = (w00 * X00 + w10 * X10 + w01 * X01 + w11 * X11).astype(np.float32)
+        Yw_ok = (w00 * Y00 + w10 * Y10 + w01 * Y01 + w11 * Y11).astype(np.float32)
+
+        whole = np.zeros_like(ok, dtype=bool)
+        whole[ok] = allow
+        Xw[whole] = Xw_ok[allow]
+        Yw[whole] = Yw_ok[allow]
+        valid[whole] = True
+
+    return Xw, Yw, valid
+
+
+def _bilinear_lut_xyz(lut, u, v, min_valid_corners: int = 3, boundary_eps: float = 1e-3):
+    """XY 보간에 Z까지 확장. LUT에 Z가 없으면 Z는 NaN."""
+    Xw, Yw, valid = _bilinear_lut_xy(
+        lut, u, v,
+        min_valid_corners=min_valid_corners,
+        boundary_eps=boundary_eps
+    )
+    Z = lut.get("Z", None)
+    if Z is None:
+        Zw = np.full_like(Xw, np.nan, dtype=np.float32)
+        return Xw, Yw, Zw, valid
+
+    Z = np.asarray(Z)
+    H, W = Z.shape
+    u = np.asarray(u, dtype=np.float64).ravel()
+    v = np.asarray(v, dtype=np.float64).ravel()
+
+    eps = float(boundary_eps) if np.isfinite(boundary_eps) and boundary_eps > 0 else 1e-3
+    u = np.clip(u, 0.0, W - 1 - eps)
+    v = np.clip(v, 0.0, H - 1 - eps)
+
+    Zw = np.full(u.shape, np.nan, dtype=np.float32)
+    u0 = np.floor(u).astype(np.int64)
+    v0 = np.floor(v).astype(np.int64)
+    u1 = u0 + 1
+    v1 = v0 + 1
+    ok = (u0 >= 0) & (v0 >= 0) & (u1 < W) & (v1 < H)
+
+    if np.any(ok):
+        u0_ok = u0[ok]; v0_ok = v0[ok]
+        u1_ok = u1[ok]; v1_ok = v1[ok]
+        du = u[ok] - u0_ok
+        dv = v[ok] - v0_ok
+
+        Z00 = Z[v0_ok, u0_ok]; Z10 = Z[v0_ok, u1_ok]
+        Z01 = Z[v1_ok, u0_ok]; Z11 = Z[v1_ok, u1_ok]
+
+        w00 = (1.0 - du) * (1.0 - dv)
+        w10 = du * (1.0 - dv)
+        w01 = (1.0 - du) * dv
+        w11 = du * dv
+
+        Zw_ok = (w00 * Z00 + w10 * Z10 + w01 * Z01 + w11 * Z11).astype(np.float32)
+        Zw[ok] = Zw_ok
+        Zw[~valid] = np.nan  # XY invalid → Z도 무효
+
+    return Xw, Yw, Zw, valid
+
+
+def tris_img_to_bev_by_lut(tris_img: np.ndarray, lut_data: dict, bev_scale: float = 1.0,
+                            min_valid_corners: int = 3, boundary_eps: float = 1e-3):
+    """
+    이미지 좌표의 삼각형들(tris_img: [N,3,2])을 LUT(npz)의 (X,Y,Z)로 보간해 BEV 평면으로 투영.
+    - bilinear 보간 (X,Y,Z), 유효하지 않은 점이 있는 tri는 버림
+    returns:
+        tris_bev_xy: (N,3,2)
+        tris_bev_z:  (N,3)
+        tri_ok:      (N,) bool
+    """
+    if tris_img.size == 0:
+        return (np.zeros((0,3,2), dtype=np.float32),
+                np.zeros((0,3), dtype=np.float32),
+                np.zeros((0,), dtype=bool))
+
+    u = tris_img[:, :, 0].reshape(-1)
+    v = tris_img[:, :, 1].reshape(-1)
+
+    Xw, Yw, Zw, valid = _bilinear_lut_xyz(
+        lut_data, u, v,
+        min_valid_corners=min_valid_corners,
+        boundary_eps=boundary_eps
+    )
+
+    # tri 단위 유효성: 각 tri의 3점 모두 valid
+    valid = valid.reshape(-1, 3)
+    tri_ok = np.all(valid, axis=1)
+
+    Xw = Xw.reshape(-1, 3)
+    Yw = Yw.reshape(-1, 3)
+    Zw = Zw.reshape(-1, 3)
+
+    tris_bev_xy = np.stack([Xw, Yw], axis=-1).astype(np.float32)  # [N,3,2]
+    tris_bev_xy *= float(bev_scale)
+
+    return tris_bev_xy, Zw.astype(np.float32), tri_ok.astype(bool)
+
+
+# =========================
+# ONNX temporal runner
+# =========================
+class ONNXTemporalRunner:
+    """
+    ConvLSTM/GRU가 들어간 ONNX 모델 실행기.
+    - 입력: images (1,3,H,W)  + (선택) h_in[, c_in]
+    - 출력: 스케일별 reg/obj/cls + (선택) h_out[, c_out]
+    """
+    def __init__(self, onnx_path, providers=("CUDAExecutionProvider","CPUExecutionProvider"),
+                 state_stride_hint: int = 32, default_hidden_ch: int = 256):
+        self.sess = ort.InferenceSession(onnx_path, providers=list(providers))
+        self.inputs = {i.name: i for i in self.sess.get_inputs()}
+        self.outs = [o.name for o in self.sess.get_outputs()]
+
+        # 입력 이름 추론
+        cand_x = [n for n in self.inputs if n.lower() in ("images","image","input")]
+        self.x_name = cand_x[0] if cand_x else list(self.inputs.keys())[0]
+        self.h_name = next((n for n in self.inputs if "h_in" in n.lower()), None)
+        self.c_name = next((n for n in self.inputs if "c_in" in n.lower()), None)
+
+        # 출력 이름 그룹
+        self.ho_name = next((n for n in self.outs if "h_out" in n.lower()), None)
+        self.co_name = next((n for n in self.outs if "c_out" in n.lower()), None)
+        self.reg_names = [n for n in self.outs if "reg" in n.lower()]
+        self.obj_names = [n for n in self.outs if "obj" in n.lower()]
+        self.cls_names = [n for n in self.outs if "cls" in n.lower()]
+
+        def _sort_key(s):
+            toks = []
+            acc = ""
+            for ch in s:
+                if ch.isdigit():
+                    acc += ch
+                else:
+                    if acc:
+                        toks.append(int(acc))
+                        acc = ""
+                    toks.append(ch)
+            if acc:
+                toks.append(int(acc))
+            return tuple(toks)
+
+        self.reg_names.sort(key=_sort_key)
+        self.obj_names.sort(key=_sort_key)
+        self.cls_names.sort(key=_sort_key)
+
+        # 상태 버퍼
+        self.h_buf = None
+        self.c_buf = None
+
+        # 상태 shape 메타
+        self.state_stride_hint = int(state_stride_hint)
+        self.default_hidden_ch = int(default_hidden_ch)
+        self.h_shape_meta = self._shape_from_input_meta(self.h_name)
+        self.c_shape_meta = self._shape_from_input_meta(self.c_name)
+
+    def _shape_from_input_meta(self, name):
+        if name is None:
+            return None
+        meta = self.inputs[name].shape  # [N,C,Hs,Ws] with possible None
+        def _to_int(val, default):
+            return int(val) if isinstance(val, (int, np.integer)) else default
+        N = _to_int(meta[0], 1)
+        C = _to_int(meta[1], self.default_hidden_ch)
+        Hs = _to_int(meta[2], 0)
+        Ws = _to_int(meta[3], 0)
+        return [N, C, Hs, Ws]
+
+    def reset(self):
+        self.h_buf = None
+        self.c_buf = None
+
+    def _ensure_state(self, img_numpy_chw: np.ndarray):
+        # img: (1,3,H,W)
+        _, _, H, W = img_numpy_chw.shape
+        if self.h_name and self.h_buf is None:
+            N, C, Hs, Ws = self.h_shape_meta
+            if Hs == 0 or Ws == 0:
+                Hs = max(1, H // self.state_stride_hint)
+                Ws = max(1, W // self.state_stride_hint)
+            self.h_buf = np.zeros((N, C, Hs, Ws), dtype=np.float32)
+        if self.c_name and self.c_buf is None:
+            N, C, Hs, Ws = self.c_shape_meta
+            if Hs == 0 or Ws == 0:
+                Hs = max(1, H // self.state_stride_hint)
+                Ws = max(1, W // self.state_stride_hint)
+            self.c_buf = np.zeros((N, C, Hs, Ws), dtype=np.float32)
+
+    def forward(self, img_numpy_chw):
+        """
+        img_numpy_chw: (1,3,H,W) float32 [0..1]
+        returns: list of (reg,obj,cls) as torch.Tensors (1,C,Hs,Ws)
+        """
+        self._ensure_state(img_numpy_chw)
+
+        feeds = {self.x_name: img_numpy_chw}
+        if self.h_name is not None and self.h_buf is not None:
+            feeds[self.h_name] = self.h_buf
+        if self.c_name is not None and self.c_buf is not None:
+            feeds[self.c_name] = self.c_buf
+
+        outs = self.sess.run(self.outs, feeds)
+        out_map = {n: v for n, v in zip(self.outs, outs)}
+
+        # 상태 갱신
+        if self.ho_name:
+            self.h_buf = out_map[self.ho_name]
+        if self.co_name:
+            self.c_buf = out_map[self.co_name]
+
+        # PyTorch 디코더와 호환되는 포맷(list of (reg,obj,cls) torch.Tensor)
+        pred_list = []
+        for rn, on, cn in zip(self.reg_names, self.obj_names, self.cls_names):
+            pr = torch.from_numpy(out_map[rn])
+            po = torch.from_numpy(out_map[on])
+            pc = torch.from_numpy(out_map[cn])
+            pred_list.append((pr, po, pc))
+        return pred_list
+
+
+# =========================
+# 시퀀스 키
+# =========================
+def seq_key(file_path: str, mode: str) -> str:
+    p = Path(file_path)
+    if mode == "by_subdir":
+        return p.parent.name
+    stem = p.stem
+    if "_" in stem:
+        return stem.split("_")[0]
+    if "-" in stem:
+        return stem.split("-")[0]
+    return "ALL"
+
+def _sane_dims(L, W, args) -> bool:
+    if not (np.isfinite(L) and np.isfinite(W)):
+        return False
+    if not (args.min_length <= L <= args.max_length): return False
+    if not (args.min_width  <= W <= args.max_width ): return False
+    r = L / max(W, 1e-6)
+    if not (args.min_lw_ratio <= r <= args.max_lw_ratio): return False
+    return True
+
+
+# =========================
+# 메인
+# =========================
+def main():
+    ap = argparse.ArgumentParser("YOLO11 2.5D ONNX Temporal Inference (+GT & BEV via LUT)")
+    ap.add_argument("--input-dir", type=str, required=True)
+    ap.add_argument("--output-dir", type=str, default="./inference_results_npz")
+    ap.add_argument("--weights", type=str, required=True, help="ONNX 파일 경로")
+    ap.add_argument("--img-size", type=str, default="864,1536")
+    ap.add_argument("--score-mode", type=str, default="obj*cls", choices=["obj","cls","obj*cls"])
+    ap.add_argument("--conf", type=float, default=0.30)
+    ap.add_argument("--nms-iou", type=float, default=0.2)
+    ap.add_argument("--topk", type=int, default=50)
+    ap.add_argument("--contain-thr", type=float, default=0.85)
+    ap.add_argument("--clip-cells", type=float, default=None)
+    ap.add_argument("--exts", type=str, default=".jpg,.jpeg,.png")
+
+    # strides for decoder
+    ap.add_argument("--strides", type=str, default="8,16,32")
+
+    # temporal & sequence
+    ap.add_argument("--temporal", type=str, default="lstm", choices=["none","gru","lstm"])
+    ap.add_argument("--seq-mode", type=str, default="by_prefix", choices=["by_prefix","by_subdir"])
+    ap.add_argument("--reset-per-seq", action="store_true", default=True)
+
+    # state feature map hint
+    ap.add_argument("--state-stride-hint", type=int, default=32)
+    ap.add_argument("--default-hidden-ch", type=int, default=256)
+
+    # Eval(2D)
+    ap.add_argument("--gt-label-dir", type=str, default=None)
+    ap.add_argument("--eval-iou-thr", type=float, default=0.5)
+    ap.add_argument("--labels-are-original-size", action="store_true", default=True)
+
+    # BEV via LUT
+    ap.add_argument("--lut-path", type=str, required=True, help="pixel2world_lut.npz 경로")
+    ap.add_argument("--bev-scale", type=float, default=1.0)
+    
+    # LUT interpolation robustness
+    ap.add_argument("--lut-min-corners", type=int, default=3,
+                    help="Min number of valid bilinear corners (0..4) to accept a sample (default: 3)")
+    ap.add_argument("--lut-boundary-eps", type=float, default=1e-3,
+                    help="Clamp (u,v) to [0,W-1-eps]/[0,H-1-eps] (default: 1e-3)")
+
+    # BEV 3D label options
+    ap.add_argument("--bev-label-3d", action="store_true", default=True,
+                    help="Write BEV labels with cz, yaw, pitch, roll (default: on)")
+    ap.add_argument("--use-roll", action="store_true", default=False,
+                    help="Also estimate & write roll from left-right Z difference")
+    ap.add_argument("--roll-threshold-deg", type=float, default=2.0,
+                    help="Absolute roll below this (deg) is snapped to 0")
+    ap.add_argument("--roll-clamp-deg", type=float, default=8.0,
+                    help="Clamp |roll| to this maximum (deg)")
+    ap.add_argument("--pitch-clamp-deg", type=float, default=30.0,
+                    help="Clamp |pitch| to this maximum (deg)")
+
+    # --- sanity filters for 3D dims ---
+    ap.add_argument("--min-length", type=float, default=0.0)
+    ap.add_argument("--max-length", type=float, default=100.0)
+    ap.add_argument("--min-width",  type=float, default=0.0)
+    ap.add_argument("--max-width",  type=float, default=100.0)
+    ap.add_argument("--min-lw-ratio", type=float, default=0.01)
+    ap.add_argument("--max-lw-ratio", type=float, default=100)
+
+    # onnxruntime providers
+    ap.add_argument("--no-cuda", action="store_true", help="CUDA EP 비활성화")
+
+    args = ap.parse_args()
+    H, W = map(int, args.img_size.split(","))
+    strides = [float(s) for s in args.strides.split(",")]
+
+    providers = ["CUDAExecutionProvider","CPUExecutionProvider"]
+    if args.no_cuda or ort.get_device().upper() != "GPU":
+        providers = ["CPUExecutionProvider"]
+
+    runner = ONNXTemporalRunner(
+        args.weights, providers=providers,
+        state_stride_hint=args.state_stride_hint,
+        default_hidden_ch=args.default_hidden_ch
+    )
+
+    out_img_dir = os.path.join(args.output_dir, "images")
+    out_lab_dir = os.path.join(args.output_dir, "labels")
+    out_mix_dir = os.path.join(args.output_dir, "images_with_gt")
+    os.makedirs(out_img_dir, exist_ok=True)
+    os.makedirs(out_lab_dir, exist_ok=True)
+    os.makedirs(out_mix_dir, exist_ok=True)
+
+    # LUT 로드
+    if not os.path.isfile(args.lut_path):
+        raise FileNotFoundError(f"LUT not found: {args.lut_path}")
+    lut_data = dict(np.load(args.lut_path))
+    print(f"[BEV] Using LUT: {args.lut_path}")
+
+    exts = tuple([e.strip().lower() for e in args.exts.split(",") if e.strip()])
+    names = [f for f in os.listdir(args.input_dir) if f.lower().endswith(exts)]
+    names.sort()
+
+    do_eval_2d = args.gt_label_dir is not None and os.path.isdir(args.gt_label_dir)
+
+    metric_records = []
+    total_gt = 0
+
+    # BEV 시각화/라벨 출력
+    out_bev_img_dir = os.path.join(args.output_dir, "bev_images")
+    out_bev_mix_dir = os.path.join(args.output_dir, "bev_images_with_gt")
+    out_bev_lab_dir = os.path.join(args.output_dir, "bev_labels")
+    os.makedirs(out_bev_img_dir, exist_ok=True)
+    os.makedirs(out_bev_mix_dir, exist_ok=True)
+    os.makedirs(out_bev_lab_dir, exist_ok=True)
+
+    metric_records_bev = []
+    total_gt_bev = 0
+
+    print(f"[Infer-ONNX] imgs={len(names)}, temporal={args.temporal}, seq={args.seq_mode}, reset_per_seq={args.reset_per_seq}, eval2D={do_eval_2d}, use_bev=True")
+
+    prev_key = None
+    for name in tqdm(names, desc="[Infer-ONNX]"):
+        path = os.path.join(args.input_dir, name)
+
+        # 시퀀스 경계 판단 → reset
+        k = seq_key(path, args.seq_mode)
+        if args.reset_per_seq and k != prev_key:
+            runner.reset()
+        prev_key = k
+
+        img_bgr0 = cv2.imread(path)
+        if img_bgr0 is None:
+            continue
+
+        H0, W0 = img_bgr0.shape[:2]
+        img_bgr = cv2.resize(img_bgr0, (W, H), interpolation=cv2.INTER_LINEAR)
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_np = img_rgb.transpose(2,0,1).astype(np.float32) / 255.0
+        img_np = np.expand_dims(img_np, 0)  # (1,3,H,W)
+
+        scale_resize_x = W / float(W0)
+        scale_resize_y = H / float(H0)
+        scale_to_orig_x = float(W0) / float(W)
+        scale_to_orig_y = float(H0) / float(H)
+
+        outs = runner.forward(img_np)
+
+        # decode
+        dets = decode_predictions(
+            outs, strides,
+            clip_cells=args.clip_cells,
+            conf_th=args.conf,
+            nms_iou=args.nms_iou,
+            topk=args.topk,
+            contain_thr=args.contain_thr,
+            score_mode=args.score_mode,
+            use_gpu_nms=True
+        )[0]
+
+        dets = tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
+
+        save_img = os.path.join(out_img_dir, name)
+        save_txt = os.path.join(out_lab_dir, os.path.splitext(name)[0] + ".txt")
+        pred_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
+
+        # 2D Eval
+        gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
+        gt_tri_orig_for_bev = np.zeros((0, 3, 2), dtype=np.float32)
+
+        if do_eval_2d:
+            lab_path = os.path.join(args.gt_label_dir, os.path.splitext(name)[0] + ".txt")
+            gt_tri_raw = load_gt_triangles(lab_path)
+            if gt_tri_raw.shape[0] > 0:
+                if args.labels_are_original_size:
+                    gt_tri_orig_for_bev = gt_tri_raw.astype(np.float32)
+                    gt_for_eval = gt_tri_raw.copy()
+                    gt_for_eval[:, :, 0] *= scale_resize_x
+                    gt_for_eval[:, :, 1] *= scale_resize_y
+                else:
+                    gt_for_eval = gt_tri_raw.astype(np.float32)
+                    gt_tri_orig_for_bev = gt_tri_raw.copy()
+                    gt_tri_orig_for_bev[:, :, 0] *= scale_to_orig_x
+                    gt_tri_orig_for_bev[:, :, 1] *= scale_to_orig_y
+
+            save_img_mix = os.path.join(out_mix_dir, name)
+            draw_pred_with_gt(img_bgr, dets, gt_for_eval, save_img_mix, iou_thr=args.eval_iou_thr)
+
+            if gt_for_eval.shape[0] > 0:
+                records, _ = evaluate_single_image(dets, gt_for_eval, iou_thr=args.eval_iou_thr)
+                metric_records.extend(records)
+                total_gt += gt_for_eval.shape[0]
+
+        # ---- BEV (LUT) ----
+        bev_dets = []
+        if pred_tris_orig:
+            pred_stack_orig = np.asarray(pred_tris_orig, dtype=np.float64)  # [N,3,2]
+            pred_tris_bev_xy, pred_tris_bev_z, good_mask = tris_img_to_bev_by_lut(
+                pred_stack_orig, lut_data, bev_scale=float(args.bev_scale),
+                min_valid_corners=int(args.lut_min_corners),
+                boundary_eps=float(args.lut_boundary_eps)
+            )
+            for idx, det in enumerate(dets):
+                if idx >= pred_tris_bev_xy.shape[0]:
+                    break
+                if not good_mask[idx]:
+                    continue
+                tri_bev_xy = pred_tris_bev_xy[idx]
+                tri_bev_z  = pred_tris_bev_z[idx]
+                if not np.all(np.isfinite(tri_bev_xy)):
+                    continue
+                poly_bev = poly_from_tri(tri_bev_xy)
+                props = None
+                try:
+                    props = compute_bev_properties_3d(
+                        tri_bev_xy, tri_bev_z,
+                        pitch_clamp_deg=args.pitch_clamp_deg,
+                        use_roll=args.use_roll,
+                        roll_threshold_deg=args.roll_threshold_deg,
+                        roll_clamp_deg=args.roll_clamp_deg
+                    )
+                except Exception:
+                    props = None
+
+                # 실패/결측이면 기존 XY 기반 fallback
+                if props is None:
+                    props = compute_bev_properties(
+                        tri_bev_xy, tri_bev_z,
+                        pitch_clamp_deg=args.pitch_clamp_deg,
+                        use_roll=args.use_roll,
+                        roll_threshold_deg=args.roll_threshold_deg,
+                        roll_clamp_deg=args.roll_clamp_deg
+                    )
+                if props is None:
+                    continue
+
+                center, length, width, yaw, front_edge, cz, pitch_deg, roll_deg = props
+
+                # === 치수/비율 이상치 필터 ===
+                if not _sane_dims(length, width, args):
+                    continue
+
+                bev_dets.append({
+                    "score": float(det["score"]),
+                    "tri": tri_bev_xy,
+                    "poly": poly_bev,
+                    "center": center,
+                    "length": length,
+                    "width": width,
+                    "yaw": yaw,
+                    "front_edge": front_edge,
+                    "cz": cz,
+                    "pitch": pitch_deg,
+                    "roll": roll_deg if args.use_roll else 0.0,
+                    "color_hex": det.get("color_hex"),
+                })
+
+        # GT → BEV (동일 LUT 사용)
+        if gt_tri_orig_for_bev.size > 0:
+            gt_u = gt_tri_orig_for_bev[:, :, 0].reshape(-1)
+            gt_v = gt_tri_orig_for_bev[:, :, 1].reshape(-1)
+            Xg, Yg, Zg, Vg = _bilinear_lut_xyz(
+                lut_data, gt_u, gt_v,
+                min_valid_corners=int(args.lut_min_corners),
+                boundary_eps=float(args.lut_boundary_eps)
+            )
+            Vg = Vg.reshape(-1, 3)
+            good_gt = np.all(Vg, axis=1)
+            Xg = Xg.reshape(-1, 3)
+            Yg = Yg.reshape(-1, 3)
+            gt_tris_bev = np.stack([Xg, Yg], axis=-1).astype(np.float32)
+            gt_tris_bev *= float(args.bev_scale)
+            gt_tris_bev = gt_tris_bev[good_gt]
+        else:
+            gt_tris_bev = np.zeros((0, 3, 2), dtype=np.float32)
+
+        # BEV 시각화/라벨 저장
+        bev_img_path = os.path.join(out_bev_img_dir, name)
+        draw_bev_visualization(bev_dets, None, bev_img_path, f"{name} | Pred BEV")
+
+        bev_mix_path = os.path.join(out_bev_mix_dir, name)
+        draw_bev_visualization(bev_dets, gt_tris_bev, bev_mix_path, f"{name} | Pred & GT BEV")
+
+        bev_label_path = os.path.join(out_bev_lab_dir, os.path.splitext(name)[0] + ".txt")
+        write_bev_labels(bev_label_path, bev_dets, write_3d=bool(args.bev_label_3d))
+
+        if gt_tris_bev.shape[0] > 0 and len(bev_dets) > 0:
+            records_bev, _ = evaluate_single_image_bev(bev_dets, gt_tris_bev, iou_thr=args.eval_iou_thr)
+            metric_records_bev.extend(records_bev)
+            total_gt_bev += gt_tris_bev.shape[0]
+
+    # ---- 전체 메트릭 출력 ----
+    if do_eval_2d:
+        metrics = compute_detection_metrics(metric_records, total_gt)
+        print("== 2D Eval (dataset-wide) ==")
+        print("Precision:  {:.4f}".format(metrics["precision"]))
+        print("Recall:     {:.4f}".format(metrics["recall"]))
+        print("mAP@50:     {:.4f}".format(metrics["map50"]))
+        print("mAOE(deg):  {:.2f}".format(metrics["mAOE_deg"]))
+
+    metrics_bev = compute_detection_metrics(metric_records_bev, total_gt_bev) if (total_gt_bev > 0 or metric_records_bev) else None
+    if metrics_bev is not None:
+        print("== BEV Eval (dataset-wide) ==")
+        print("Precision:  {:.4f}".format(metrics_bev["precision"]))
+        print("Recall:     {:.4f}".format(metrics_bev["recall"]))
+        print("APbev@50:   {:.4f}".format(metrics_bev["map50"]))
+        print("mAOE_bev:   {:.2f}".format(metrics_bev["mAOE_deg"]))
+    else:
+        print("[Info] BEV 평가는 GT 또는 유효 매칭이 부족해 계산하지 않았습니다.")
+
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+"""
+python ./src/inference_lstm_onnx_pointcloud.py \
+  --input-dir ./dataset_example_pointcloud_9/images \
+  --output-dir ./inference_results_npz_9 \
+  --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
+  --temporal lstm --seq-mode by_prefix --reset-per-seq \
+  --conf 0.8 --nms-iou 0.2 --topk 50 \
+  --gt-label-dir ./dataset_example_pointcloud_9/labels \
+  --lut-path ./pointcloud/cloud_rgb_npz/cloud_rgb_9.npz \
+  --bev-scale 1.0 \
+  --lut-min-corners 3 \
+  --lut-boundary-eps 1e-3
+"""
