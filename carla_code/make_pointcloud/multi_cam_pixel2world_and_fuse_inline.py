@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CARLA (0.9.x) — Multi‑Camera Pixel→World LUT + Global Fused OBJ with Colored Camera Boundaries
+CARLA (0.9.x) — Multi-Camera Pixel→World LUT + Global Fused PLYs
 
 What you get
-- Per‑camera capture (RGB/Depth/Semantic), 3D reconstruction (camera→world), ground filtering
-- Per‑camera outputs (rgb/semantic/depth heatmaps & npz) saved under out_root/cam_<name>/
-- Single **OBJ** `global_fused_combo.obj` that contains:
-  (A) All fused points as either
-      • point primitives (lighter, but some viewers hide tiny points), or
-      • tiny quads (faces) per point (heavier, but shows everywhere). See `--points-as-quads`.
-  (B) Per‑camera **colored boundary strips** (convex hull on ground XY) as thin face ribbons.
+- Per-camera capture (RGB/Depth/Semantic), 3D reconstruction (camera→world), ground filtering
+- Per-camera outputs (rgb/semantic/depth heatmaps & npz) saved under out_root/cam_<name>/
+- Global fused PLYs:
+    1) global_fused_full.ply       : all fused ground points
+    2) global_lane_only.ply        : semantic == lane_id (default 24)
+    3) global_road_lane.ply        : semantic in {road_ids, lane_id} (default road_ids="1")
 
 Notes
-- World coord = CARLA/UE4 (left‑handed): X forward, Y right, Z up.
+- World coord = CARLA/UE4 (left-handed): X forward, Y right, Z up.
 - Depth is Euclidean distance to first hit. Reconstruction uses `forward` by default (stable in your tests).
-- No external SciPy/Shapely required; convex hull via monotone chain.
 
 Usage (example)
-python multi_cam_fuse_with_colored_boundaries.py \
+python multi_cam_pixel2world_and_fuse_inline.py \
   --host 127.0.0.1 --port 2000 \
   --width 1920 --height 1080 --fov 89 \
-  --ray-model forward --floor-ids 1,2,10,24 \
+  --ray-model forward --floor-ids 1,2,10 \
+  --lane-id 24 --road-ids 1 \
   --cloud-ground-only 1 --voxel 0.05 \
-  --strip-width 0.08 \
-  --points-as-quads 1 --point-quad-size 0.04 --max-point-quads 200000 \
   --out-root ./multi_out
-
-If you want inline cams (default) or override with JSON: see --cam-config.
 """
 
 import os, json, time, math, argparse
@@ -59,14 +54,6 @@ CAM_LIST_DEFAULT = [
     {"name":"cam15", "x":32.0,  "y":-22.0, "z":10.0,  "pitch":-35.0, "yaw":-125.0, "roll":0.0, "fov":89.0},
 ]
 
-# Distinct boundary colors per camera (RGB 0..1)
-CAM_PALETTE = [
-    (0.90,0.10,0.10), (0.10,0.70,0.10), (0.10,0.35,0.95), (0.90,0.60,0.10),
-    (0.65,0.25,0.90), (0.10,0.80,0.80), (0.95,0.35,0.35), (0.30,0.90,0.30),
-    (0.35,0.60,0.95), (0.95,0.80,0.35), (0.80,0.30,0.95), (0.35,0.95,0.90),
-    (0.95,0.35,0.65), (0.60,0.95,0.35), (0.35,0.35,0.35)
-]
-
 # ---------------- Utilities ----------------
 
 def depth_raw_to_meters(image_bgra: np.ndarray) -> np.ndarray:
@@ -92,6 +79,7 @@ def colorize_semantic(sem: np.ndarray) -> np.ndarray:
     out[:, :, :] = (80, 80, 80)
     def paint(ids, color):
         mask = np.isin(sem, ids); out[mask] = color
+    # 기본 CARLA 팔레트 (필요시 변경)
     paint([7], (50,150,50))      # Road
     paint([10], (255,255,0))     # LaneMarking
     paint([8], (244,35,232))     # Sidewalk
@@ -144,102 +132,6 @@ def synchronous_mode(world, fps=20):
         world.apply_settings(original)
 
 
-# -------------- Geometry helpers --------------
-
-def convex_hull_xy(points_xy: np.ndarray) -> np.ndarray:
-    """Monotone chain convex hull. points_xy: (N,2). Returns hull points in CCW order (M,2)."""
-    pts = np.unique(points_xy.astype(np.float64), axis=0)
-    if pts.shape[0] <= 2:
-        return pts
-    pts = pts[np.lexsort((pts[:,1], pts[:,0]))]  # sort by x, then y
-    def cross(o, a, b):
-        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-    lower = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(tuple(p))
-    upper = []
-    for p in pts[::-1]:
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(tuple(p))
-    hull = np.array(lower[:-1] + upper[:-1], dtype=np.float64)
-    return hull
-
-
-def polyline_to_strip_quads(poly_xy: np.ndarray, width: float, closed: bool=True) -> np.ndarray:
-    """Make thin quads (two triangles each) along a polyline on XY. Return (4*K, 3) vertices (Z=0).
-    We'll set Z later by adding per-vertex z.
-    """
-    if poly_xy.shape[0] < 2:
-        return np.zeros((0,3), dtype=np.float64)
-    quads = []
-    n = poly_xy.shape[0]
-    idx_iter = range(n) if closed else range(n-1)
-    half = width * 0.5
-    for i in idx_iter:
-        j = (i+1) % n
-        p0 = poly_xy[i]; p1 = poly_xy[j]
-        e = p1 - p0
-        L = np.hypot(e[0], e[1])
-        if L < 1e-6:  # skip degenerate
-            continue
-        nrm = np.array([-e[1]/L, e[0]/L])  # left normal (XY)
-        # Offset left/right
-        v0 = p0 + nrm*half; v1 = p0 - nrm*half
-        v2 = p1 - nrm*half; v3 = p1 + nrm*half
-        quads.append([v0, v1, v2, v3])
-    if not quads:
-        return np.zeros((0,3), dtype=np.float64)
-    Q = np.array(quads, dtype=np.float64).reshape(-1,2)  # (4*K,2)
-    Q3 = np.concatenate([Q, np.zeros((Q.shape[0],1), dtype=np.float64)], axis=1)  # add Z=0
-    return Q3  # (4*K,3)
-
-
-def build_point_quads_xy(points_xyz: np.ndarray, size: float) -> np.ndarray:
-    """Each point → tiny square (XY plane), centered at point, preserving Z. Return (4*N,3)."""
-    if points_xyz.shape[0] == 0:
-        return np.zeros((0,3), dtype=np.float64)
-    half = float(size) * 0.5
-    base = np.array([[-half, -half, 0.0],
-                     [ half, -half, 0.0],
-                     [ half,  half, 0.0],
-                     [-half,  half, 0.0]], dtype=np.float64)
-    N = points_xyz.shape[0]
-    quads = np.repeat(points_xyz.astype(np.float64), 4, axis=0) + np.tile(base, (N,1))
-    return quads
-
-
-# -------------- Simple OBJ writer (with vertex colors) --------------
-class ObjWriter:
-    def __init__(self, path: str):
-        self.path = path
-        self.f = open(path, 'w', encoding='utf-8')
-        self.v_count = 0
-        self._write_header()
-    def _write_header(self):
-        self.f.write("# global_fused_combo.obj (points + colored boundary strips)\n")
-    def add_vertices_with_color(self, verts: np.ndarray, colors01: np.ndarray) -> int:
-        assert verts.shape[0] == colors01.shape[0]
-        start = self.v_count + 1
-        for i in range(verts.shape[0]):
-            x,y,z = verts[i]
-            r,g,b = colors01[i]
-            self.f.write(f"v {x:.6f} {y:.6f} {z:.6f} {r:.6f} {g:.6f} {b:.6f}\n")
-        self.v_count += verts.shape[0]
-        return start
-    def add_point_primitives(self, start_idx: int, count: int):
-        # OBJ 'p' uses vertex indices (1-based). Many viewers ignore 'p'; kept for completeness.
-        idxs = [str(i) for i in range(start_idx, start_idx+count)]
-        self.f.write("p " + " ".join(idxs) + "\n")
-    def add_faces_quads_as_tris(self, i0, i1, i2, i3):
-        self.f.write(f"f {i0} {i1} {i2}\n")
-        self.f.write(f"f {i0} {i2} {i3}\n")
-    def close(self):
-        self.f.close()
-
-
 # -------------- Per-camera capture & reconstruction --------------
 
 def process_one_camera(world, bp_lib, args, cam_cfg, out_dir_cam: Path):
@@ -279,7 +171,8 @@ def process_one_camera(world, bp_lib, args, cam_cfg, out_dir_cam: Path):
             sensor_sem   = world.spawn_actor(sem_bp,   cam_tf)
             sensor_depth.listen(on_depth); sensor_rgb.listen(on_rgb); sensor_sem.listen(on_sem)
 
-            for _ in range(4): world.tick()
+            for _ in range(4):
+                world.tick()
 
             deadline = time.time() + 6.0
             while (depth_buf["arr"] is None or rgb_buf["arr"] is None or sem_buf["arr"] is None) and time.time() < deadline:
@@ -296,7 +189,8 @@ def process_one_camera(world, bp_lib, args, cam_cfg, out_dir_cam: Path):
             order = np.argsort(counts)[::-1]
             with open(out_dir_cam/"semantic_histogram.txt","w") as hf:
                 hf.write("# class_id,count\n")
-                for vi,ci in zip(vals[order],counts[order]): hf.write(f"{int(vi)},{int(ci)}\n")
+                for vi,ci in zip(vals[order],counts[order]):
+                    hf.write(f"{int(vi)},{int(ci)}\n")
 
             # Depth & vis
             depth_m = depth_raw_to_meters(depth_buf["arr"])  # HxW float32
@@ -319,6 +213,7 @@ def process_one_camera(world, bp_lib, args, cam_cfg, out_dir_cam: Path):
             valid = (D > args.min_depth) & (D < args.max_depth) & np.isfinite(D)
 
             # Cam→World
+            # sensor_depth 기준 transform 사용
             M_c2w = np.array(sensor_depth.get_transform().get_matrix(), dtype=np.float64)
             R = M_c2w[:3,:3]; t = M_c2w[:3,3]
             pts_c = np.stack([Xc,Yc,Zc], axis=0).reshape(3,-1)
@@ -362,33 +257,36 @@ def process_one_camera(world, bp_lib, args, cam_cfg, out_dir_cam: Path):
                 M_c2w=M_c2w.astype(np.float64)
             )
 
-            # Collect point cloud (choose mask)
+            # -----------------------
+            # Point cloud selection
+            # -----------------------
+            # 기본: ground_valid_mask 또는 valid를 사용해서 "full" 클라우드 구성
             mask_for_cloud = (ground_valid_mask if args.cloud_ground_only else valid)
-            idx = np.where(mask_for_cloud)
-            pts = np.stack([Xw[idx], Yw[idx], Zw[idx]], axis=1)
-            rgb = rgb_buf["arr"][idx] / 255.0
+            idx_full = np.where(mask_for_cloud)
+            pts_full = np.stack([Xw[idx_full], Yw[idx_full], Zw[idx_full]], axis=1)
+            rgb_full = rgb_buf["arr"][idx_full] / 255.0
 
-            # For boundary hull: use ground XY points (downsample for speed)
-            gx, gy = Xw[ground_valid_mask], Yw[ground_valid_mask]
-            if gx.size > 0:
-                gxy = np.stack([gx, gy], axis=1)
-                if gxy.shape[0] > 200000:
-                    sel = np.random.choice(gxy.shape[0], 200000, replace=False)
-                    gxy = gxy[sel]
-                hull_xy = convex_hull_xy(gxy)
-            else:
-                hull_xy = np.zeros((0,2), dtype=np.float64)
+            # lane-only (semantic == lane_id)
+            lane_mask = (sem_id == args.lane_id) & valid
+            idx_lane = np.where(lane_mask)
+            pts_lane = np.stack([Xw[idx_lane], Yw[idx_lane], Zw[idx_lane]], axis=1) if idx_lane[0].size > 0 else np.zeros((0,3),dtype=np.float32)
+            rgb_lane = (rgb_buf["arr"][idx_lane] / 255.0) if idx_lane[0].size > 0 else np.zeros((0,3),dtype=np.float32)
 
-            if ground_z_med is None:
-                # Fallback: camera base height projected: use cam z minus some pitch dependent offset
-                ground_z_med = float(cam_cfg["z"]) - 10.0  # heuristic fallback
+            # road+lane (semantic in {road_ids, lane_id})
+            road_ids_set = set(int(x) for x in args.road_ids.split(",")) if args.road_ids else {1}
+            road_lane_mask = np.isin(sem_id, list(road_ids_set | {args.lane_id})) & valid
+            idx_rl = np.where(road_lane_mask)
+            pts_rl = np.stack([Xw[idx_rl], Yw[idx_rl], Zw[idx_rl]], axis=1) if idx_rl[0].size > 0 else np.zeros((0,3),dtype=np.float32)
+            rgb_rl = (rgb_buf["arr"][idx_rl] / 255.0) if idx_rl[0].size > 0 else np.zeros((0,3),dtype=np.float32)
 
             return {
                 "name": cam_cfg["name"],
-                "points": pts.astype(np.float64),
-                "colors": rgb.astype(np.float32),
-                "hull_xy": hull_xy.astype(np.float64),
-                "hull_z": float(ground_z_med)
+                "points_full": pts_full.astype(np.float64),
+                "colors_full": rgb_full.astype(np.float32),
+                "points_lane": pts_lane.astype(np.float64),
+                "colors_lane": rgb_lane.astype(np.float32),
+                "points_road_lane": pts_rl.astype(np.float64),
+                "colors_road_lane": rgb_rl.astype(np.float32),
             }
 
     finally:
@@ -421,11 +319,9 @@ def main():
     ap.add_argument("--voxel", type=float, default=0.0, help=">0: voxel downsample fused points (m)")
     ap.add_argument("--cloud-ground-only", type=int, default=1, help="1=only ground for points, 0=all valid")
 
-    # Visual fusion settings
-    ap.add_argument("--strip-width", type=float, default=0.05, help="boundary strip width (m)")
-    ap.add_argument("--points-as-quads", type=int, default=0, help="1: output fused points as tiny quads (faces)")
-    ap.add_argument("--point-quad-size", type=float, default=0.04, help="quad edge length (m) for per-point quads")
-    ap.add_argument("--max-point-quads", type=int, default=250000, help="cap #quads for file size control")
+    # 추가: lane/road semantic id 설정
+    ap.add_argument("--lane-id", type=int, default=24, help="semantic id for lane marking")
+    ap.add_argument("--road-ids", type=str, default="1", help="comma-separated semantic ids for road surface")
 
     args = ap.parse_args()
     out_root = Path(args.out_root); out_root.mkdir(parents=True, exist_ok=True)
@@ -451,75 +347,81 @@ def main():
         out_dir_cam = out_root / f"cam_{name}"
         print(f"\n[+] Processing camera: {name}")
         rec = process_one_camera(world, bp_lib, args, cam, out_dir_cam)
-        if rec is None or rec["points"].shape[0] == 0:
+        if rec is None or rec["points_full"].shape[0] == 0:
             print(f"[!] {name}: no points")
             continue
-        # Optional per-cam voxel downsample BEFORE fusion (speed/memory)
-        if args.voxel and args.voxel > 0:
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(rec["points"].astype(np.float64))
-            pcd.colors = o3d.utility.Vector3dVector(rec["colors"].astype(np.float64))
-            pcd = pcd.voxel_down_sample(voxel_size=float(args.voxel))
-            rec["points"] = np.asarray(pcd.points)
-            rec["colors"] = np.asarray(pcd.colors)
         per_cam.append(rec)
 
     if not per_cam:
         print("[!] No camera produced any points. Exit.")
         return
 
-    # Build OBJ: points (as quads or points) + boundary strips (colored per cam)
-    obj_path = out_root / "global_fused_combo.obj"
-    ow = ObjWriter(str(obj_path))
+    # ---------- 1) Fused FULL ----------
+    fused_full_pts = np.concatenate([c["points_full"] for c in per_cam if c["points_full"].shape[0] > 0], axis=0)
+    fused_full_cols = np.concatenate([c["colors_full"] for c in per_cam if c["colors_full"].shape[0] > 0], axis=0)
 
-    # 1) Fused points
-    fused_pts = np.concatenate([c["points"] for c in per_cam], axis=0)
-    fused_cols = np.concatenate([c["colors"] for c in per_cam], axis=0)
-    if fused_pts.shape[0] > 0:
-        if args.points_as_quads:
-            N = fused_pts.shape[0]
-            keep = min(args.max_point_quads, N)
-            sel = np.arange(N) if N <= keep else np.random.choice(N, keep, replace=False)
-            pts_sel = fused_pts[sel].astype(np.float64)
-            cols_sel = fused_cols[sel].astype(np.float32)
-            quads_xyz = build_point_quads_xy(pts_sel, size=args.point_quad_size)   # (4*K,3)
-            quads_col = np.repeat(cols_sel, 4, axis=0)
-            v0 = ow.add_vertices_with_color(quads_xyz, quads_col)
-            K = quads_xyz.shape[0] // 4
-            for q in range(K):
-                i0 = v0 + q*4 + 0
-                i1 = v0 + q*4 + 1
-                i2 = v0 + q*4 + 2
-                i3 = v0 + q*4 + 3
-                ow.add_faces_quads_as_tris(i0, i1, i2, i3)
+    # ---------- 2) Fused LANE-only ----------
+    fused_lane_pts = np.concatenate([c["points_lane"] for c in per_cam if c["points_lane"].shape[0] > 0], axis=0) \
+                     if any(c["points_lane"].shape[0] > 0 for c in per_cam) else np.zeros((0,3),dtype=np.float64)
+    fused_lane_cols = np.concatenate([c["colors_lane"] for c in per_cam if c["colors_lane"].shape[0] > 0], axis=0) \
+                      if fused_lane_pts.shape[0] > 0 else np.zeros((0,3),dtype=np.float32)
+
+    # ---------- 3) Fused ROAD+LANE ----------
+    fused_rl_pts = np.concatenate([c["points_road_lane"] for c in per_cam if c["points_road_lane"].shape[0] > 0], axis=0) \
+                   if any(c["points_road_lane"].shape[0] > 0 for c in per_cam) else np.zeros((0,3),dtype=np.float64)
+    fused_rl_cols = np.concatenate([c["colors_road_lane"] for c in per_cam if c["colors_road_lane"].shape[0] > 0], axis=0) \
+                    if fused_rl_pts.shape[0] > 0 else np.zeros((0,3),dtype=np.float32)
+
+    # Optional voxel downsample (각 fused cloud별로)
+    def voxel_downsample_if_needed(pts, cols, voxel_size):
+        if voxel_size <= 0 or pts.shape[0] == 0:
+            return pts, cols
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        if cols is not None and cols.shape[0] == pts.shape[0]:
+            pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
+        pcd = pcd.voxel_down_sample(voxel_size=float(voxel_size))
+        pts_ds = np.asarray(pcd.points)
+        cols_ds = np.asarray(pcd.colors) if np.asarray(pcd.colors).shape[0] == pts_ds.shape[0] else None
+        if cols_ds is None:
+            cols_ds = np.ones((pts_ds.shape[0],3),dtype=np.float32)*0.5
+        return pts_ds, cols_ds
+
+    if args.voxel and args.voxel > 0:
+        fused_full_pts, fused_full_cols = voxel_downsample_if_needed(fused_full_pts, fused_full_cols, args.voxel)
+        if fused_lane_pts.shape[0] > 0:
+            fused_lane_pts, fused_lane_cols = voxel_downsample_if_needed(fused_lane_pts, fused_lane_cols, args.voxel)
+        if fused_rl_pts.shape[0] > 0:
+            fused_rl_pts, fused_rl_cols = voxel_downsample_if_needed(fused_rl_pts, fused_rl_cols, args.voxel)
+
+    # ---- Save PLYs ----
+    def save_ply(path, pts, cols):
+        if pts.shape[0] == 0:
+            print(f"[WARN] {path} : no points to save, skip.")
+            return
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+        if cols is not None and cols.shape[0] == pts.shape[0]:
+            pcd.colors = o3d.utility.Vector3dVector(cols.astype(np.float64))
         else:
-            v0 = ow.add_vertices_with_color(fused_pts.astype(np.float64), fused_cols.astype(np.float32))
-            ow.add_point_primitives(v0, fused_pts.shape[0])
+            pcd.colors = o3d.utility.Vector3dVector(np.ones((pts.shape[0],3),dtype=np.float64)*0.5)
+        o3d.io.write_point_cloud(str(path), pcd, write_ascii=True)
+        print(f"[OK] Saved PLY: {path} ({pts.shape[0]} pts)")
 
-    # 2) Colored boundary strips per cam
-    for idx, rec in enumerate(per_cam):
-        hull_xy = rec["hull_xy"]
-        if hull_xy.shape[0] < 2:
-            continue
-        color = CAM_PALETTE[idx % len(CAM_PALETTE)]
-        # Build thin strip in XY
-        strip_xyz = polyline_to_strip_quads(hull_xy, width=float(args.strip_width), closed=True)  # (4*K,3) with Z=0
-        if strip_xyz.shape[0] == 0:
-            continue
-        # Place at ground_z (+ small epsilon to float above points)
-        strip_xyz[:,2] = rec["hull_z"] + 0.02
-        cols = np.tile(np.array(color, dtype=np.float32).reshape(1,3), (strip_xyz.shape[0],1))
-        v1 = ow.add_vertices_with_color(strip_xyz, cols)
-        K = strip_xyz.shape[0] // 4
-        for q in range(K):
-            i0 = v1 + q*4 + 0
-            i1 = v1 + q*4 + 1
-            i2 = v1 + q*4 + 2
-            i3 = v1 + q*4 + 3
-            ow.add_faces_quads_as_tris(i0, i1, i2, i3)
+    # 1) full
+    save_ply(out_root / "global_fused_full.ply", fused_full_pts, fused_full_cols)
 
-    ow.close()
-    print(f"\n[OK] Saved single-file OBJ: {obj_path}")
+    # 2) lane-only
+    if fused_lane_pts.shape[0] > 0:
+        save_ply(out_root / "global_lane_only.ply", fused_lane_pts, fused_lane_cols)
+    else:
+        print("[INFO] No lane points (semantic == lane-id). global_lane_only.ply not created.")
+
+    # 3) road+lane
+    if fused_rl_pts.shape[0] > 0:
+        save_ply(out_root / "global_road_lane.ply", fused_rl_pts, fused_rl_cols)
+    else:
+        print("[INFO] No road+lane points (semantic in road_ids ∪ {lane-id}). global_road_lane.ply not created.")
 
 
 if __name__ == "__main__":
@@ -529,15 +431,13 @@ if __name__ == "__main__":
 예시 실행:
 
 python multi_cam_pixel2world_and_fuse_inline.py \
---host 127.0.0.1 --port 2000 \
+  --host 127.0.0.1 --port 2000 \
   --width 1920 --height 1080 --fov 89 \
   --ray-model forward \
   --floor-ids 1,2,10,24 \
+  --lane-id 24 \
+  --road-ids 1 \
   --cloud-ground-only 0 \
   --voxel 0 \
-  --points-as-quads 1 \
-  --point-quad-size 0.02 \
-  --max-point-quads 2000000 \
-  --strip-width 0.06 \
   --out-root ./multi_out_dense
 """
