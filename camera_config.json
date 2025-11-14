@@ -66,7 +66,7 @@
       "height": 864,
       "lut": "outputs/cam_3_x-49.40_y28.20_z11.00_yaw-117.00_pit-44.00_rol-7.00_f84.08_pixel2world_lut.npz",
       "undistort": "realtime/disto/cam_calibration_results.npz",
-      "visible_ply": "poutputs/cam_3_x-49.40_y28.20_z11.00_yaw-117.00_pit-44.00_rol-7.00_f84.08.ply",
+      "visible_ply": "outputs/cam_3_x-49.40_y28.20_z11.00_yaw-117.00_pit-44.00_rol-7.00_f84.08.ply",
       "force_tcp": true,
       "name": "gate-north"
     },
