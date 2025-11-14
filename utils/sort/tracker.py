@@ -5,6 +5,18 @@ from filterpy.kalman import KalmanFilter
 import glob
 import os
 import math
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
+
+COLOR_LABELS = ("red", "blue", "green", "white", "yellow", "purple")
+VALID_COLORS = {color: color for color in COLOR_LABELS}
+
+
+def normalize_color_label(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    color = str(value).strip().lower()
+    return VALID_COLORS.get(color)
 
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
@@ -104,7 +116,7 @@ class TrackState:
 
 class Track:
     track_id_counter = 0 # 클래스 변수: 트랙 ID 부여
-    def __init__(self, bbox_init, confirm_hits=3): # bbox_init은 [class, x_c, y_c, l, w, yaw_deg] 형식
+    def __init__(self, bbox_init, confirm_hits=3, color: Optional[str] = None): # bbox_init은 [class, x_c, y_c, l, w, yaw_deg] 형식
         self.id = Track.track_id_counter
         Track.track_id_counter += 1
         
@@ -143,6 +155,10 @@ class Track:
         self.state = TrackState.TENTATIVE
         self.history = []
         self.confirm_hits = confirm_hits
+        self.color_counts: Counter = Counter()
+        self.current_color: Optional[str] = None
+        self.total_color_votes = 0
+        self._update_color(color)
 
     def _init_2d_kf(self, initial_value, Q_scale=0.1, R_scale=1.0):
         """2D 칼만 필터 초기화 유틸리티 (값, 변화율)"""
@@ -173,130 +189,116 @@ class Track:
         if self.state != TrackState.DELETED:
             self.time_since_update += 1
         
-    def update(self, bbox_carla):
-        # 1) 위치
-        z_pos = bbox_carla[1:3].reshape((2,1))
-        self.kf_pos.update(z_pos)
-
-        # 2) 길이/너비
-        z_length = bbox_carla[3].reshape((1,1))
-        z_width  = bbox_carla[4].reshape((1,1))
-        self.kf_length.update(z_length)
-        self.kf_width.update(z_width)
-
-        # 3) 각도: ref에 가장 가까운 동치각으로 변환 후 업데이트
-        z_yaw_raw = float(bbox_carla[5])
-        ref = float(self.kf_yaw.x[0, 0])
-
-        PERIOD = 180.0  # ★ 전방/후방 모호하면 180.0, 확실히 구분되면 360.0
-        z_yaw_adj = nearest_equivalent_deg(z_yaw_raw, ref, period=PERIOD)
-
-        self.kf_yaw.update(np.array([[z_yaw_adj]]))
-
-        # 4) 상태 저장 + 정규화
-        self.car_length = float(self.kf_length.x[0, 0])
-        self.car_width  = float(self.kf_width.x[0, 0])
-        self.car_yaw    = wrap_deg(float(self.kf_yaw.x[0, 0]))
-        self.kf_yaw.x[0, 0] = self.car_yaw
-
-        self.time_since_update = 0
-        self.hits += 1
-        if self.state in (TrackState.TENTATIVE, TrackState.LOST):
-            if self.hits >= self.confirm_hits:
-                self.state = TrackState.CONFIRMED
-
-
-    def get_state(self):
-        # 현재 추적된 상태와 저장된 OBB 정보를 결합하여 CARLA 형식으로 반환
-        # 1. 칼만 필터에서 예측/보정된 중심 좌표
-        x_c, y_c = self.kf_pos.x[:2].flatten()
-        
-        # 2. 칼만 필터에서 예측/보정된 길이, 너비, 방향
-        length = self.car_length # self.kf_length.x[0, 0]
-        width = self.car_width # self.kf_width.x[0, 0]
-        yaw = self.car_yaw # self.kf_yaw.x[0, 0]
-        
-        # [class=0, x_c, y_c, l, w, angle] 형식으로 출력
-        return np.array([0, x_c, y_c, length, width, yaw])
-
-class SortTracker:
-    def __init__(self, max_age=3, min_hits=3, iou_threshold=0.3):
-        self.tracks = []
-        self.max_age = max_age
-        self.min_hits = min_hits
-        self.iou_threshold = iou_threshold
-
-    def update(self, detections_carla):
+    def update(self, detections_carla, detection_colors: Optional[List[Optional[str]]] = None):
         """
-        한 프레임의 탐지 결과를 받아서 트랙을 업데이트하고 결과를 반환합니다.
+        ???�레?�의 ?��? 결과�?받아???�랙???�데?�트?�고 결과�?반환?�니??
         detections_carla: [class, x_center, y_center, length, width, angle] 배열
+        detection_colors: 각 detection에 대해 normalized color string 또는 None
         """
-        # 1. 기존 트랙 예측
+        self.last_matches = []
+        # 1. 기존 ?�랙 ?�측
         for track in self.tracks:
             track.predict()
 
-        # 현재 활성 트랙 (DELETED 제외)
+        # ?�재 ?�성 ?�랙 (DELETED ?�외)
         active_tracks = [t for t in self.tracks if t.state != TrackState.DELETED]
-        
-        # 2. IOU 기반 매칭 비용 계산 및 Hungarian 알고리즘 적용
+
+        # 2. IOU 기반 매칭 비용 계산 �?Hungarian ?�고리즘 ?�용
         matched_indices = []
         unmatched_detections = list(range(len(detections_carla)))
         unmatched_tracks = list(range(len(active_tracks)))
-        
+        det_colors = self._prepare_detection_colors(detection_colors, len(detections_carla))
+
         if len(detections_carla) > 0 and len(active_tracks) > 0:
-            # IOU 비용 행렬 (1 - IOU)
+            # IOU 비용 ?�렬 (1 - IOU)
             cost_matrix = iou_batch(detections_carla, active_tracks)
-            
-            # 행렬의 행과 열에 대한 선형 할당 (최소 비용 매칭)
+            if det_colors:
+                for i, det_color in enumerate(det_colors):
+                    for j, track in enumerate(active_tracks):
+                        cost_matrix[i, j] += self._color_cost(det_color, track.get_color())
+
+            # ?�렬???�과 ?�에 ?�???�형 ?�당 (최소 비용 매칭)
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            
+
             # 매칭 결과 처리
             for r, c in zip(row_ind, col_ind):
-                # IOU 임계값 확인
+                # IOU ?�계�??�인
                 if 1.0 - cost_matrix[r, c] >= self.iou_threshold:
                     matched_indices.append((r, c)) # (detection_index, track_index)
-                    # 매칭된 인덱스 목록에서 제거
+                    # 매칭???�덱??목록?�서 ?�거
                     if r in unmatched_detections:
                         unmatched_detections.remove(r)
                     if c in unmatched_tracks:
                         unmatched_tracks.remove(c)
-        
-        # 3. 매칭된 트랙 업데이트
+
+        # 3. 매칭???�랙 ?�데?�트
         for det_idx, track_idx in matched_indices:
             track = active_tracks[track_idx]
-            track.update(detections_carla[det_idx])
+            color = det_colors[det_idx] if det_colors else None
+            track.update(detections_carla[det_idx], color=color)
             track.history.append(track.get_state().copy())
+            self.last_matches.append((track.id, det_idx))
 
-        # 4. 매칭되지 않은 트랙 상태 변경
+        # 4. 매칭?��? ?��? ?�랙 ?�태 변�?
         for track_idx in unmatched_tracks:
             track = active_tracks[track_idx]
             if track.state == TrackState.CONFIRMED:
-                # Confirmed 상태 -> Lost
+                # Confirmed ?�태 -> Lost
                 track.state = TrackState.LOST
             elif track.state == TrackState.LOST:
-                # Lost 상태에서 max_age를 넘으면 삭제
+                # Lost ?�태?�서 max_age�??�으�???��
                 if track.time_since_update > self.max_age:
                     track.state = TrackState.DELETED
             elif track.state == TrackState.TENTATIVE:
-                # Tentative 상태 -> 바로 삭제
+                # Tentative ?�태 -> 바로 ??��
                 track.state = TrackState.DELETED
-        
-        # 5. 매칭되지 않은 탐지 결과로 새로운 트랙 생성
+
+        # 5. 매칭?��? ?��? ?��? 결과�??�로???�랙 ?�성
         for det_idx in unmatched_detections:
-            new_track = Track(detections_carla[det_idx], confirm_hits=self.min_hits)
+            color = det_colors[det_idx] if det_colors else None
+            new_track = Track(detections_carla[det_idx], confirm_hits=self.min_hits, color=color)
             self.tracks.append(new_track)
-        
-        # 6. 삭제된 트랙 정리 및 결과 반환
+
+        # 6. ??��???�랙 ?�리 �?결과 반환
         self.tracks = [t for t in self.tracks if t.state != TrackState.DELETED]
 
         output_results = []
         for track in self.tracks:
             if track.state == TrackState.CONFIRMED or track.state == TrackState.LOST:
                 state = track.get_state()
-                # [track_id, class, x_c, y_c, l, w, angle] 형식으로 출력
+                # [track_id, class, x_c, y_c, l, w, angle] ?�식?�로 출력
                 output_results.append(np.array([track.id, *state]))
-        
+
         return np.array(output_results) if output_results else np.array([])
+
+    def _prepare_detection_colors(self, detection_colors, count: int) -> List[Optional[str]]:
+        if not detection_colors:
+            return [None] * count
+        colors: List[Optional[str]] = []
+        for idx in range(count):
+            val = detection_colors[idx] if idx < len(detection_colors) else None
+            colors.append(normalize_color_label(val))
+        return colors
+
+    def _color_cost(self, detection_color: Optional[str], track_color: Optional[str]) -> float:
+        if not detection_color or not track_color:
+            return 0.0
+        if detection_color == track_color:
+            return 0.0
+        return self.color_penalty
+
+    def get_latest_matches(self) -> List[Tuple[int, int]]:
+        return list(self.last_matches)
+
+    def get_track_attributes(self) -> Dict[int, dict]:
+        attrs: Dict[int, dict] = {}
+        for track in self.tracks:
+            if track.state in (TrackState.CONFIRMED, TrackState.LOST):
+                attrs[track.id] = {
+                    "color": track.get_color(),
+                    "color_confidence": track.get_color_confidence(),
+                }
+        return attrs
 
 def load_detections_from_file(filepath):
     try:

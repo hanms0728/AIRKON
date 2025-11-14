@@ -4,7 +4,7 @@ import queue
 import socket
 import threading
 import time
-from collections import deque
+from collections import deque, Counter
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
@@ -20,6 +20,16 @@ from utils.merge.merge_dist_wbf import (
 )
 from utils.sort.tracker import SortTracker
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
+
+COLOR_LABELS = ("red", "blue", "green", "white", "yellow", "purple")
+VALID_COLORS = {color: color for color in COLOR_LABELS}
+
+
+def normalize_color_label(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    color = str(value).strip().lower()
+    return VALID_COLORS.get(color)
 
 # ---일단 저장용---
 import os, gzip, json, csv, hashlib, threading, queue, time
@@ -141,6 +151,8 @@ class TrackBroadcaster:
                     "roll": float(extra.get("roll", 0.0)),
                     "score": float(extra.get("score", 0.0)),
                     "sources": list(extra.get("source_cams", [])),
+                    "color": extra.get("color"),
+                    "color_confidence": float(extra.get("color_confidence", 0.0)),
                 })
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
@@ -382,6 +394,7 @@ class UDPReceiverSingle:
                 dets = []
                 for it in msg.get("items", []):
                     cx, cy = it["center"]
+                    color = normalize_color_label(it.get("color"))
                     dets.append({
                         "cls": int(it.get("class", 0)),
                         "cx": float(cx),
@@ -393,6 +406,7 @@ class UDPReceiverSingle:
                         "cz": float(it.get("cz", 0.0)),
                         "pitch": float(it.get("pitch", 0.0)),
                         "roll": float(it.get("roll", 0.0)),
+                        "color": color,
                     })
                 self._log_packet(cam, dets if dets else [], meta=msg)
                 return cam, dets if dets else []
@@ -483,7 +497,7 @@ class RealtimeFusionServer:
             f"clusters={fused_count} tracks={track_count}"
         )
         if fused_count:
-            sample_keys = ["cx","cy","length","width","yaw","score","source_cams"]
+            sample_keys = ["cx","cy","length","width","yaw","score","source_cams","color"]
             sample_fused = {k: fused[0][k] for k in sample_keys if k in fused[0]}
             print(f"  fused_sample={json.dumps(sample_fused, ensure_ascii=False)}")
         if track_count:
@@ -501,7 +515,6 @@ class RealtimeFusionServer:
         last = time.time()
         while True:
             timings: Dict[str, float] = {}
-            # 수신 큐에서 가능한 만큼 비움 → 최신으로 buffer 업데이터
             try:
                 while True:
                     item = self.receiver.q.get_nowait()
@@ -528,21 +541,25 @@ class RealtimeFusionServer:
             timings["fuse"] = (time.perf_counter() - t1) * 1000.0
 
             # ---- ③ 추적(SORT) ----
-            # tracker는 [class, x_c, y_c, l, w, angle] Nx6 입력을 받게 맞춤 :contentReference[oaicite:14]{index=14}
-            dets_for_tracker = np.array(
-                [[
+            # tracker는 [class, x_c, y_c, l, w, angle] Nx6 입력을 받게 맞춤 
+            det_rows = []
+            det_colors: List[Optional[str]] = []
+            for det in fused:
+                det_rows.append([
                     0,
                     det["cx"],
                     det["cy"],
                     (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
                     det["yaw"],
-                ] for det in fused],
-                dtype=float
-            ) if fused else np.zeros((0,6), dtype=float)
+                ])
+                det_colors.append(normalize_color_label(det.get("color")))
+            dets_for_tracker = np.array(det_rows, dtype=float) if det_rows else np.zeros((0,6), dtype=float)
             t2 = time.perf_counter()
-            tracks = self.tracker.update(dets_for_tracker)  # shape: [N, 8] = [track_id, class, x, y, l, w, yaw]
+            tracks = self.tracker.update(dets_for_tracker, det_colors)  # shape: [N, 8] = [track_id, class, x, y, l, w, yaw]
             timings["track"] = (time.perf_counter() - t2) * 1000.0
+            track_attrs = self.tracker.get_track_attributes()
+            self._update_track_meta(self.tracker.get_latest_matches(), fused, track_attrs)
             self._broadcast_tracks(tracks, now)
             tracks_for_output = self._tracks_to_dicts(tracks)
             raw_payload = self._serialize_raw(raw_dets)
@@ -586,19 +603,24 @@ class RealtimeFusionServer:
         clusters = cluster_by_aabb_iou(boxes, iou_cluster_thr=self.iou_thr)
         fused_list = []
         for idxs in clusters:
-            rep = fuse_cluster_weighted(
-                boxes, cams, idxs, self.cam_xy,
-                d0=5.0, p=2.0
-            )
-            extras = self._aggregate_cluster(raw_detections, idxs)
-            fused_list.append({
-                "cx": float(rep[0]),
-                "cy": float(rep[1]),
-                "length": float(rep[2]),
-                "width": float(rep[3]),
-                "yaw": float(rep[4]),
-                **extras,
-            })
+            grouped: Dict[Optional[str], List[int]] = {}
+            for idx in idxs:
+                color = normalize_color_label(raw_detections[idx].get("color"))
+                grouped.setdefault(color, []).append(idx)
+            for color_idxs in grouped.values():
+                rep = fuse_cluster_weighted(
+                    boxes, cams, color_idxs, self.cam_xy,
+                    d0=5.0, p=2.0
+                )
+                extras = self._aggregate_cluster(raw_detections, color_idxs)
+                fused_list.append({
+                    "cx": float(rep[0]),
+                    "cy": float(rep[1]),
+                    "length": float(rep[2]),
+                    "width": float(rep[3]),
+                    "yaw": float(rep[4]),
+                    **extras,
+                })
         return fused_list
 
     def _aggregate_cluster(self, detections: List[dict], idxs: List[int]) -> dict:
@@ -610,13 +632,47 @@ class RealtimeFusionServer:
         pitch = np.mean([float(d.get("pitch", 0.0)) for d in subset])
         roll = np.mean([float(d.get("roll", 0.0)) for d in subset])
         cams = [d.get("cam", "?") for d in subset]
+        normalized_colors = [normalize_color_label(d.get("color")) for d in subset]
+        color_counts = Counter([c for c in normalized_colors if c])
+        color = color_counts.most_common(1)[0][0] if color_counts else None
         return {
             "cz": float(cz),
             "pitch": float(pitch),
             "roll": float(roll),
             "score": float(score),
             "source_cams": cams,
+            "color": color,
+            "color_votes": dict(color_counts),
         }
+
+    def _update_track_meta(self, matches: List[Tuple[int, int]], fused_list: List[dict], track_attrs: Dict[int, dict]):
+        active_ids = set(track_attrs.keys())
+        self.track_meta = {tid: meta for tid, meta in self.track_meta.items() if tid in active_ids}
+        for tid, attrs in track_attrs.items():
+            meta = self.track_meta.setdefault(tid, {})
+            color = attrs.get("color")
+            if color:
+                meta["color"] = color
+            if "color_confidence" in attrs:
+                meta["color_confidence"] = attrs["color_confidence"]
+        for tid, det_idx in matches:
+            if det_idx < 0 or det_idx >= len(fused_list):
+                continue
+            det = fused_list[det_idx]
+            meta = self.track_meta.setdefault(tid, {})
+            meta.update({
+                "cz": float(det.get("cz", 0.0)),
+                "pitch": float(det.get("pitch", 0.0)),
+                "roll": float(det.get("roll", 0.0)),
+                "score": float(det.get("score", 0.0)),
+                "source_cams": list(det.get("source_cams", [])),
+            })
+            color = det.get("color")
+            if color:
+                meta["color"] = color
+            votes = det.get("color_votes")
+            if votes:
+                meta["color_votes"] = dict(votes)
 
     def _broadcast_tracks(self, tracks: np.ndarray, ts: float):
         if self.track_tx:
@@ -645,6 +701,9 @@ class RealtimeFusionServer:
             vis["cx"] = float(det.get("cx", 0.0))
             vis["cy"] = float(det.get("cy", 0.0))
             vis["cz"] = float(det.get("cz", 0.0))
+            color = normalize_color_label(det.get("color"))
+            if color:
+                vis["color"] = color
             payload.append(vis)
         return payload
 
@@ -669,6 +728,12 @@ class RealtimeFusionServer:
             vis["cx"] = float(det.get("cx", 0.0))
             vis["cy"] = float(det.get("cy", 0.0))
             vis["cz"] = float(det.get("cz", 0.0))
+            color = normalize_color_label(det.get("color"))
+            if color:
+                vis["color"] = color
+            votes = det.get("color_votes")
+            if votes:
+                vis["color_votes"] = dict(votes)
             payload.append(vis)
         return payload
 
@@ -698,6 +763,13 @@ class RealtimeFusionServer:
             vis["sources"] = list(extra.get("source_cams", []))
             vis["cx"] = cx
             vis["cy"] = cy
+            color = normalize_color_label(extra.get("color"))
+            if color:
+                vis["color"] = color
+            if "color_confidence" in extra:
+                vis["color_confidence"] = float(extra["color_confidence"])
+            if "color_votes" in extra:
+                vis["color_votes"] = dict(extra["color_votes"])
             payload.append(vis)
         return payload
 
