@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from utils.merge.merge_dist_wbf import (
-    CAMERA_SETUPS, cluster_by_aabb_iou, fuse_cluster_weighted
+    cluster_by_aabb_iou, fuse_cluster_weighted
 )
 from utils.sort.tracker import SortTracker
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
@@ -33,6 +33,56 @@ def _md5sum(path, bufsize=1<<20):
             if not b: break
             h.update(b)
     return h.hexdigest()
+
+def load_camera_positions(path: Optional[str]) -> Dict[str, Tuple[float, float]]:
+    positions: Dict[str, Tuple[float, float]] = {}
+    if not path:
+        return positions
+    json_path = Path(path)
+    if not json_path.exists():
+        print(f"[Fusion] camera position file not found: {json_path}")
+        return positions
+    try:
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[Fusion] failed to read camera position file {json_path}: {exc}")
+        return positions
+
+    items: List[dict] = []
+    if isinstance(raw, list):
+        items = [item for item in raw if isinstance(item, dict)]
+    elif isinstance(raw, dict):
+        cams = raw.get("cameras")
+        if isinstance(cams, list):
+            items = [item for item in cams if isinstance(item, dict)]
+        else:
+            items = [raw]
+
+    for item in items:
+        name = item.get("name")
+        if not name:
+            cam_id = item.get("camera_id")
+            if cam_id is not None:
+                name = f"cam{cam_id}"
+        if not name:
+            continue
+        pos = item.get("pos")
+        if isinstance(pos, dict):
+            x_val = pos.get("x")
+            y_val = pos.get("y")
+        else:
+            x_val = item.get("x")
+            y_val = item.get("y")
+        try:
+            x = float(x_val)
+            y = float(y_val)
+        except (TypeError, ValueError):
+            continue
+        positions[str(name)] = (x, y)
+
+    if not positions:
+        print(f"[Fusion] camera position file {json_path} contained no usable entries")
+    return positions
 
 class TrackBroadcaster:
     """
@@ -261,13 +311,14 @@ class GlobalWebServer:
 # --- 끝 저장용 ---
 
 # -----------------------------
-# 수신부: 카메라별 UDP 포트를 바인딩해서 메시지를 받아 파싱
+# Receiver layer: legacy per-camera sockets plus the single aggregated feed
 # -----------------------------
 class UDPReceiver:
     """
-    - cam_port_map: {"cam1":50050, "cam2":50051, ...}
-    - 포맷1(JSON): {"type":"bev_labels","camera_id":1,"timestamp":..., "items":[{"center":[x,y],"length":L,"width":W,"yaw":deg}, ...]}
-    - 포맷2(TEXT): 첫줄 메타, 이후 각 줄 "cls cx cy L W yaw"
+    Legacy helper that binds one UDP socket per camera.
+    Packet formats:
+      1) JSON {"type":"bev_labels", ...} per detection list
+      2) Plain text lines: "cls cx cy L W yaw [cz pitch roll score]"
     """
     def __init__(self, cam_port_map: Dict[str, int], host: str = "0.0.0.0", max_bytes: int = 65507):
         self.cam_port_map = cam_port_map
@@ -340,13 +391,13 @@ class UDPReceiver:
                 return dets
         except Exception:
             pass
-
-       
-# ㄴ대신 단일포트로 N개 수신
+# -----------------------------
+# Single aggregated UDP feed (edge devices send all cameras through one port)
+# -----------------------------
 class UDPReceiverSingle:
     """
-    하나의 UDP 포트에서 모든 카메라 패킷을 수신.
-    payload(JSON)에 포함된 camera_id를 사용해 cam 이름을 f"cam{camera_id}"로 태깅.
+    Listen on a single UDP port fed by each edge computer.
+    Incoming JSON payloads include camera_id so detections can be tagged per camera name.
     """
     def __init__(self, port: int, host: str = "0.0.0.0", max_bytes: int = 65507):
         self.host = host
@@ -443,6 +494,7 @@ class RealtimeFusionServer:
     def __init__(
         self,
         cam_ports: Dict[str, int],
+        cam_positions_path: Optional[str] = None,
         fps: float = 10.0,
         iou_cluster_thr: float = 0.25,
         single_port: int = 50050,
@@ -468,8 +520,10 @@ class RealtimeFusionServer:
         self.receiver = UDPReceiverSingle(single_port)
 
         # 카메라 위치(가중치/거리 계산에 사용)
-        self.cam_xy = {item["name"]: (float(item["pos"]["x"]), float(item["pos"]["y"])) for item in CAMERA_SETUPS} 
-        self.buffer = {}                 
+        self.cam_xy = load_camera_positions(cam_positions_path)
+        if not self.cam_xy:
+            print("[Fusion] WARN: no camera positions loaded; distance weighting falls back to origin.")
+        self.buffer = {}
 
         self.track_tx = TrackBroadcaster(tx_host, tx_port, tx_protocol) if tx_host else None
         self.carla_tx = TrackBroadcaster(carla_host, carla_port) if carla_host else None
@@ -751,6 +805,7 @@ def parse_cam_ports(text: str) -> Dict[str, int]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051")
+    ap.add_argument("--cam-positions-json", default="camera_position.json")
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--iou-thr", type=float, default=0.25)
     ap.add_argument("--roll-secs", type=int, default=60)
@@ -819,6 +874,7 @@ def main():
 
     server = RealtimeFusionServer(
         cam_ports=cam_ports,
+        cam_positions_path=args.cam_positions_json,
         fps=args.fps,
         iou_cluster_thr=args.iou_thr,
         roll_secs=args.roll_secs,
