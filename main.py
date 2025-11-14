@@ -845,7 +845,7 @@ def main():
     ap.add_argument("--z-offset", type=float, default=0.0)
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")
-    ap.set_defaults(no_invert_bev_y=True)
+    ap.set_defaults(invert_bev_y=True)
     ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true")
     ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false")
     ap.set_defaults(normalize_vehicle=True)
