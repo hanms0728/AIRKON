@@ -308,97 +308,9 @@ class GlobalWebServer:
             self._server.should_exit = True
         if self._thread:
             self._thread.join(timeout=2.0)
-# --- 끝 저장용 ---
 
-# -----------------------------
-# Receiver layer: legacy per-camera sockets plus the single aggregated feed
-# -----------------------------
-class UDPReceiver:
-    """
-    Legacy helper that binds one UDP socket per camera.
-    Packet formats:
-      1) JSON {"type":"bev_labels", ...} per detection list
-      2) Plain text lines: "cls cx cy L W yaw [cz pitch roll score]"
-    """
-    def __init__(self, cam_port_map: Dict[str, int], host: str = "0.0.0.0", max_bytes: int = 65507):
-        self.cam_port_map = cam_port_map
-        self.host = host
-        self.max_bytes = max_bytes
-        self.socks: Dict[str, socket.socket] = {}
-        self.ths: List[threading.Thread] = []
-        self.running = False
 
-        # 출력 큐: 각 카메라별 최신 프레임 버킷을 큐에 넣음
-        self.q = queue.Queue(maxsize=2048)
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        for cam, port in self.cam_port_map.items():
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.bind((self.host, int(port)))
-            self.socks[cam] = s
-            th = threading.Thread(target=self._rx_loop, args=(cam, s), daemon=True)
-            th.start()
-            self.ths.append(th)
-        print(f"[UDPReceiver] listening on: " + ", ".join([f"{c}:{p}" for c, p in self.cam_port_map.items()]))
-
-    def stop(self):
-        self.running = False
-        for s in self.socks.values():
-            try: s.close()
-            except: pass
-        for th in self.ths:
-            th.join(timeout=0.5)
-        self.socks.clear()
-        self.ths.clear()
-
-    def _rx_loop(self, cam: str, sock: socket.socket):
-        while self.running:
-            try:
-                data, addr = sock.recvfrom(self.max_bytes)
-                ts = time.time()
-                dets = self._parse_payload(data)
-                if dets is None:
-                    continue
-                # dets: List[[cls,cx,cy,L,W,yaw_deg]]
-                self.q.put_nowait({"cam": cam, "ts": ts, "dets": dets})
-            except Exception as e:
-                # 소켓 close 중이거나 과도한 부하 시 무시
-                continue
-
-    def _parse_payload(self, data: bytes):
-        # JSON만 받도록 바꿧삼
-        try:
-            msg = json.loads(data.decode("utf-8"))
-            if isinstance(msg, dict) and msg.get("type") == "bev_labels":
-                dets = []
-                for it in msg.get("items", []):
-                    cx, cy = it["center"]
-                    dets.append({
-                        "cls": int(it.get("class", 0)),
-                        "cx": float(cx),
-                        "cy": float(cy),
-                        "length": float(it.get("length", 0.0)),
-                        "width": float(it.get("width", 0.0)),
-                        "yaw": float(it.get("yaw", 0.0)),
-                        "score": float(it.get("score", 0.0)),
-                        "cz": float(it.get("cz", 0.0)),
-                        "pitch": float(it.get("pitch", 0.0)),
-                        "roll": float(it.get("roll", 0.0)),
-                    })
-                return dets
-        except Exception:
-            pass
-# -----------------------------
-# Single aggregated UDP feed (edge devices send all cameras through one port)
-# -----------------------------
 class UDPReceiverSingle:
-    """
-    Listen on a single UDP port fed by each edge computer.
-    Incoming JSON payloads include camera_id so detections can be tagged per camera name.
-    """
     def __init__(self, port: int, host: str = "0.0.0.0", max_bytes: int = 65507):
         self.host = host
         self.port = int(port)
