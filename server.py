@@ -715,11 +715,6 @@ def parse_cam_ports(text: str) -> Dict[str, int]:
     out = {}
     for tok in text.split(","):
         tok = tok.strip()
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        pass
-    finally:
         if not tok:
             continue
         name, port = tok.split(":")
@@ -747,12 +742,7 @@ def main():
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--tracker-fixed-length", type=float, default=None)
     ap.add_argument("--tracker-fixed-width", type=float, default=None)
-    ap.add_argument("--size-mode", choices=["
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        pass
-    finally:bbox","fixed","mesh"], default="mesh")
+    ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
     ap.add_argument("--fixed-length", type=float, default=4.5)
     ap.add_argument("--fixed-width", type=float, default=1.8)
     ap.add_argument("--height-scale", type=float, default=0.5,
@@ -768,12 +758,7 @@ def main():
     ap.set_defaults(no_invert_bev_y=True)
     ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true",
                     help="GLB를 최대 변 1.0으로 정규화")
-    ap.add_argument("--no-normalize-vehicle",
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        pass
-    finally: dest="normalize_vehicle", action="store_false",
+    ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false",
                     help="GLB 정규화 끄기")
     ap.set_defaults(normalize_vehicle=True)
     ap.add_argument("--vehicle-y-up", dest="vehicle_y_up", action="store_true",
@@ -819,11 +804,6 @@ def main():
         carla_port=args.carla_port,
         global_ply=args.global_ply,
         vehicle_glb=args.vehicle_glb,
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        pass
-    finally:
         web_host=args.web_host,
         web_port=args.web_port,
         enable_web=(not args.no_web),
