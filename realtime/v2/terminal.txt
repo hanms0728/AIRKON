@@ -1,9 +1,9 @@
 python main.py --weights onnx/yolo11m_2_5d_epoch_005.onnx --lut-path pointcloud/cloud_rgb_npz --web-enable --viewer3d
 
 
-python main.py --weights onnx/yolo11m_2_5d_epoch_005.onnx --camera-config camera_config.json --web-enable --udp-enable
+python main.py --weights onnx/yolo11m_2_5d_epoch_005.onnx --camera-config camera_config.json --web-enable --udp-enable --no-invert-bev-y --no-gui
 
 python server.py \
   --udp-port 50050 \
   --tx-host 192.168.0.200 --tx-port 60100 \
-  --carla-host 127.0.0.1 --carla-port 60200 --global-ply pointcloud/m
+  --carla-host 127.0.0.1 --carla-port 60200 --global-ply pointcloud/global

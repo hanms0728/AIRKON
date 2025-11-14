@@ -38,12 +38,12 @@ RGB 이미지와 카메라 포즈를 이용해 글로벌 포인트클라우드�
 ```bash
 python pointcloud/make_pointcloud/img_to_ply_with_global_ply.py \
   --ply pointcloud/global_fused_small.ply \
-  --image /path/to/cam_rgb.png \
+  --image real_image/cam_1.png \
   --out outputs/visible_cam9.ply \
-  --pos 30.0,2.0,10.0 \
-  --rot -55.0,-35.0,0.0 \
+  --pos="30.0,2.0,10.0" \
+  --rot="-55.0,-35.0,0.0" \
   --fov 89 \
-  --interactive
+  --interactive --intrinsic-npz realtime/disto/cam_calibration_results.npz
 ```
 
 - `--pos`는 카메라 위치(x,y,z), `--rot`는 yaw,pitch,roll (deg) 입니다.

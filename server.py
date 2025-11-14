@@ -380,6 +380,7 @@ class UDPReceiverSingle:
                 ts = time.time()
                 cam, dets = self._parse_payload(data)
                 if dets is None: 
+                    # self.q.clear()
                     continue
                 self.q.put_nowait({"cam": cam, "ts": ts, "dets": dets})
             except Exception:
@@ -438,6 +439,8 @@ class RealtimeFusionServer:
     ):
         self.fps = fps
         self.dt = 1.0 / max(1e-3, fps)
+        # Drop cached detections once they become too old so we don't replay stale frames forever
+        self.buffer_ttl = max(self.dt * 2.0, 1.0)
         self.iou_thr = iou_cluster_thr
         self.track_meta: Dict[int, dict] = {}
         self.active_cams = set()
@@ -547,8 +550,8 @@ class RealtimeFusionServer:
             for det in fused:
                 det_rows.append([
                     0,
-                    det["cx"],
-                    det["cy"],
+                    -det["cx"],
+                    -det["cy"],
                     (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
                     det["yaw"],
@@ -582,11 +585,15 @@ class RealtimeFusionServer:
 
     def _gather_current(self):
         detections = []
+        now = time.time()
         for cam, dq in self.buffer.items():
             if not dq:
                 continue
             entry = dq[-1]
-            ts = entry.get("ts", time.time())
+            ts = float(entry.get("ts", 0.0) or 0.0)
+            if (now - ts) > self.buffer_ttl:
+                dq.clear()
+                continue
             for det in entry["dets"]:
                 det_copy = det.copy()
                 det_copy["cam"] = cam
@@ -861,8 +868,6 @@ def main():
         cam_positions_path=args.cam_positions_json,
         fps=args.fps,
         iou_cluster_thr=args.iou_thr,
-        roll_secs=args.roll_secs,
-        roll_max_rows=args.roll_max_rows,
         single_port=args.udp_port,
         tx_host=args.tx_host,
         tx_port=args.tx_port,
