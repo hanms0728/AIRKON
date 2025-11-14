@@ -306,6 +306,7 @@ _M_CARLA_SWAP = np.array([
 
 # Combined CARLA-world point → CV-world point transform that matches your H code
 _T_CARLA_WORLD_TO_CV_WORLD = _AXES_CARLA_TO_CV @ _M_CARLA_SWAP  # results in [X, -Z, -Y]
+_T_CV_WORLD_TO_CARLA_WORLD = np.linalg.inv(_T_CARLA_WORLD_TO_CV_WORLD)
 
 
 def carla_world_points_to_cv(points: np.ndarray) -> np.ndarray:
@@ -316,6 +317,17 @@ def carla_world_points_to_cv(points: np.ndarray) -> np.ndarray:
         return points
     pts = np.ascontiguousarray(points, dtype=np.float64)
     return (pts @ _T_CARLA_WORLD_TO_CV_WORLD.T)
+
+
+def flip_carla_y_in_cv(points: np.ndarray) -> np.ndarray:
+    """Mirror CARLA Y (east/west) axis while the data is in CV/world frame.
+    This converts CV→CARLA, flips Y, then converts back so callers always pass CV points."""
+    if points is None or len(points) == 0:
+        return points
+    pts = np.ascontiguousarray(points, dtype=np.float64)
+    pts_carla = pts @ _T_CV_WORLD_TO_CARLA_WORLD.T
+    pts_carla[:, 1] *= -1.0
+    return pts_carla @ _T_CARLA_WORLD_TO_CV_WORLD.T
 
 
 def parse_vec3_csv(text: str) -> Tuple[float,float,float]:
@@ -790,6 +802,8 @@ def main():
                     help="When dumping axes, draw only X/Y axes (no Z).")
     ap.add_argument("--ply-frame", choices=["carla","cv"], default="carla",
                     help="What frame the input PLY is in. If 'carla', we convert points to CV/world to match H & pose mapping.")
+    ap.add_argument("--flip-y", action="store_true",
+                    help="Flip CARLA Y axis (mirrors east/west) before projection if your real map was installed with reversed Y.")
     ap.add_argument("--origin", type=str, default=None,
                     help="Optional origin offset to subtract from points (ox,oy,oz) AFTER --ply-frame transform. Helps align your expected (0,0,0).")
     ap.add_argument("--dump-axes-merged", type=str, default=None,
@@ -832,7 +846,12 @@ def main():
         print("[DEBUG] Converted PLY points CARLA→CV to match pose/H frame.")
         print_bounds("PLY(cv)", pts)
 
-    # Optional origin shift
+    if args.flip_y:
+        pts = flip_carla_y_in_cv(pts)
+        print("[DEBUG] Applied CARLA Y-axis flip (mirrors CV Z component).")
+        print_bounds("PLY(after flip-y)", pts)
+
+    # Optional origin shift (applied after flip so translation stays intuitive)
     if args.origin:
         ox, oy, oz = parse_vec3_csv(args.origin)
         origin = np.array([ox, oy, oz], dtype=np.float64)
