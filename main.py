@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+from PIL import Image
 
 @dataclass
 class CameraAssets:
@@ -389,8 +390,9 @@ class InferWorker(threading.Thread):
                     with wrk.span("preproc"):
                         fr, ts_capture = fr
                         chw, bgr = self._preprocess(cid, fr)
-                    imgs_chw[cid] = chw
-                    bgr_for_gui[cid] = bgr
+                    imgs_chw[cid] = np.flip(chw, axis=1) # <================
+                    bgr_for_gui[cid] = np.flip(bgr, axis=1) # <====================
+                    # cv2.imwrite('sfs.jpg',np.flip(bgr, axis=1)) flip delete!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
             if not ready:
