@@ -1,7 +1,7 @@
 import numpy as np
 import open3d as o3d
 
-ply_path = "pointcloud/merged_.ply"
+ply_path = "a.ply"
 pcd = o3d.io.read_point_cloud(ply_path)
 
 # 보기용 좌우 반전 행렬 (Y축 부호 반전)
