@@ -82,6 +82,28 @@ python pointcloud/make_pointcloud/inspect_npz.py pointcloud/cloud_rgb_npz/cloud_
   --verbose --percentiles --sample 5
 ```
 
+### 6. LUT valid_mask 편집기
+기존에 생성된 `pixel2world_lut.npz`의 `valid_mask`를 사람이 직접 GUI에서 수정할 수 있습니다.
+
+```bash
+# RGB 이미지 위에서 편집하고 싶다면:
+python pointcloud/make_pointcloud/lut_mask_editor.py \
+  --lut outputs/cam_1_x-6.50_y10.60_z12.10_yaw-148.00_pit-34.00_rol-6.00_f84.08_pixel2world_lut.npz \
+  --image real_image/cam_1.png
+
+# 또는 글로벌 PLY만으로 BEV 배경을 만들고 싶다면(이미지 불필요):
+python pointcloud/make_pointcloud/lut_mask_editor.py \
+  --lut outputs/cam_1_x-6.50_y10.60_z12.10_yaw-148.00_pit-34.00_rol-6.00_f84.08_pixel2world_lut.npz \
+  --global-ply outputs/cam_1_x-6.50_y10.60_z12.10_yaw-148.00_pit-34.00_rol-6.00_f84.08.ply
+```
+
+- `Left drag` : 유효하지 않은 영역으로 마스킹 (invalid), `Right drag` : 다시 유효로 되돌리기.
+- `[ / ]` 로 브러시 크기를 조절하고, `U` (undo), `R` (reset), `S` (save), `ESC` 로 종료합니다.
+- 기본적으로 `valid_mask`와 `ground_valid_mask`에 동일한 결과를 저장하며, `--sync-floor-mask`로 `floor_mask`도 함께 갱신할 수 있습니다.
+- `--background` 는 `auto`(기본, 가능하면 PLY→BEV 사용), `image`, `bev`, `checker` 중 선택 가능하며, `--bev-resolution`, `--bev-pad`, `--ply-voxel`로 BEV 품질/다운샘플을 조정할 수 있습니다.
+- `--global-ply`를 주면 실제 카메라 이미지는 필요 없고, LUT의 XY를 PLY와 매칭한 **순수 BEV 뷰** 위에서 직접 마스크를 수정할 수 있습니다 (마우스 좌표가 BEV 픽셀에 바로 매핑됩니다).
+- `--out` 경로를 명시하지 않으면 입력 파일 이름에 `_edited.npz`가 붙은 새 파일로 저장되고, `--inplace`를 주면 기존 LUT를 덮어씁니다.
+
 ## 예제 데이터
 `cloud_rgb_npz/`와 `cloud_rgb_ply/`는 파이프라인을 빠르게 검증하기 위한 샘플입니다.  
 자체 데이터셋으로 대체할 경우 동일한 파일 구조(프레임별 `.npz` 혹은 `.ply`)와 BEV 라벨 포맷(`class cx cy cz length width yaw pitch roll`)을 맞춰 주세요.
