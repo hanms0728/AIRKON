@@ -452,8 +452,6 @@ class InferWorker(threading.Thread):
                                 pass
 
             wrk.bump()
-            if self.undist_timer:
-                self.undist_timer.bump()
 
     def stop(self):
         self.stop_evt.set()
@@ -832,8 +830,9 @@ def main():
     ap.add_argument("--udp-host", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=50050)
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
-    ap.add_argument("--visual-size", default="216,384", type=str)
+    ap.add_argument("--visual-size", default="400,700", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    ap.add_argument("--no-gui", action="store_true", help="Disable OpenCV visualization windows")
     # visualization scaling (shared across web/3d)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
     ap.add_argument("--fixed-length", type=float, default=4.5)
@@ -869,6 +868,8 @@ def main():
         except Exception:
             return False
     USE_GUI = gui_available()
+    if args.no_gui:
+        USE_GUI = False
 
     # 웹
     viz_cfg = VizSizeConfig(
@@ -997,22 +998,22 @@ def main():
                         gui_timer.bump()
                         continue
 
-                if not USE_GUI:
-                    if not ticker.tick():
-                        break
-                    gui_timer.bump()
-                    continue
-                vis = overlay_bgr
-                if vis is None:
-                    vis = np.zeros((H, W, 3), dtype=np.uint8)
+                    if not USE_GUI:
+                        if not ticker.tick():
+                            break
+                        gui_timer.bump()
+                        continue
+                    vis = overlay_bgr
+                    if vis is None:
+                        vis = np.zeros((H, W, 3), dtype=np.uint8)
 
-                with gui_timer.span("gui.show"):
-                    cv2.imshow(f"cam{cid}", vis)
-                    e2e_ms = (time.time() - ts_capture) * 1000.0
-                    print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
-                    if not ticker.tick():
-                        break
-            gui_timer.bump()
+                    with gui_timer.span("gui.show"):
+                        cv2.imshow(f"cam{cid}", vis)
+                        e2e_ms = (time.time() - ts_capture) * 1000.0
+                        print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
+                        if not ticker.tick():
+                            break
+                gui_timer.bump()
     finally:
         worker.stop()
         worker.join(timeout=1)
