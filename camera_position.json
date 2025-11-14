@@ -1,0 +1,7 @@
+{
+  "cameras": [
+    {"name": "cam1",  "pos": {"x": -46,  "y": -74, "z": 9}, "rot": {"pitch": -40, "yaw": 90,  "roll": 0}},
+    {"name": "cam2",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 197, "roll": 0}},
+    {"name": "cam3",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 163, "roll": 0}}
+  ]
+}
