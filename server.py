@@ -532,11 +532,11 @@ class RealtimeFusionServer:
             dets_for_tracker = np.array(
                 [[
                     0,
-                    det["cx"],
-                    det["cy"],
+                    -det["cx"],
+                    -det["cy"],
                     (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
-                    det["yaw"],
+                    det["yaw"] + 180,
                 ] for det in fused],
                 dtype=float
             ) if fused else np.zeros((0,6), dtype=float)
