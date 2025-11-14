@@ -789,8 +789,6 @@ def main():
         cam_positions_path=args.cam_positions_json,
         fps=args.fps,
         iou_cluster_thr=args.iou_thr,
-        roll_secs=args.roll_secs,
-        roll_max_rows=args.roll_max_rows,
         single_port=args.udp_port,
         tx_host=args.tx_host,
         tx_port=args.tx_port,
