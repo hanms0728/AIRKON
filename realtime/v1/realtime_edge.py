@@ -33,6 +33,7 @@ class IPCameraStreamerUltraLL:
 
         # 최신 프레임 1장만 유지 + 락
         self.latest = {cfg['camera_id']: deque(maxlen=1) for cfg in self.camera_configs} # 카메라별 최신 프레임 1장 보관용 deque 대기열 쌓여 지연되는 걸 막음
+        self.last_served_ts = {cfg['camera_id']: None for cfg in self.camera_configs}    # get_latest로 마지막 전달된 timestamp
         self.locks = {cfg['camera_id']: threading.Lock() for cfg in self.camera_configs} # 각 카메라 프레임 교체 시 쓰는 락
 
         # 프로세스/스레드 관리
@@ -54,9 +55,9 @@ class IPCameraStreamerUltraLL:
             dict(rtsp_transport='udp',
                 fflags='nobuffer',
                 flags='low_delay',
-                reorder_queue_size='0', # 👈 추가: 프레임 재정렬 버퍼 제거
-                max_delay='0',          # 👈 추가: 수신 지터 버퍼 최소화
-                use_wallclock_as_timestamps='1', # 👈 추가: 호스트 시계 PTS 사용
+                reorder_queue_size='0', 
+                max_delay='0',         
+                use_wallclock_as_timestamps='1',
                 probesize='32k',
                 analyzeduration='0'),
             dict(rtsp_transport='udp',
@@ -88,7 +89,7 @@ class IPCameraStreamerUltraLL:
                 probesize='32k',
                 analyzeduration='0'),
             dict(rtsp_transport='tcp',
-                fflags='nobuffer+discardcorrupt',   # ← 여기도 +
+                fflags='nobuffer+discardcorrupt',   
                 flags='low_delay',
                 reorder_queue_size='0',
                 max_delay='0',        
@@ -135,9 +136,6 @@ class IPCameraStreamerUltraLL:
         return [
             f"rtsp://{u}:{p}@{ip}:{port}/stream1",
             f"rtsp://{u}:{p}@{ip}:{port}/stream2",
-            # f"rtsp://{u}:{p}@{ip}:{port}/h264Preview_01_sub",
-            # f"rtsp://{u}:{p}@{ip}:{port}/live/ch0",
-            # f"rtsp://{u}:{p}@{ip}:{port}/Streaming/Channels/102",
         ]
 
     def _spawn_with_profiles(self, url: str, width: int, height: int, force_tcp: bool):
@@ -237,14 +235,17 @@ class IPCameraStreamerUltraLL:
                 frame_count, last_t = 0, time.time()
                 while self.running:
                     if self.latency_check:
-                        start_read_time = time.time() # 📢 프레임 읽기 시작 시각
+                        start_read_time = time.time() # 프레임 읽기 시작 시각
                         data = self._read_exact(proc.stdout, bpf) # 이걸로 프레임 받음,, 
-                        read_finish_time = time.time() # 📢 프레임 읽기 완료 시각
+                        read_finish_time = time.time() # 프레임 읽기 완료 시각
                     else: data = self._read_exact(proc.stdout, bpf)
                     ts_capture = time.time()
                     if data is None:
                         # 끊기면 에러내용ㄱㄱ 재연결 
                         try:
+                            with self.locks[cam_id]:
+                                self.latest[cam_id].clear()
+                                self.last_served_ts[cam_id] = None
                             err_txt = proc.stderr.read().decode('utf-8', errors='ignore')
                             if err_txt.strip():
                                 sys.stderr.write(f"[Cam{cam_id} FFmpeg stderr] {err_txt}\n")
@@ -311,6 +312,9 @@ class IPCameraStreamerUltraLL:
             if self.running and not connected:
                 print(f"[Cam{cam_id}] ❌ all URLs failed, retry in {backoff:.1f}s")
             time.sleep(backoff)
+            with self.locks[cam_id]:
+                self.latest[cam_id].clear()
+                self.last_served_ts[cam_id] = None
             backoff = min(backoff * 2, 5.0)
 
     # ----------------- API -----------------
@@ -325,8 +329,13 @@ class IPCameraStreamerUltraLL:
     def get_latest(self, camera_id: int) -> Optional[np.ndarray]:
         '''이 캠에 대해 락걸고 뎈에서 이 캠의 가장최근프레임1장이 잇으면~ 반환 없으면 none'''
         with self.locks[camera_id]:
-            if self.latest[camera_id]:
-                return self.latest[camera_id][-1]
+            if not self.latest[camera_id]:
+                return None
+            frame, ts_capture = self.latest[camera_id][-1]
+            if self.last_served_ts.get(camera_id) == ts_capture:
+                return None
+            self.last_served_ts[camera_id] = ts_capture
+            return frame, ts_capture
         return None
 
     def stop(self):
@@ -354,15 +363,16 @@ class IPCameraStreamerUltraLL:
                 start = time.time()
                 for cfg in self.camera_configs:
                     cam_id = cfg['camera_id']
-                    frame = self.get_latest(cam_id)
-                    frame, ts_capture = frame
-                    if frame is not None:
-                        vis = frame  # 이미 copy()된 writable 프레임
-                        if self.overlay_ts: # 이거 주지 말라한것같음,, 
-                            ts = time.time()
-                            txt = time.strftime('%H:%M:%S', time.localtime(ts)) + f".{int((ts%1)*1000):03d}"
-                            cv2.putText(vis, txt, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2, cv2.LINE_AA)
-                        cv2.imshow(f"Cam{cam_id}", vis) # 최신 거 보여줍시대
+                    latest = self.get_latest(cam_id)
+                    if latest is None:
+                        continue
+                    frame, ts_capture = latest
+                    vis = frame  # 이미 copy()된 writable 프레임
+                    if self.overlay_ts: # 이거 주지 말라한것같음,, 
+                        ts = time.time()
+                        txt = time.strftime('%H:%M:%S', time.localtime(ts)) + f".{int((ts%1)*1000):03d}"
+                        cv2.putText(vis, txt, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2, cv2.LINE_AA)
+                    cv2.imshow(f"Cam{cam_id}", vis) # 최신 거 보여줍시대
                 if (cv2.waitKey(1) & 0xFF) == ord('q'):
                     self.stop()
                     break
