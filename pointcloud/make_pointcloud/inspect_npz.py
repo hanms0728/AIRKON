@@ -105,7 +105,7 @@ def main() -> None:
     parser.add_argument(
         "--sample",
         type=int,
-        default=0,
+        default=5,
         help="각 배열의 앞쪽 N개 값을 평탄화해 예시로 출력합니다.",
     )
     args = parser.parse_args()

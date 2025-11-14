@@ -1045,9 +1045,11 @@ def main():
                 min_valid_corners=int(args.lut_min_corners),
                 boundary_eps=float(args.lut_boundary_eps)
             )
-            for idx, det in enumerate(dets):
-                if idx >= pred_tris_bev_xy.shape[0]:
-                    break
+            num_tri = min(len(dets), pred_tris_bev_xy.shape[0])
+            if len(dets) != pred_tris_bev_xy.shape[0]:
+                print(f"[WARN] BEV LUT triangles ({pred_tris_bev_xy.shape[0]}) and detections ({len(dets)}) differ; clipping to {num_tri}.")
+            for idx in range(num_tri):
+                det = dets[idx]
                 if not good_mask[idx]:
                     continue
                 tri_bev_xy = pred_tris_bev_xy[idx]
