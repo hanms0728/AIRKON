@@ -1,6 +1,7 @@
 import argparse
 import json
 import queue
+import re
 import socket
 import threading
 import time
@@ -11,7 +12,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -34,55 +35,205 @@ def _md5sum(path, bufsize=1<<20):
             h.update(b)
     return h.hexdigest()
 
-def load_camera_positions(path: Optional[str]) -> Dict[str, Tuple[float, float]]:
-    positions: Dict[str, Tuple[float, float]] = {}
+def _safe_float(val, default=None):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+def _slugify_label(text: str) -> str:
+    slug = re.sub(r"[^0-9a-zA-Z]+", "-", str(text)).strip("-").lower()
+    return slug or "cam"
+
+def _dedup_slug(base: str, used: set) -> str:
+    slug = base
+    idx = 2
+    while slug in used:
+        slug = f"{base}-{idx}"
+        idx += 1
+    used.add(slug)
+    return slug
+
+def _guess_local_ply(root: Path, cam_id: Optional[int], name: Optional[str]) -> Optional[Path]:
+    if cam_id is None:
+        return None
+    candidates = []
+    patterns = [
+        f"cam_{cam_id}_*.ply",
+        f"cam{cam_id}_*.ply",
+    ]
+    if name:
+        name_slug = _slugify_label(name).replace("-", "_")
+        patterns.append(f"{name_slug}*.ply")
+    for pattern in patterns:
+        candidates.extend(root.glob(pattern))
+    if not candidates:
+        for pattern in patterns:
+            candidates.extend(root.rglob(pattern))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0].resolve()
+
+def _guess_local_lut(root: Path, cam_id: Optional[int], name: Optional[str]) -> Optional[Path]:
+    if cam_id is None:
+        return None
+    candidates = []
+    patterns = [
+        f"cam_{cam_id}_*.npz",
+        f"cam{cam_id}_*.npz",
+    ]
+    if name:
+        name_slug = _slugify_label(name).replace("-", "_")
+        patterns.append(f"{name_slug}*.npz")
+    for pattern in patterns:
+        candidates.extend(root.glob(pattern))
+    if not candidates:
+        for pattern in patterns:
+            candidates.extend(root.rglob(pattern))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0].resolve()
+
+def _lut_mask_from_obj(obj: dict) -> Optional[np.ndarray]:
+    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+        if key in obj:
+            mask = np.asarray(obj[key]).astype(bool)
+            if "X" in obj and mask.shape == np.asarray(obj["X"]).shape:
+                return mask
+    if all(k in obj for k in ("X", "Y", "Z")):
+        X = np.asarray(obj["X"])
+        Y = np.asarray(obj["Y"])
+        Z = np.asarray(obj["Z"])
+        return np.isfinite(X) & np.isfinite(Y) & np.isfinite(Z)
+    return None
+
+def _load_visible_xyz_from_lut(path: Path) -> Optional[np.ndarray]:
+    try:
+        with np.load(str(path)) as data:
+            if not {"X", "Y", "Z"}.issubset(set(data.files)):
+                print(f"[Fusion] LUT missing XYZ -> {path}")
+                return None
+            mask = _lut_mask_from_obj(data)
+            if mask is None:
+                print(f"[Fusion] LUT mask missing -> {path}")
+                return None
+            X = np.asarray(data["X"], dtype=np.float32)
+            Y = np.asarray(data["Y"], dtype=np.float32)
+            Z = np.asarray(data["Z"], dtype=np.float32)
+            xyz = np.stack([X[mask], Y[mask], Z[mask]], axis=1).astype(np.float32)
+    except Exception as exc:
+        print(f"[Fusion] failed to load LUT {path}: {exc}")
+        return None
+    if xyz.size == 0:
+        return None
+    return xyz
+
+def load_camera_markers(path: Optional[str], local_ply_root: Optional[str] = None,
+                        local_lut_root: Optional[str] = None) -> List[dict]:
+    markers: List[dict] = []
     if not path:
-        return positions
+        return markers
     json_path = Path(path)
     if not json_path.exists():
         print(f"[Fusion] camera position file not found: {json_path}")
-        return positions
+        return markers
     try:
         raw = json.loads(json_path.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"[Fusion] failed to read camera position file {json_path}: {exc}")
-        return positions
+        return markers
 
-    items: List[dict] = []
     if isinstance(raw, list):
-        items = [item for item in raw if isinstance(item, dict)]
+        entries = raw
     elif isinstance(raw, dict):
         cams = raw.get("cameras")
         if isinstance(cams, list):
-            items = [item for item in cams if isinstance(item, dict)]
+            entries = cams
         else:
-            items = [raw]
+            entries = [raw]
+    else:
+        print(f"[Fusion] camera position file {json_path} has unexpected format")
+        return markers
 
-    for item in items:
-        name = item.get("name")
-        if not name:
-            cam_id = item.get("camera_id")
-            if cam_id is not None:
-                name = f"cam{cam_id}"
-        if not name:
+    base_dir = json_path.parent
+    ply_root = Path(local_ply_root).resolve() if local_ply_root else None
+    lut_root = Path(local_lut_root).resolve() if local_lut_root else None
+    used_slugs = set()
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
             continue
-        pos = item.get("pos")
-        if isinstance(pos, dict):
-            x_val = pos.get("x")
-            y_val = pos.get("y")
-        else:
-            x_val = item.get("x")
-            y_val = item.get("y")
-        try:
-            x = float(x_val)
-            y = float(y_val)
-        except (TypeError, ValueError):
-            continue
-        positions[str(name)] = (x, y)
+        name = entry.get("name") or entry.get("label")
+        camera_id = entry.get("camera_id", entry.get("id"))
+        if camera_id is not None:
+            try:
+                camera_id = int(camera_id)
+            except (TypeError, ValueError):
+                camera_id = None
+        if camera_id is None and name:
+            nums = re.findall(r"\d+", str(name))
+            if nums:
+                try:
+                    camera_id = int(nums[-1])
+                except ValueError:
+                    camera_id = None
 
-    if not positions:
+        pos_src = entry.get("pos") if isinstance(entry.get("pos"), dict) else {}
+        x = _safe_float(pos_src.get("x", entry.get("x")))
+        y = _safe_float(pos_src.get("y", entry.get("y")))
+        if x is None or y is None:
+            continue
+        z = _safe_float(pos_src.get("z", entry.get("z")), 0.0)
+
+        rot_src = entry.get("rot") if isinstance(entry.get("rot"), dict) else {}
+        rotation = {
+            "pitch": _safe_float(rot_src.get("pitch", entry.get("pitch")), 0.0),
+            "yaw": _safe_float(rot_src.get("yaw", entry.get("yaw")), 0.0),
+            "roll": _safe_float(rot_src.get("roll", entry.get("roll")), 0.0),
+        }
+
+        local_ref = entry.get("local_ply") or entry.get("visible_ply")
+        ply_path = None
+        if isinstance(local_ref, str) and local_ref:
+            candidate = Path(local_ref)
+            ply_path = candidate if candidate.is_absolute() else (base_dir / candidate).resolve()
+        if (ply_path is None or not ply_path.exists()) and ply_root and ply_root.exists():
+            guessed = _guess_local_ply(ply_root, camera_id, name)
+            if guessed and guessed.exists():
+                ply_path = guessed
+        if ply_path and not ply_path.exists():
+            print(f"[Fusion] WARN: local ply for {name or camera_id} missing: {ply_path}")
+            ply_path = None
+
+        lut_ref = entry.get("local_lut") or entry.get("lut") or entry.get("lut_npz")
+        lut_path = None
+        if isinstance(lut_ref, str) and lut_ref:
+            candidate = Path(lut_ref)
+            lut_path = candidate if candidate.is_absolute() else (base_dir / candidate).resolve()
+        if (lut_path is None or not lut_path.exists()) and lut_root and lut_root.exists():
+            guessed_lut = _guess_local_lut(lut_root, camera_id, name)
+            if guessed_lut and guessed_lut.exists():
+                lut_path = guessed_lut
+        if lut_path and not lut_path.exists():
+            print(f"[Fusion] WARN: local LUT for {name or camera_id} missing: {lut_path}")
+            lut_path = None
+
+        display_name = str(name or (f"cam{camera_id}" if camera_id is not None else f"marker{idx+1}"))
+        slug = _dedup_slug(_slugify_label(display_name), used_slugs)
+        markers.append({
+            "key": slug,
+            "name": display_name,
+            "camera_id": camera_id,
+            "position": {"x": float(x), "y": float(y), "z": float(z)},
+            "rotation": rotation,
+            "local_ply": str(ply_path) if ply_path else None,
+            "local_lut": str(lut_path) if lut_path else None,
+        })
+
+    if not markers:
         print(f"[Fusion] camera position file {json_path} contained no usable entries")
-    return positions
+    return markers
 
 class TrackBroadcaster:
     """
@@ -170,6 +321,7 @@ class GlobalWebServer:
         client_config: Optional[dict] = None,
         tracker_fixed_length: Optional[float] = None,
         tracker_fixed_width: Optional[float] = None,
+        camera_markers: Optional[List[dict]] = None,
     ):
         self.global_ply = str(Path(global_ply).resolve())
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
@@ -200,7 +352,71 @@ class GlobalWebServer:
         self.client_config.setdefault("showSceneAxes", False)
         self.client_config.setdefault("showDebugMarker", False)
         self.client_config.setdefault("mode", "fusion")
+        self.client_config.setdefault("flipMarkerX", False)
+        self.client_config.setdefault("flipMarkerY", False)
         self.client_config["vizConfig"] = self.viz_cfg.as_client_dict()
+
+        self.camera_marker_payload: List[dict] = []
+        self.marker_local_map: Dict[str, str] = {}
+        self.marker_visible_arrays: Dict[str, np.ndarray] = {}
+        self.marker_visible_meta: Dict[str, dict] = {}
+        for entry in camera_markers or []:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or entry.get("name") or entry.get("camera_id") or len(self.camera_marker_payload))
+            pos = entry.get("position")
+            if not isinstance(pos, dict):
+                pos = {}
+            rot = entry.get("rotation")
+            if not isinstance(rot, dict):
+                rot = {}
+            marker_payload = {
+                "key": key,
+                "name": str(entry.get("name") or key),
+                "camera_id": entry.get("camera_id"),
+                "position": {
+                    "x": _safe_float(pos.get("x"), 0.0) or 0.0,
+                    "y": _safe_float(pos.get("y"), 0.0) or 0.0,
+                    "z": _safe_float(pos.get("z"), 0.0) or 0.0,
+                },
+                "rotation": {
+                    "pitch": _safe_float(rot.get("pitch"), 0.0) or 0.0,
+                    "yaw": _safe_float(rot.get("yaw"), 0.0) or 0.0,
+                    "roll": _safe_float(rot.get("roll"), 0.0) or 0.0,
+                },
+            }
+            local_ply = entry.get("local_ply")
+            if local_ply and os.path.exists(local_ply):
+                marker_payload["local_ply_url"] = f"/assets/cameras/{key}/local.ply"
+                marker_payload["has_local_ply"] = True
+                self.marker_local_map[key] = str(Path(local_ply).resolve())
+            else:
+                marker_payload["local_ply_url"] = None
+                marker_payload["has_local_ply"] = False
+
+            visible_arr = None
+            local_lut = entry.get("local_lut")
+            if local_lut and os.path.exists(local_lut):
+                visible_arr = _load_visible_xyz_from_lut(Path(local_lut))
+            if visible_arr is not None:
+                stride = int(visible_arr.shape[1])
+                self.marker_visible_arrays[key] = visible_arr
+                meta = {
+                    "count": int(visible_arr.shape[0]),
+                    "stride": stride,
+                    "source": str(local_lut),
+                }
+                self.marker_visible_meta[key] = meta
+                marker_payload["has_local_visible"] = True
+                marker_payload["local_visible_url"] = f"/assets/cameras/{key}/visible.bin"
+                marker_payload["local_visible_stride"] = stride
+                marker_payload["local_visible_count"] = meta["count"]
+            else:
+                marker_payload["has_local_visible"] = False
+                marker_payload["local_visible_url"] = None
+                marker_payload["local_visible_stride"] = None
+                marker_payload["local_visible_count"] = 0
+            self.camera_marker_payload.append(marker_payload)
 
         self.app = FastAPI(title="AIRKON Fusion Server", version="0.1.0")
         self.app.add_middleware(
@@ -260,6 +476,7 @@ class GlobalWebServer:
                     "started_at": self.started_at,
                     "timestamp": self._state["timestamp"],
                     "cameras": self._state["cameras"],
+                    "camera_positions": self.camera_marker_payload,
                     "config": self.client_config,
                 }
 
@@ -293,6 +510,25 @@ class GlobalWebServer:
             if not os.path.exists(self.vehicle_glb):
                 raise HTTPException(status_code=404, detail="vehicle glb missing")
             return FileResponse(self.vehicle_glb, filename="vehicle.glb")
+
+        @self.app.get("/assets/cameras/{marker_key}/local.ply")
+        def _marker_local(marker_key: str):
+            path = self.marker_local_map.get(str(marker_key))
+            if not path or not os.path.exists(path):
+                raise HTTPException(status_code=404, detail="local ply missing")
+            return FileResponse(path, filename=f"{marker_key}.ply")
+
+        @self.app.get("/assets/cameras/{marker_key}/visible.bin")
+        def _marker_visible(marker_key: str):
+            arr = self.marker_visible_arrays.get(str(marker_key))
+            if arr is None:
+                raise HTTPException(status_code=404, detail="visible cloud missing")
+            meta = self.marker_visible_meta.get(str(marker_key)) or {}
+            headers = {
+                "X-Point-Count": str(meta.get("count", arr.shape[0])),
+                "X-Stride": str(meta.get("stride", arr.shape[1] if arr.ndim == 2 else 3)),
+            }
+            return Response(content=arr.tobytes(), media_type="application/octet-stream", headers=headers)
 
     # ----------------- Update Interface -----------------
     def update(self, *, raw, fused, tracks, timestamp: float, cameras: List[str]):
@@ -408,6 +644,8 @@ class RealtimeFusionServer:
         self,
         cam_ports: Dict[str, int],
         cam_positions_path: Optional[str] = None,
+        local_ply_dir: Optional[str] = None,
+        local_lut_dir: Optional[str] = None,
         fps: float = 10.0,
         iou_cluster_thr: float = 0.25,
         single_port: int = 50050,
@@ -434,8 +672,19 @@ class RealtimeFusionServer:
         # 단일 소켓 리시버 (엣지→서버 UDP)
         self.receiver = UDPReceiverSingle(single_port)
 
-        # 카메라 위치(가중치/거리 계산에 사용)
-        self.cam_xy = load_camera_positions(cam_positions_path)
+        # 카메라 위치(가중치/거리 계산 및 UI용)
+        self.camera_markers = load_camera_markers(cam_positions_path, local_ply_dir, local_lut_dir)
+        self.cam_xy: Dict[str, Tuple[float, float]] = {}
+        for marker in self.camera_markers:
+            pos = marker.get("position") or {}
+            x = _safe_float(pos.get("x"))
+            y = _safe_float(pos.get("y"))
+            if x is None or y is None:
+                continue
+            name = marker.get("name") or marker.get("key")
+            if not name:
+                continue
+            self.cam_xy[str(name)] = (float(x), float(y))
         if not self.cam_xy:
             print("[Fusion] WARN: no camera positions loaded; distance weighting falls back to origin.")
         self.buffer = {}
@@ -453,6 +702,7 @@ class RealtimeFusionServer:
             port=web_port,
             viz_config=self.viz_cfg,
             client_config=self.client_config,
+            camera_markers=self.camera_markers,
         ) if enable_web else None
 
         # 프레임 버퍼(최근 T초 동안 카메라별 최신)
@@ -725,6 +975,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051")
     ap.add_argument("--cam-positions-json", default="camera_position.json")
+    ap.add_argument("--local-ply-dir", default="outputs",
+                    help="카메라별 로컬 PLY를 탐색할 디렉토리(패턴: cam_<id>_*.ply)")
+    ap.add_argument("--local-lut-dir", default="outputs",
+                    help="카메라별 LUT(npz)를 탐색할 디렉토리(패턴: cam_<id>_*.npz)")
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--iou-thr", type=float, default=0.25)
     ap.add_argument("--roll-secs", type=int, default=60)
@@ -771,6 +1025,14 @@ def main():
     ap.add_argument("--no-flip-ply-y", dest="flip_ply_y", action="store_false",
                     help="global ply Y축 반전하지 않음")
     ap.set_defaults(flip_ply_y=False)
+    ap.add_argument("--flip-marker-x", dest="flip_marker_x", action="store_true",
+                    help="뷰어에서 카메라 버튼/로컬 클라우드의 X축을 반전")
+    ap.add_argument("--no-flip-marker-x", dest="flip_marker_x", action="store_false")
+    ap.set_defaults(flip_marker_x=False)
+    ap.add_argument("--flip-marker-y", dest="flip_marker_y", action="store_true",
+                    help="뷰어에서 카메라 버튼/로컬 클라우드의 Y축을 반전")
+    ap.add_argument("--no-flip-marker-y", dest="flip_marker_y", action="store_false")
+    ap.set_defaults(flip_marker_y=False)
 
     args = ap.parse_args()
 
@@ -789,11 +1051,15 @@ def main():
         "flipPlyY": bool(args.flip_ply_y),
         "normalizeVehicle": bool(args.normalize_vehicle),
         "vehicleYAxisUp": bool(args.vehicle_y_up),
+        "flipMarkerX": bool(args.flip_marker_x),
+        "flipMarkerY": bool(args.flip_marker_y),
     }
 
     server = RealtimeFusionServer(
         cam_ports=cam_ports,
         cam_positions_path=args.cam_positions_json,
+        local_ply_dir=args.local_ply_dir,
+        local_lut_dir=args.local_lut_dir,
         fps=args.fps,
         iou_cluster_thr=args.iou_thr,
         single_port=args.udp_port,
