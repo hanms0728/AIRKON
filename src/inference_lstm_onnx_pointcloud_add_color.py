@@ -1351,14 +1351,13 @@ if __name__ == "__main__":
 
 
 """
-python ./src/inference_lstm_onnx_pointcloud.py \
-  --input-dir ./dataset_example_pointcloud_9/images \
-  --output-dir ./inference_results_npz_9 \
-  --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
+python -m src.inference_lstm_onnx_pointcloud_add_color \
+  --input-dir ./dataset_example/dataset_example_real_coshow_4/images \
+  --output-dir ./inference_results\
+  --weights ./onnx/yolo11m_2_5d_real_coshow_v2.onnx \
   --temporal lstm --seq-mode by_prefix --reset-per-seq \
-  --conf 0.8 --nms-iou 0.2 --topk 50 \
-  --gt-label-dir ./dataset_example_pointcloud_9/labels \
-  --lut-path ./pointcloud/cloud_rgb_npz/cloud_rgb_9.npz \
+  --conf 0.5 --nms-iou 0.2 --topk 50 \
+  --lut-path ./outputs/cam_4_x-32.60_y23.40_z11.00_yaw-264.00_pit-37.00_rol1.00_f84.08_pixel2world_lut.npz \
   --bev-scale 1.0 \
   --lut-min-corners 3 \
   --lut-boundary-eps 1e-3
