@@ -102,7 +102,8 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
 
     lines = []
     tri_orig_list: List[np.ndarray] = []
-    for d in dets:
+    hex_list: List[str] = []
+    for idx, d in enumerate(dets):
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
@@ -110,176 +111,39 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         cx, cy = int(tri[0][0]), int(tri[0][1])
         cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
-
+        # 원본 해상도 좌표로 스케일 복원
         tri_orig = tri.copy()
         tri_orig[:, 0] *= sx
         tri_orig[:, 1] *= sy
         tri_orig_list.append(tri_orig.copy())
         p0o, p1o, p2o = tri_orig[0], tri_orig[1], tri_orig[2]
-        lines.append(f"0 {p0o[0]:.2f} {p0o[1]:.2f} {p1o[0]:.2f} {p1o[1]:.2f} {p2o[0]:.2f} {p2o[1]:.2f} {score:.4f}")
 
-        det_dims = compute_poly_length_width(poly4)
-        color_info = extract_vehicle_color_patch(image_bgr, tri, det_dims)
-        if color_info is not None:
-            mean_bgr = color_info["mean_bgr"]
-            patch_color = tuple(int(c) for c in mean_bgr)
-            px1, py1, px2, py2 = color_info["patch"]
-            cv2.rectangle(img, (px1, py1), (px2, py2), (0, 255, 255), 1)
-            cv2.line(img, (px1, py1), (px2, py2), (0, 255, 255), 1, cv2.LINE_AA)
-            cv2.line(img, (px1, py2), (px2, py1), (0, 255, 255), 1, cv2.LINE_AA)
+        # 화면 상 평행사변형 영역에서 평균 색상 계산 (BGR)
+        Hc, Wc = img.shape[:2]
+        mask = np.zeros((Hc, Wc), dtype=np.uint8)
+        cv2.fillPoly(mask, [poly4], 1)
+        roi = image_bgr[mask == 1]
 
-            sw_w, sw_h = 18, 12
-            sw_x1 = int(np.clip(px1, 0, W - sw_w))
-            sw_y1 = int(np.clip(py1 - sw_h - 2, 0, H - sw_h))
-            sw_x2 = sw_x1 + sw_w
-            sw_y2 = sw_y1 + sw_h
-            cv2.rectangle(img, (sw_x1, sw_y1), (sw_x2, sw_y2), patch_color, -1)
-            cv2.rectangle(img, (sw_x1, sw_y1), (sw_x2, sw_y2), (0, 0, 0), 1)
-
-            color_text = f"{int(mean_bgr[2])},{int(mean_bgr[1])},{int(mean_bgr[0])}"
-            text_y = max(0, py1 - 4)
-            cv2.putText(img, color_text, (px1, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
-            roi_coords = color_info.get("roi")
-            if roi_coords:
-                rx0, ry0, rx1, ry1 = roi_coords
-                cv2.rectangle(img, (rx0, ry0), (rx1, ry1), (0, 200, 255), 1)
-            d["color_hex"] = bgr_to_hex(mean_bgr)
+        if roi.size == 0:
+            hexcol = "000000"
         else:
-            d["color_hex"] = d.get("color_hex", None)
+            mb = int(roi[:, 0].mean())
+            mg = int(roi[:, 1].mean())
+            mr = int(roi[:, 2].mean())
+            hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
+
+        hex_list.append(hexcol)
+        lines.append(
+            f"0 {p0o[0]:.2f} {p0o[1]:.2f} "
+            f"{p1o[0]:.2f} {p1o[1]:.2f} "
+            f"{p2o[0]:.2f} {p2o[1]:.2f} "
+            f"{score:.4f} {hexcol}"
+        )
 
     cv2.imwrite(save_path_img, img)
     with open(save_path_txt, "w") as f:
         f.write("\n".join(lines))
-    return tri_orig_list
-
-
-def compute_poly_length_width(poly4: np.ndarray) -> Tuple[float, float]:
-    poly4 = np.asarray(poly4, dtype=np.float32)
-    if poly4.shape != (4, 2):
-        return None
-    edges = np.linalg.norm(np.roll(poly4, -1, axis=0) - poly4, axis=1)
-    if edges.size != 4:
-        return None
-    length = float(np.max(edges))
-    width = float(np.min(edges))
-    return length, width
-
-
-def extract_vehicle_color_patch(image_bgr, tri, det_dims=None,
-                                expand_w=1.4, expand_h=1.2,
-                                center_ratio=0.35, min_patch_px=12,
-                                side_extra_h=0.35, side_shift_ratio=0.15,
-                                ratio_min=0.35, ratio_max=0.95):
-    """
-    tri: (3,2) image-space ground triangle.
-    det_dims: (length, width) tuple derived from parallelogram edges.
-    Returns mean BGR color sampled from an expanded ROI above the contact patch,
-    adaptively shifting the ROI higher when the shape indicates a side view.
-    """
-    if image_bgr is None:
-        return None
-    tri = np.asarray(tri, dtype=np.float32)
-    if tri.shape != (3, 2):
-        return None
-
-    H, W = image_bgr.shape[:2]
-    xs = tri[:, 0]
-    ys = tri[:, 1]
-    x_min, x_max = float(xs.min()), float(xs.max())
-    y_min, y_max = float(ys.min()), float(ys.max())
-    width = max(x_max - x_min, 1.0)
-    height = max(y_max - y_min, 1.0)
-    cx = 0.5 * (x_min + x_max)
-    y_bottom = y_max
-    tri_center = tri[0].copy()
-
-    length = max(width, height)
-    det_ratio = 1.0
-    if isinstance(det_dims, tuple) and det_dims[0] is not None:
-        length = max(det_dims[0], 1e-6)
-        width_for_ratio = max(min(det_dims[1], det_dims[0]), 1e-6)
-        det_ratio = width_for_ratio / length
-
-    det_ratio = float(np.clip(det_ratio, 1e-3, 10.0))
-    if ratio_max <= ratio_min:
-        ratio_max = ratio_min + 1e-3
-    view_weight = np.clip((ratio_max - det_ratio) / (ratio_max - ratio_min), 0.0, 1.0)
-    view_weight = view_weight ** 0.6  # soften transition
-
-    width_scale = 0.45 + 0.55 * view_weight
-    roi_w = width * float(expand_w) * width_scale
-    roi_h_base = height * float(expand_h)
-
-    roi_h = roi_h_base + height * float(side_extra_h) * view_weight
-
-    front_center = 0.5 * (tri[1] + tri[2])
-    front_vec = front_center - tri[0]
-    if np.linalg.norm(front_vec) < 1e-6:
-        front_vec = np.array([0.0, -1.0], dtype=np.float32)
-    front_vec /= np.linalg.norm(front_vec) + 1e-6
-
-    cam_up = np.array([0.0, -1.0], dtype=np.float32)
-    yaw_perp = np.array([-front_vec[1], front_vec[0]], dtype=np.float32)
-    if np.linalg.norm(yaw_perp) < 1e-6:
-        yaw_perp = cam_up.copy()
-    yaw_perp /= np.linalg.norm(yaw_perp) + 1e-6
-
-    blend = 0.3 + 0.5 * view_weight
-    height_dir = cam_up * (1.0 - blend) + yaw_perp * blend
-    if np.linalg.norm(height_dir) < 1e-6 or height_dir[1] >= -0.05:
-        height_dir = cam_up.copy()
-    height_dir /= np.linalg.norm(height_dir) + 1e-6
-
-    shift_amount = width * 0.5 * view_weight
-    center = np.array([tri_center[0], tri_center[1]], dtype=np.float32) + shift_amount * height_dir
-
-    x0 = int(np.clip(center[0] - roi_w * 0.5, 0, W - 1))
-    x1 = int(np.clip(center[0] + roi_w * 0.5, 0, W - 1))
-    y0 = int(np.clip(center[1] - roi_h * 0.5, 0, H - 1))
-    y1 = int(np.clip(center[1] + roi_h * 0.5, 0, H - 1))
-    if x1 <= x0 or y1 <= y0:
-        return None
-
-    roi = image_bgr[y0:y1, x0:x1]
-    if roi.size == 0:
-        return None
-
-    target_size = int(min(roi.shape[0], roi.shape[1]) * float(center_ratio))
-    target_size = int(np.clip(target_size, min_patch_px, min(roi.shape[0], roi.shape[1])))
-    if target_size <= 1:
-        return None
-
-    px0 = int(np.clip(center[0] - target_size * 0.5, x0, max(x0, x1 - target_size)))
-    py0 = int(np.clip(center[1] - target_size * 0.5, y0, max(y0, y1 - target_size)))
-    px1 = px0 + target_size
-    py1 = py0 + target_size
-    px1 = min(px1, x1)
-    py1 = min(py1, y1)
-    px0 = px1 - min(target_size, px1 - x0)
-    py0 = py1 - min(target_size, py1 - y0)
-    if px1 <= px0 or py1 <= py0:
-        return None
-
-    patch = image_bgr[py0:py1, px0:px1]
-    if patch.size == 0:
-        return None
-
-    mean_bgr = cv2.mean(patch)[:3]
-
-    return {
-        "mean_bgr": mean_bgr,
-        "patch": (px0, py0, px1, py1),
-        "roi": (x0, y0, x1, y1),
-    }
-
-
-def bgr_to_hex(mean_bgr) -> str:
-    b, g, r = mean_bgr
-    r = int(np.clip(round(r), 0, 255))
-    g = int(np.clip(round(g), 0, 255))
-    b = int(np.clip(round(b), 0, 255))
-    return f"{r:02X}{g:02X}{b:02X}"
+    return tri_orig_list, hex_list
 
 
 def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mix, iou_thr=0.5):
@@ -322,6 +186,142 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
                             (int(p0[0]), int(p0[1]) + 14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1, cv2.LINE_AA)
     cv2.imwrite(save_path_img_mix, img)
+
+
+# =========================
+# Pseudo-3D Camera View Visualization
+# =========================
+def draw_pred_pseudo3d(
+    image_bgr: np.ndarray,
+    tris_orig: List[np.ndarray],
+    save_path_img: str,
+    dy: Optional[int] = None,      # None이면 자동 스케일
+    height_scale: float = 0.5,    # 폴리곤 높이 * 0.25
+    min_dy: int = 8,
+    max_dy: int = 80,
+) -> None:
+    """
+    원본 이미지 좌표계의 삼각형(tris_orig)을 이용해
+    이미지 위에 pseudo-3D 박스를 그려 저장.
+    tris_orig: 각 원소가 (3,2) [p0, p1, p2] 인 삼각형 리스트 (원본 해상도 기준).
+    """
+    if not tris_orig:
+        return
+
+    img = image_bgr.copy()
+    H, W = image_bgr.shape[:2]
+
+    # 1) 삼각형 → 평행사변형, front edge 인덱스 추적
+    polys: List[Tuple[np.ndarray, int, int]] = []
+    for tri in tris_orig:
+        tri = np.asarray(tri, dtype=np.float32)
+        if tri.shape != (3, 2) or not np.all(np.isfinite(tri)):
+            continue
+        p0, p1, p2 = tri[0], tri[1], tri[2]
+        poly4 = parallelogram_from_triangle(p0, p1, p2).astype(np.float32)
+
+        # p1(앞-좌), p2(앞-우)에 해당하는 인덱스를 poly4에서 찾기
+        i_front1, i_front2 = -1, -1
+        for idx_pt, pt in enumerate(poly4):
+            if i_front1 < 0 and np.allclose(pt, p1, atol=1e-3):
+                i_front1 = idx_pt
+            if i_front2 < 0 and np.allclose(pt, p2, atol=1e-3):
+                i_front2 = idx_pt
+        # 혹시 못 찾으면 기본값으로 (1,2) 가정
+        if i_front1 < 0 or i_front2 < 0:
+            i_front1, i_front2 = 1, 2
+
+        polys.append((poly4, i_front1, i_front2))
+
+    if not polys:
+        return
+
+    # 2) 아래에 있는 것(큰 y_max)부터 먼저 그려서 겹침 자연스럽게
+    polys.sort(key=lambda item: item[0][:, 1].max())
+
+    for poly, idx_front1, idx_front2 in polys:
+        # 화면상 polygon의 크기(대각선 길이)를 기준으로 높이 자동 스케일
+        x_min, x_max = poly[:, 0].min(), poly[:, 0].max()
+        y_min, y_max = poly[:, 1].min(), poly[:, 1].max()
+
+        w = max(1.0, float(x_max - x_min))  # 가로 폭 (픽셀)
+        h = max(1.0, float(y_max - y_min))  # 세로 높이 (픽셀)
+
+        # 바운딩 박스의 대각선 길이를 "크기"로 사용
+        diag = math.sqrt(w * w + h * h)
+
+        if dy is not None:
+            # dy를 직접 주면 고정 높이 사용
+            off = int(dy)
+        else:
+            # polygon이 화면에서 클수록 더 높은 박스로 보이게 함
+            off = int(np.clip(height_scale * diag, min_dy, max_dy))
+
+        base = poly.astype(int)
+        top = base.copy()
+        top[:, 1] -= off
+
+        # --- Pseudo-3D 박스 전체 영역 mask 생성 (바닥 + 윗면 + 옆면 4개) ---
+        mask = np.zeros((H, W), dtype=np.uint8)
+        # 바닥/윗면 채우기
+        cv2.fillPoly(mask, [base], 1)
+        cv2.fillPoly(mask, [top], 1)
+        # 옆면 4개(사다리꼴) 채우기
+        n = len(base)
+        for i in range(n):
+            j = (i + 1) % n
+            quad = np.array([base[i], base[j], top[j], top[i]], dtype=np.int32)
+            cv2.fillPoly(mask, [quad], 1)
+
+        # 원본 이미지 기준 평균 색상 계산 (pseudo-3D 박스 내부 픽셀)
+        roi = image_bgr[mask == 1]
+        mean_bgr = None
+        if roi.size > 0:
+            mean_bgr = roi.mean(axis=0)  # (B,G,R)
+
+        # 색 채우고 alpha blending (시각화용)
+        overlay = img.copy()
+        cv2.fillPoly(overlay, [top],  (0, 200, 255))  # 윗면
+        cv2.fillPoly(overlay, [base], (0, 170, 240))  # 바닥면
+        cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+
+        # 옆면 수직 모서리: 앞부분은 빨간색, 나머지는 노란색
+        for i in range(n):
+            color_edge = (0, 0, 255) if i in (idx_front1, idx_front2) else (0, 255, 255)
+            cv2.line(img, tuple(base[i]), tuple(top[i]), color_edge, 2)
+
+        # 바닥/윗면 외곽선: 기본은 노란색
+        cv2.polylines(img, [base], True, (0, 255, 255), 2)
+        cv2.polylines(img, [top],  True, (0, 255, 255), 2)
+
+        # 앞쪽 바닥/윗면 엣지는 빨간색으로 덮어쓰기
+        bf1, bf2 = base[idx_front1], base[idx_front2]
+        tf1, tf2 = top[idx_front1],  top[idx_front2]
+        cv2.line(img, tuple(bf1), tuple(bf2), (0, 0, 255), 3)  # 바닥 앞 엣지
+        cv2.line(img, tuple(tf1), tuple(tf2), (0, 0, 255), 3)  # 윗면 앞 엣지
+
+        # --- 평균 색상을 pseudo-3D 박스 "위쪽"에 표시 (겹치지 않게) ---
+        if mean_bgr is not None:
+            b, g, r = [int(x) for x in mean_bgr]
+            color = (b, g, r)
+
+            # 윗면(top) 폴리곤의 가장 위 y값 기준으로, 그 위쪽에 패치 배치
+            x_center = int(base[:, 0].mean())
+            y_top_min = int(top[:, 1].min())
+            cy = y_top_min - 12  # 3D 박스보다 한참 위
+
+            patch_w, patch_h = 18, 18
+            x1 = max(0, min(W - 1, x_center - patch_w // 2))
+            y1 = max(0, min(H - 1, cy - patch_h // 2))
+            x2 = max(0, min(W - 1, x1 + patch_w))
+            y2 = max(0, min(H - 1, y1 + patch_h))
+
+            # 색상 패치(평균 색) + 테두리만, 숫자 텍스트는 표시하지 않음
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=-1)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
+
+    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
+    cv2.imwrite(save_path_img, img)
 
 
 def normalize_angle_deg(angle: float) -> float:
@@ -612,8 +612,8 @@ def compute_bev_properties_3d(
 
 def write_bev_labels(save_path: str, bev_dets: List[dict], write_3d: bool = True):
     """
-    write_3d=True → 'class cx cy cz length width yaw pitch roll color_hex'
-    write_3d=False → legacy 'class cx cy length width yaw color_hex'
+    write_3d=True → 'class cx cy cz length width yaw pitch roll'
+    write_3d=False → legacy 'class cx cy length width yaw'
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     lines = []
@@ -622,14 +622,22 @@ def write_bev_labels(save_path: str, bev_dets: List[dict], write_3d: bool = True
         length = det["length"]
         width = det["width"]
         yaw = det["yaw"]
-        color_hex = det.get("color_hex") or "FFFFFF"
+        hexcol = det.get("color_hex", "000000")
         if write_3d:
             cz = det.get("cz", 0.0)
             pitch = det.get("pitch", 0.0)
             roll = det.get("roll", 0.0)
-            lines.append(f"0 {cx:.4f} {cy:.4f} {cz:.4f} {length:.4f} {width:.4f} {yaw:.2f} {pitch:.2f} {roll:.2f} {color_hex}")
+            lines.append(
+                f"0 {cx:.4f} {cy:.4f} {cz:.4f} "
+                f"{length:.4f} {width:.4f} "
+                f"{yaw:.2f} {pitch:.2f} {roll:.2f} {hexcol}"
+            )
         else:
-            lines.append(f"0 {cx:.4f} {cy:.4f} {length:.4f} {width:.4f} {yaw:.2f} {color_hex}")
+            lines.append(
+                f"0 {cx:.4f} {cy:.4f} "
+                f"{length:.4f} {width:.4f} "
+                f"{yaw:.2f} {hexcol}"
+            )
     with open(save_path, "w") as f:
         f.write("\n".join(lines))
 
@@ -1095,6 +1103,10 @@ def main():
     os.makedirs(out_lab_dir, exist_ok=True)
     os.makedirs(out_mix_dir, exist_ok=True)
 
+    # 카메라 뷰 pseudo-3D 이미지 디렉토리
+    out_img3d_dir = os.path.join(args.output_dir, "images_3d")
+    os.makedirs(out_img3d_dir, exist_ok=True)
+
     # LUT 로드
     if not os.path.isfile(args.lut_path):
         raise FileNotFoundError(f"LUT not found: {args.lut_path}")
@@ -1166,7 +1178,23 @@ def main():
 
         save_img = os.path.join(out_img_dir, name)
         save_txt = os.path.join(out_lab_dir, os.path.splitext(name)[0] + ".txt")
-        pred_tris_orig = draw_pred_only(img_bgr, dets, save_img, save_txt, W, H, W0, H0)
+        pred_tris_orig, colors_hex = draw_pred_only(
+            img_bgr, dets, save_img, save_txt, W, H, W0, H0
+        )
+
+        # --- 카메라 뷰 pseudo-3D 시각화 (원본 해상도 기준) ---
+        if pred_tris_orig:
+            save_img3d = os.path.join(out_img3d_dir, name)
+            # pred_tris_orig는 draw_pred_only에서 이미 원본 스케일로 보정된 삼각형 리스트
+            draw_pred_pseudo3d(
+                img_bgr0,          # 원본 해상도 이미지
+                pred_tris_orig,    # (3,2) 삼각형 리스트 (원본 좌표)
+                save_path_img=save_img3d,
+                dy=None,           # None이면 높이 자동 스케일
+                height_scale=0.25,
+                min_dy=8,
+                max_dy=80,
+            )
 
         # 2D Eval
         gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
@@ -1204,9 +1232,11 @@ def main():
                 min_valid_corners=int(args.lut_min_corners),
                 boundary_eps=float(args.lut_boundary_eps)
             )
-            for idx, det in enumerate(dets):
-                if idx >= pred_tris_bev_xy.shape[0]:
-                    break
+            num_tri = min(len(dets), pred_tris_bev_xy.shape[0])
+            if len(dets) != pred_tris_bev_xy.shape[0]:
+                print(f"[WARN] BEV LUT triangles ({pred_tris_bev_xy.shape[0]}) and detections ({len(dets)}) differ; clipping to {num_tri}.")
+            for idx in range(num_tri):
+                det = dets[idx]
                 if not good_mask[idx]:
                     continue
                 tri_bev_xy = pred_tris_bev_xy[idx]
@@ -1244,6 +1274,7 @@ def main():
                 if not _sane_dims(length, width, args):
                     continue
 
+                color_hex = colors_hex[idx] if idx < len(colors_hex) else "000000"
                 bev_dets.append({
                     "score": float(det["score"]),
                     "tri": tri_bev_xy,
@@ -1256,7 +1287,7 @@ def main():
                     "cz": cz,
                     "pitch": pitch_deg,
                     "roll": roll_deg if args.use_roll else 0.0,
-                    "color_hex": det.get("color_hex"),
+                    "color_hex": color_hex,
                 })
 
         # GT → BEV (동일 LUT 사용)
@@ -1320,14 +1351,13 @@ if __name__ == "__main__":
 
 
 """
-python ./src/inference_lstm_onnx_pointcloud.py \
-  --input-dir ./dataset_example_pointcloud_9/images \
-  --output-dir ./inference_results_npz_9 \
-  --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
+python -m src.inference_lstm_onnx_pointcloud_add_color \
+  --input-dir ./dataset_example/dataset_example_real_coshow_4/images \
+  --output-dir ./inference_results\
+  --weights ./onnx/yolo11m_2_5d_real_coshow_v2.onnx \
   --temporal lstm --seq-mode by_prefix --reset-per-seq \
-  --conf 0.8 --nms-iou 0.2 --topk 50 \
-  --gt-label-dir ./dataset_example_pointcloud_9/labels \
-  --lut-path ./pointcloud/cloud_rgb_npz/cloud_rgb_9.npz \
+  --conf 0.5 --nms-iou 0.2 --topk 50 \
+  --lut-path ./outputs/cam_4_x-32.60_y23.40_z11.00_yaw-264.00_pit-37.00_rol1.00_f84.08_pixel2world_lut.npz \
   --bev-scale 1.0 \
   --lut-min-corners 3 \
   --lut-boundary-eps 1e-3

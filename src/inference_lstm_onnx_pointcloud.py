@@ -1162,8 +1162,8 @@ if __name__ == "__main__":
 
 
 """
-python ./src/inference_lstm_onnx_pointcloud.py \
-  --input-dir ./dataset_example_pointcloud_9/images \
+python -m src.inference_lstm_onnx_pointcloud \
+  --input-dir ./dataset_example/dataset_example_carla_coshow_9/images\
   --output-dir ./inference_results_npz_9 \
   --weights ./onnx/yolo11m_2_5d_carla_coshow.onnx \
   --temporal lstm --seq-mode by_prefix --reset-per-seq \

@@ -19,9 +19,12 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
     color = str(value).strip().lower()
     return VALID_COLORS.get(color)
 
+# 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
+# 최소 이동량(미터 단위 추정). 이보다 작으면 정지로 간주해 yaw 보정 생략
+FORWARD_HEADING_MIN_DIST = 0.1
 
-def wrap_deg(angle: float) -> float:
-    """Normalize angle into [-180, 180)."""
+def wrap_deg(angle):
+    """[-180, 180)로 정규화"""
     a = (angle + 180.0) % 360.0
     if a < 0:
         a += 360.0
@@ -115,7 +118,10 @@ class Track:
         self.kf_pos.F = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]])
         self.kf_pos.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
         self.kf_pos.x[:2] = bbox_init[1:3].reshape((2, 1))
-        self.kf_pos.P *= 1000.0
+        self.last_pos = np.array(bbox_init[1:3], dtype=float)
+        
+        # 💡 파라미터 조정
+        self.kf_pos.P *= 1000.
         self.kf_pos.Q *= 0.1
         self.kf_pos.R *= 10.0
 
@@ -175,6 +181,8 @@ class Track:
         self.kf_width.update(np.array([[measurement[4]]]))
         self.car_length = max(0.0, self.kf_length.x[0, 0])
         self.car_width = max(0.0, self.kf_width.x[0, 0])
+        current_xy = self.kf_pos.x[:2].flatten()
+        self._enforce_forward_heading(current_xy)
 
         self.time_since_update = 0
         self.hits += 1
@@ -211,6 +219,34 @@ class Track:
             self.car_yaw,
         ], dtype=float)
 
+    def _enforce_forward_heading(self, current_xy): # 이동방향과 yaw 맞추기
+        if self.last_pos is None:
+            self.last_pos = np.array(current_xy, dtype=float)
+            return
+        dx = float(current_xy[0] - self.last_pos[0])
+        dy = float(current_xy[1] - self.last_pos[1])
+        dist = math.hypot(dx, dy)
+        if dist >= FORWARD_HEADING_MIN_DIST:
+            heading = wrap_deg(math.degrees(math.atan2(dy, dx)))
+            diff = abs(wrap_deg(self.car_yaw - heading))
+            if diff > 90.0:
+                self.car_yaw = wrap_deg(self.car_yaw - 180.0)
+                self.kf_yaw.x[0, 0] = self.car_yaw
+        self.last_pos = np.array(current_xy, dtype=float)
+
+
+    def get_state(self):
+        # 현재 추적된 상태와 저장된 OBB 정보를 결합하여 CARLA 형식으로 반환
+        # 1. 칼만 필터에서 예측/보정된 중심 좌표
+        x_c, y_c = self.kf_pos.x[:2].flatten()
+        
+        # 2. 칼만 필터에서 예측/보정된 길이, 너비, 방향
+        length = self.car_length # self.kf_length.x[0, 0]
+        width = self.car_width # self.kf_width.x[0, 0]
+        yaw = self.car_yaw # self.kf_yaw.x[0, 0]
+        
+        # [class=0, x_c, y_c, l, w, angle] 형식으로 출력
+        return np.array([0, x_c, y_c, length, width, yaw])
 
 class SortTracker:
     def __init__(self, max_age: int = 3, min_hits: int = 3, iou_threshold: float = 0.3, color_penalty: float = 0.3):
@@ -397,5 +433,4 @@ def main_tracking():
     else:
         print("\n⚠️ 추적된 객체가 없습니다. (모든 프레임에서 Confirmed/Lost 상태의 트랙이 없었음)")
 
-
-# main_tracking()
+# main_tracking() 
