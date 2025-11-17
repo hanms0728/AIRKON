@@ -1247,7 +1247,6 @@ function handleMarkerClick(marker) {
     state.activeMarkerKey = marker.key;
     updateMarkerHighlight(marker.key);
     if (!marker.local_ply_url && !marker.local_visible_url) {
-        focusOnPosition(getMarkerFocusPosition(marker));
         lockViewToMarker(marker);
         if (statusEl) statusEl.textContent = `${marker.name || marker.key} | local cloud unavailable`;
         setLocalCloudVisibility(null);
@@ -1289,11 +1288,6 @@ async function showLocalCloudForMarker(marker) {
             state.globalCloud.visible = false;
         }
         setLocalCloudVisibility(marker.key);
-        if (mesh.geometry && mesh.geometry.boundingBox) {
-            focusOnGeometry(mesh.geometry);
-        } else {
-            focusOnPosition(getMarkerFocusPosition(marker));
-        }
         lockViewToMarker(marker);
         if (statusEl) statusEl.textContent = `${marker.name || marker.key} | local cloud`;
     } catch (err) {
