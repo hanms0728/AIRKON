@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 import cv2
 import threading
 import time
@@ -13,31 +14,38 @@ class IPCameraStreamer:
     def __init__(self):
         # 6개 카메라 구성
         self.camera_configs = [
-            {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 2, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.29', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.27', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.31', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.37', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.37', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.29', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
+
+            {'ip': '192.168.0.27', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
         ]
 
         # 프레임 저장 버퍼(최신 1장)
         self.latest = {cfg['camera_id']: deque(maxlen=1) for cfg in self.camera_configs}
+        # 최초 프레임 저장 여부
+        self.saved_first_frame = {cfg['camera_id']: False for cfg in self.camera_configs}
 
         self.captures = {}        # FFmpeg 프로세스 저장
         self.running = True
         self.connected = {cfg['camera_id']: False for cfg in self.camera_configs}
+        self.save_dir = "first_frames"
+        os.makedirs(self.save_dir, exist_ok=True)
 
         # 카메라 스레드 시작
         self.threads = []
@@ -150,6 +158,16 @@ class IPCameraStreamer:
                 d.clear()
                 d.append(frame)
 
+                # 각 카메라 첫 프레임만 저장
+                if not self.saved_first_frame[cam_id]:
+                    filename = os.path.join(self.save_dir, f"camera_{cam_id}_first.jpg")
+                    try:
+                        cv2.imwrite(filename, frame)
+                        print(f"[SAVE] Camera {cam_id} first frame saved: {filename}")
+                        self.saved_first_frame[cam_id] = True
+                    except Exception as e:
+                        print(f"[ERROR] Failed to save first frame for camera {cam_id}:", e)
+
             except Exception as e:
                 print(f"[ERROR] Camera {cam_id} streaming error:", e)
                 break
@@ -190,4 +208,3 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         streamer.stop()
-ip_cam_streamer.py
