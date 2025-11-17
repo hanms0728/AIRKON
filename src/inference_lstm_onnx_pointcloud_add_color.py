@@ -94,10 +94,20 @@ def iou_polygon(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
         return float(inter / max(union, 1e-9))
 
 
-def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
-    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
-    os.makedirs(os.path.dirname(save_path_txt), exist_ok=True)
-    img = image_bgr.copy()
+def draw_pred_only(
+    image_bgr,
+    dets,
+    save_path_img,
+    save_path_txt,
+    W,
+    H,
+    W0,
+    H0,
+    *,
+    draw_visual: bool = True,
+):
+    draw_vis = bool(draw_visual or save_path_img)
+    img = image_bgr.copy() if draw_vis else None
     sx, sy = float(W0) / float(W), float(H0) / float(H)
 
     lines = []
@@ -107,10 +117,19 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
-        cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
-        cx, cy = int(tri[0][0]), int(tri[0][1])
-        cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+        if draw_vis and img is not None:
+            cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
+            cx, cy = int(tri[0][0]), int(tri[0][1])
+            cv2.putText(
+                img,
+                f"{score:.2f}",
+                (cx, max(0, cy-4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0,255,0),
+                1,
+                cv2.LINE_AA,
+            )
         # 원본 해상도 좌표로 스케일 복원
         tri_orig = tri.copy()
         tri_orig[:, 0] *= sx
@@ -119,7 +138,7 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         p0o, p1o, p2o = tri_orig[0], tri_orig[1], tri_orig[2]
 
         # 화면 상 평행사변형 영역에서 평균 색상 계산 (BGR)
-        Hc, Wc = img.shape[:2]
+        Hc, Wc = image_bgr.shape[:2]
         mask = np.zeros((Hc, Wc), dtype=np.uint8)
         cv2.fillPoly(mask, [poly4], 1)
         roi = image_bgr[mask == 1]
@@ -140,9 +159,18 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
             f"{score:.4f} {hexcol}"
         )
 
-    cv2.imwrite(save_path_img, img)
-    with open(save_path_txt, "w") as f:
-        f.write("\n".join(lines))
+    if save_path_img and img is not None:
+        parent = os.path.dirname(save_path_img)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        cv2.imwrite(save_path_img, img)
+
+    if save_path_txt:
+        parent = os.path.dirname(save_path_txt)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(save_path_txt, "w") as f:
+            f.write("\n".join(lines))
     return tri_orig_list, hex_list
 
 
@@ -975,7 +1003,7 @@ class ONNXTemporalRunner:
         outs = self.sess.run(self.outs, feeds)
         out_map = {n: v for n, v in zip(self.outs, outs)}
 
-        # 상태 갱신
+        # 상태 갱신 
         if self.ho_name:
             self.h_buf = out_map[self.ho_name]
         if self.co_name:
