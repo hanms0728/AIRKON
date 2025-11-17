@@ -21,8 +21,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calib", default="cam2_calibration_results.npz")
     ap.add_argument("--img", required=True, help="보정할 이미지 경로")
-    ap.add_argument("--mode", choices=["scaled-k", "dist-only"], default="scaled-k")
-    ap.add_argument("--focal_ratio", type=float, default=0.9, help="dist-only 모드용 f 비율")
+    ap.add_argument("--mode", choices=["scaled-k", "dist-only"], default="dist-only")
+    ap.add_argument("--focal_ratio", type=float, default=1.0, help="dist-only 모드용 f 비율")
     ap.add_argument("--out", default="cam1_undistorted_image.jpg")
     args = ap.parse_args()
 
@@ -43,7 +43,7 @@ def main():
         K_use = build_dist_only_K(w, h, focal_ratio=args.focal_ratio)
 
         # --- 로드 직후 Debug 출력 ---
-    print("[DBG] calib_w,h:", int(data["size"][0]), int(data["size"][1]))
+    print("[DBG] calib_w,h:", int(data["calib_w"]), int(data["calib_h"]))
     print("[DBG] target_w,h:", w, h)
     print("[DBG] K (loaded):\n", data["K"])
     print("[DBG] dist:", dist.ravel())
