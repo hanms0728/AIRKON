@@ -6,6 +6,10 @@ import glob
 import os
 import math
 
+# 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
+# 최소 이동량(미터 단위 추정). 이보다 작으면 정지로 간주해 yaw 보정 생략
+FORWARD_HEADING_MIN_DIST = 0.1
+
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
     a = (angle + 180.0) % 360.0
@@ -118,6 +122,7 @@ class Track:
         self.kf_pos.F = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]])
         self.kf_pos.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
         self.kf_pos.x[:2] = bbox_init[1:3].reshape((2, 1))
+        self.last_pos = np.array(bbox_init[1:3], dtype=float)
         
         # 💡 파라미터 조정
         self.kf_pos.P *= 1000.
@@ -199,11 +204,30 @@ class Track:
         self.car_yaw    = wrap_deg(float(self.kf_yaw.x[0, 0]))
         self.kf_yaw.x[0, 0] = self.car_yaw
 
+        current_xy = self.kf_pos.x[:2].flatten()
+        self._enforce_forward_heading(current_xy)
+
         self.time_since_update = 0
         self.hits += 1
         if self.state in (TrackState.TENTATIVE, TrackState.LOST):
             if self.hits >= self.confirm_hits:
                 self.state = TrackState.CONFIRMED
+
+
+    def _enforce_forward_heading(self, current_xy): # 이동방향과 yaw 맞추기
+        if self.last_pos is None:
+            self.last_pos = np.array(current_xy, dtype=float)
+            return
+        dx = float(current_xy[0] - self.last_pos[0])
+        dy = float(current_xy[1] - self.last_pos[1])
+        dist = math.hypot(dx, dy)
+        if dist >= FORWARD_HEADING_MIN_DIST:
+            heading = wrap_deg(math.degrees(math.atan2(dy, dx)))
+            diff = abs(wrap_deg(self.car_yaw - heading))
+            if diff > 90.0:
+                self.car_yaw = wrap_deg(self.car_yaw - 180.0)
+                self.kf_yaw.x[0, 0] = self.car_yaw
+        self.last_pos = np.array(current_xy, dtype=float)
 
 
     def get_state(self):
