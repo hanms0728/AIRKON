@@ -29,48 +29,6 @@
       "name": "gate-north"
     },
     {
-      "camera_id": 6,
-      "ip": "192.168.0.29",
-      "port": 554,
-      "username": "admin",
-      "password": "zjsxmfhf",
-      "width": 1536,
-      "height": 864,
-      "lut": "outputs/cam_6_x-4.20_y23.60_z12.20_yaw-182.00_pit-44.00_rol3.00_f84.08_pixel2world_lut.npz",
-      "undistort": "realtime/disto/cam_calibration_results.npz",
-      "visible_ply": "outputs/cam_6_x-4.20_y23.60_z12.20_yaw-182.00_pit-44.00_rol3.00_f84.08.ply",
-      "force_tcp": true,
-      "name": "gate-north"
-    },
-    {
-      "camera_id": 4,
-      "ip": "192.168.0.32",
-      "port": 554,
-      "username": "admin",
-      "password": "zjsxmfhf",
-      "width": 1536,
-      "height": 864,
-      "lut": "outputs/cam_4_x-32.60_y23.40_z11.00_yaw-264.00_pit-37.00_rol1.00_f84.08_pixel2world_lut.npz",
-      "undistort": "realtime/disto/cam_calibration_results.npz",
-      "visible_ply": "outputs/cam_4_x-32.60_y23.40_z11.00_yaw-264.00_pit-37.00_rol1.00_f84.08.ply",
-      "force_tcp": true,
-      "name": "gate-north"
-    },
-    {
-      "camera_id": 3,
-      "ip": "192.168.0.36",
-      "port": 554,
-      "username": "admin",
-      "password": "zjsxmfhf",
-      "width": 1536,
-      "height": 864,
-      "lut": "outputs/cam_3_x-49.40_y28.20_z11.00_yaw-117.00_pit-44.00_rol-7.00_f84.08_pixel2world_lut.npz",
-      "undistort": "realtime/disto/cam_calibration_results.npz",
-      "visible_ply": "outputs/cam_3_x-49.40_y28.20_z11.00_yaw-117.00_pit-44.00_rol-7.00_f84.08.ply",
-      "force_tcp": true,
-      "name": "gate-north"
-    },
-    {
       "camera_id": 5,
       "ip": "192.168.0.37",
       "port": 554,

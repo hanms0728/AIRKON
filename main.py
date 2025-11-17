@@ -19,6 +19,7 @@ import queue
 from typing import Optional, Dict, List, Tuple
 import socket, json
 import os
+import colorsys
 from contextlib import contextmanager
 import open3d as o3d
 from fastapi import FastAPI, HTTPException
@@ -38,6 +39,73 @@ class CameraAssets:
     visible_source: Optional[str]
     raw_config: Dict
 
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
+_COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
+_COLOR_HUE_BANDS = (
+    ("red", 0.0, 40.0),
+    ("yellow", 60.0, 35.0),
+    ("green", 130.0, 45.0),
+    ("purple", 280.0, 80.0),  # covers purple/blue-ish tones
+    ("pink", 335.0, 30.0),
+)
+
+
+def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
+    if not hex_color:
+        return None
+    hex_color = hex_color.strip().lstrip("#")
+    if len(hex_color) != 6:
+        return None
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+    except ValueError:
+        return None
+    return r / 255.0, g / 255.0, b / 255.0
+
+
+def _hue_score(hue_deg: float, center: float, window: float) -> float:
+    diff = abs(hue_deg - center) % 360.0
+    if diff > 180.0:
+        diff = 360.0 - diff
+    return max(0.0, 1.0 - diff / max(window, 1e-6))
+
+
+def _classify_hex_color(hex_color: Optional[str]):
+    rgb = _hex_to_rgb_unit(hex_color)
+    if rgb is None:
+        return None, 0.0, None
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+    h_deg = (h * 360.0) % 360.0
+    if v < 0.2:
+        return None, 0.0, None
+
+    if v >= 0.65 and s <= 0.25:
+        sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))
+        val_term = max(0.0, min(1.0, (v - 0.65) / max(1e-6, 0.35)))
+        confidence = float(0.5 * sat_term + 0.5 * val_term)
+        embedding = [0.0] * len(COLOR_LABELS)
+        embedding[_COLOR_LABEL_TO_INDEX["white"]] = confidence
+        return "white", confidence, embedding
+
+    best_label = None
+    best_score = 0.0
+    sat_term = max(0.0, min(1.0, (s - 0.2) / 0.8))
+    val_term = max(0.0, min(1.0, (v - 0.3) / 0.7))
+    for label, center, window in _COLOR_HUE_BANDS:
+        hue_component = _hue_score(h_deg, center, window)
+        if hue_component <= 0.0:
+            continue
+        score = float(hue_component * 0.6 + sat_term * 0.25 + val_term * 0.15)
+        if score > best_score:
+            best_score = score
+            best_label = label
+    if not best_label or best_score < 0.2:
+        return None, float(best_score), None
+    embedding = [0.0] * len(COLOR_LABELS)
+    embedding[_COLOR_LABEL_TO_INDEX[best_label]] = best_score
+    return best_label, float(best_score), embedding
 
 def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
     if lut is None:
@@ -378,8 +446,15 @@ class InferWorker(threading.Thread):
                 "roll":       float(roll_deg),
             }
             if idx < len(color_list):
-                entry["color_hex"] = color_list[idx]
-            bev.append(entry)
+                color_hex = color_list[idx]
+                entry["color_hex"] = color_hex
+                label, confidence, embedding = _classify_hex_color(color_hex)
+                if label:
+                    entry["color"] = label
+                    entry["color_confidence"] = confidence
+                if embedding is not None:
+                    entry["color_embedding"] = embedding
+        bev.append(entry)
         return bev
 
 
@@ -494,8 +569,6 @@ class InferWorker(threading.Thread):
                                 pass
 
             wrk.bump()
-            if self.undist_timer:
-                self.undist_timer.bump()
 
     def stop(self):
         self.stop_evt.set()
@@ -527,6 +600,12 @@ class UDPSender:
             color_hex = d.get("color_hex")
             if color_hex:
                 item["color_hex"] = color_hex
+            color_label = d.get("color")
+            if color_label:
+                item["color"] = color_label
+            color_conf = d.get("color_confidence")
+            if color_conf is not None:
+                item["color_confidence"] = float(color_conf)
             items.append(item)
         msg = {
             "type": "bev_labels",
@@ -538,9 +617,13 @@ class UDPSender:
         return json.dumps(msg, ensure_ascii=False).encode("utf-8")
 
     def send(self, cam_id: int, ts: float, bev_dets=None, capture_ts: Optional[float] = None):
+        bev_list = bev_dets or []
+        payload = None
         if self.fmt == "json":
-            payload = self._pack_json(cam_id, ts, bev_dets or [], capture_ts)
-
+            payload = self._pack_json(cam_id, ts, bev_list, capture_ts)
+        else:
+            raise ValueError(f"Unsupported UDP payload fmt: {self.fmt}")
+        print(payload)
         if len(payload) <= self.max_bytes:
             self.sock.sendto(payload, self.addr)
             return
@@ -551,6 +634,7 @@ class UDPSender:
             part = payload[idx*self.max_bytes:(idx+1)*self.max_bytes]
             prefix = f"CHUNK {chunk_id} {total} {idx}\n".encode("utf-8")
             self.sock.sendto(prefix + part, self.addr)
+        # print(payload)
 
 class EdgeWebBridge:
     def __init__(self, *, host: str, port: int, global_ply: str, vehicle_glb: str,
@@ -739,6 +823,15 @@ class EdgeWebBridge:
             color_hex = d.get("color_hex")
             if color_hex:
                 payload["color_hex"] = color_hex
+            color_label = d.get("color")
+            if color_label:
+                payload["color"] = color_label
+            color_embedding = d.get("color_embedding")
+            if color_embedding is not None:
+                payload["color_embedding"] = color_embedding
+            color_conf = d.get("color_confidence")
+            if color_conf is not None:
+                payload["color_confidence"] = float(color_conf)
             items.append(payload)
         return items
 
