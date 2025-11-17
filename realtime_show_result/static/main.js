@@ -52,6 +52,7 @@ const state = {
     localLoadToken: 0,
     globalColorLookup: null,
     viewLockBackup: null,
+    viewLockAnimation: null,
 };
 
 const fusionEndpointMap = {
@@ -107,6 +108,8 @@ const tmpPosition = new THREE.Vector3();
 const tmpQuaternion = new THREE.Quaternion();
 const tmpScale = new THREE.Vector3();
 const tmpEuler = new THREE.Euler(0, 0, 0, "ZYX");
+const tmpViewPos = new THREE.Vector3();
+const tmpViewTarget = new THREE.Vector3();
 const debugMarker = new THREE.Mesh(
     new THREE.SphereGeometry(0.4, 12, 12),
     new THREE.MeshBasicMaterial({ color: 0xff5555 })
@@ -226,6 +229,7 @@ async function initLiveMode() {
 
 function animate() {
     requestAnimationFrame(animate);
+    updateViewLockAnimation();
     controls.update();
     renderer.render(scene, camera);
 }
@@ -922,6 +926,111 @@ function getMarkerFocusPosition(marker) {
     return marker.displayPosition || marker.position || { x: 0, y: 0, z: 0 };
 }
 
+function computeMarkerViewPose(marker) {
+    if (!marker) {
+        return null;
+    }
+    const focusPos = getMarkerFocusPosition(marker);
+    const eye = new THREE.Vector3(focusPos.x, focusPos.y, focusPos.z);
+    const rot = marker.rotation || {};
+    const yaw = THREE.MathUtils.degToRad(rot.yaw || 0);
+    const pitch = THREE.MathUtils.degToRad(rot.pitch || 0);
+    const dir = new THREE.Vector3(
+        Math.cos(yaw) * Math.cos(pitch),
+        Math.sin(yaw) * Math.cos(pitch),
+        Math.sin(pitch)
+    );
+    if (shouldFlipMarkerX()) {
+        dir.x *= -1;
+    }
+    if (shouldFlipMarkerY()) {
+        dir.y *= -1;
+    }
+    if (dir.lengthSq() < 1e-6) {
+        dir.set(0, 1, 0);
+    } else {
+        dir.normalize();
+    }
+    const viewDistance = Math.max(5, Number(marker.view_distance || state.config?.markerViewDistance || 20));
+    const target = eye.clone().addScaledVector(dir, Math.max(5, viewDistance * 0.5));
+    return { position: eye, target };
+}
+
+function lockViewToMarker(marker, options = {}) {
+    const pose = computeMarkerViewPose(marker);
+    if (!pose) {
+        return;
+    }
+    if (!state.viewLockBackup) {
+        state.viewLockBackup = {
+            cameraPos: camera.position.clone(),
+            target: controls.target.clone(),
+            controlsEnabled: controls.enabled,
+            enableRotate: controls.enableRotate,
+            enableZoom: controls.enableZoom,
+            enablePan: controls.enablePan,
+        };
+    }
+    controls.enabled = false;
+    controls.enableRotate = false;
+    controls.enableZoom = false;
+    controls.enablePan = false;
+    const duration = Math.max(0, Number(state.config?.markerViewDurationMs ?? 800));
+    const instant = Boolean(options.instant) || duration === 0;
+    if (instant) {
+        state.viewLockAnimation = null;
+        camera.position.copy(pose.position);
+        controls.target.copy(pose.target);
+        camera.up.set(0, 0, 1);
+        camera.lookAt(pose.target);
+        return;
+    }
+    state.viewLockAnimation = {
+        start: performance.now(),
+        duration,
+        fromPos: camera.position.clone(),
+        fromTarget: controls.target.clone(),
+        toPos: pose.position.clone(),
+        toTarget: pose.target.clone(),
+    };
+}
+
+function updateViewLockAnimation() {
+    const anim = state.viewLockAnimation;
+    if (!anim) {
+        return;
+    }
+    const now = performance.now();
+    const progress = Math.min(1, (now - anim.start) / Math.max(1, anim.duration));
+    const eased = progress * progress * (3 - 2 * progress);
+    tmpViewPos.copy(anim.fromPos).lerp(anim.toPos, eased);
+    tmpViewTarget.copy(anim.fromTarget).lerp(anim.toTarget, eased);
+    camera.position.copy(tmpViewPos);
+    controls.target.copy(tmpViewTarget);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(tmpViewTarget);
+    if (progress >= 1) {
+        state.viewLockAnimation = null;
+    }
+}
+
+function releaseViewLock() {
+    state.viewLockAnimation = null;
+    if (!state.viewLockBackup) {
+        return;
+    }
+    const backup = state.viewLockBackup;
+    controls.enabled = backup.controlsEnabled;
+    controls.enableRotate = backup.enableRotate;
+    controls.enableZoom = backup.enableZoom;
+    controls.enablePan = backup.enablePan;
+    camera.position.copy(backup.cameraPos);
+    controls.target.copy(backup.target);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(backup.target);
+    state.viewLockBackup = null;
+}
+
 function buildGlobalColorLookup(geometry) {
     const colorAttr = geometry.getAttribute("color");
     const posAttr = geometry.getAttribute("position");
@@ -1201,69 +1310,6 @@ function setLocalCloudVisibility(activeKey) {
     if (!activeKey && state.globalCloud) {
         state.globalCloud.visible = true;
     }
-}
-
-function lockViewToMarker(marker) {
-    if (!marker) {
-        return;
-    }
-    const focusPos = getMarkerFocusPosition(marker);
-    const lockPos = new THREE.Vector3(focusPos.x, focusPos.y, focusPos.z);
-    const rot = marker.rotation || {};
-    const yaw = THREE.MathUtils.degToRad(rot.yaw || 0);
-    const pitch = THREE.MathUtils.degToRad(rot.pitch || 0);
-    const dir = new THREE.Vector3(
-        Math.cos(yaw) * Math.cos(pitch),
-        Math.sin(yaw) * Math.cos(pitch),
-        Math.sin(pitch)
-    );
-    if (shouldFlipMarkerX()) {
-        dir.x *= -1;
-    }
-    if (shouldFlipMarkerY()) {
-        dir.y *= -1;
-    }
-    if (dir.lengthSq() < 1e-6) {
-        dir.set(0, 1, 0);
-    } else {
-        dir.normalize();
-    }
-    const viewDistance = Math.max(5, Number(marker.view_distance || state.config?.markerViewDistance || 20));
-    const target = lockPos.clone().addScaledVector(dir, Math.max(5, viewDistance * 0.5));
-    if (!state.viewLockBackup) {
-        state.viewLockBackup = {
-            cameraPos: camera.position.clone(),
-            target: controls.target.clone(),
-            controlsEnabled: controls.enabled,
-            enableRotate: controls.enableRotate,
-            enableZoom: controls.enableZoom,
-            enablePan: controls.enablePan,
-        };
-    }
-    controls.enabled = false;
-    controls.enableRotate = false;
-    controls.enablePan = false;
-    controls.enableZoom = false;
-    camera.position.copy(lockPos);
-    controls.target.copy(target);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(target);
-}
-
-function releaseViewLock() {
-    if (!state.viewLockBackup) {
-        return;
-    }
-    const backup = state.viewLockBackup;
-    controls.enabled = backup.controlsEnabled;
-    controls.enableRotate = backup.enableRotate;
-    controls.enableZoom = backup.enableZoom;
-    controls.enablePan = backup.enablePan;
-    camera.position.copy(backup.cameraPos);
-    controls.target.copy(backup.target);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(backup.target);
-    state.viewLockBackup = null;
 }
 
 function resetToGlobalView() {
