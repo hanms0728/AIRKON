@@ -51,6 +51,7 @@ const state = {
     localClouds: new Map(),
     localLoadToken: 0,
     globalColorLookup: null,
+    viewLockBackup: null,
 };
 
 const fusionEndpointMap = {
@@ -1138,6 +1139,7 @@ function handleMarkerClick(marker) {
     updateMarkerHighlight(marker.key);
     if (!marker.local_ply_url && !marker.local_visible_url) {
         focusOnPosition(getMarkerFocusPosition(marker));
+        lockViewToMarker(marker);
         if (statusEl) statusEl.textContent = `${marker.name || marker.key} | local cloud unavailable`;
         setLocalCloudVisibility(null);
         if (state.globalCloud) {
@@ -1183,6 +1185,7 @@ async function showLocalCloudForMarker(marker) {
         } else {
             focusOnPosition(getMarkerFocusPosition(marker));
         }
+        lockViewToMarker(marker);
         if (statusEl) statusEl.textContent = `${marker.name || marker.key} | local cloud`;
     } catch (err) {
         console.warn("local cloud load failed", err);
@@ -1200,6 +1203,69 @@ function setLocalCloudVisibility(activeKey) {
     }
 }
 
+function lockViewToMarker(marker) {
+    if (!marker) {
+        return;
+    }
+    const focusPos = getMarkerFocusPosition(marker);
+    const lockPos = new THREE.Vector3(focusPos.x, focusPos.y, focusPos.z);
+    const rot = marker.rotation || {};
+    const yaw = THREE.MathUtils.degToRad(rot.yaw || 0);
+    const pitch = THREE.MathUtils.degToRad(rot.pitch || 0);
+    const dir = new THREE.Vector3(
+        Math.cos(yaw) * Math.cos(pitch),
+        Math.sin(yaw) * Math.cos(pitch),
+        Math.sin(pitch)
+    );
+    if (shouldFlipMarkerX()) {
+        dir.x *= -1;
+    }
+    if (shouldFlipMarkerY()) {
+        dir.y *= -1;
+    }
+    if (dir.lengthSq() < 1e-6) {
+        dir.set(0, 1, 0);
+    } else {
+        dir.normalize();
+    }
+    const viewDistance = Math.max(5, Number(marker.view_distance || state.config?.markerViewDistance || 20));
+    const target = lockPos.clone().addScaledVector(dir, Math.max(5, viewDistance * 0.5));
+    if (!state.viewLockBackup) {
+        state.viewLockBackup = {
+            cameraPos: camera.position.clone(),
+            target: controls.target.clone(),
+            controlsEnabled: controls.enabled,
+            enableRotate: controls.enableRotate,
+            enableZoom: controls.enableZoom,
+            enablePan: controls.enablePan,
+        };
+    }
+    controls.enabled = false;
+    controls.enableRotate = false;
+    controls.enablePan = false;
+    controls.enableZoom = false;
+    camera.position.copy(lockPos);
+    controls.target.copy(target);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(target);
+}
+
+function releaseViewLock() {
+    if (!state.viewLockBackup) {
+        return;
+    }
+    const backup = state.viewLockBackup;
+    controls.enabled = backup.controlsEnabled;
+    controls.enableRotate = backup.enableRotate;
+    controls.enableZoom = backup.enableZoom;
+    controls.enablePan = backup.enablePan;
+    camera.position.copy(backup.cameraPos);
+    controls.target.copy(backup.target);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(backup.target);
+    state.viewLockBackup = null;
+}
+
 function resetToGlobalView() {
     state.activeMarkerKey = null;
     state.localLoadToken += 1;
@@ -1208,6 +1274,7 @@ function resetToGlobalView() {
     if (state.globalCloud) {
         state.globalCloud.visible = true;
     }
+    releaseViewLock();
 }
 
 function updateMarkerHighlight(activeKey) {
