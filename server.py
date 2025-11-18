@@ -23,6 +23,14 @@ from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 VALID_COLORS = {color: color for color in COLOR_LABELS}
+COLOR_HEX_MAP = {
+    "red": "#ff4d4f",
+    "pink": "#ff85c0",
+    "green": "#73d13d",
+    "white": "#f0f0f0",
+    "yellow": "#fadb14",
+    "purple": "#9254de",
+}
 
 
 def normalize_color_label(value: Optional[str]) -> Optional[str]:
@@ -30,6 +38,12 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
         return None
     color = str(value).strip().lower()
     return VALID_COLORS.get(color)
+
+
+def color_label_to_hex(color: Optional[str]) -> Optional[str]:
+    if not color:
+        return None
+    return COLOR_HEX_MAP.get(color)
 
 # ---일단 저장용---
 import os, gzip, json, csv, hashlib, threading, queue, time
@@ -152,6 +166,7 @@ class TrackBroadcaster:
                     "score": float(extra.get("score", 0.0)),
                     "sources": list(extra.get("source_cams", [])),
                     "color": extra.get("color"),
+                    "color_hex": extra.get("color_hex"),
                     "color_confidence": float(extra.get("color_confidence", 0.0)),
                 })
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -396,6 +411,7 @@ class UDPReceiverSingle:
                 for it in msg.get("items", []):
                     cx, cy = it["center"]
                     color = normalize_color_label(it.get("color"))
+                    # color_hex = color_label_to_hex(color)
                     dets.append({
                         "cls": int(it.get("class", 0)),
                         "cx": float(cx),
@@ -408,6 +424,7 @@ class UDPReceiverSingle:
                         "pitch": float(it.get("pitch", 0.0)),
                         "roll": float(it.get("roll", 0.0)),
                         "color": color,
+                        # "color_hex": color_hex,
                     })
                 self._log_packet(cam, dets if dets else [], meta=msg)
                 return cam, dets if dets else []
@@ -657,6 +674,7 @@ class RealtimeFusionServer:
         normalized_colors = [normalize_color_label(d.get("color")) for d in subset]
         color_counts = Counter([c for c in normalized_colors if c])
         color = color_counts.most_common(1)[0][0] if color_counts else None
+        color_hex = color_label_to_hex(color)
         return {
             "cz": float(cz),
             "pitch": float(pitch),
@@ -664,6 +682,7 @@ class RealtimeFusionServer:
             "score": float(score),
             "source_cams": cams,
             "color": color,
+            "color_hex": color_hex,
             "color_votes": dict(color_counts),
         }
 
@@ -672,9 +691,12 @@ class RealtimeFusionServer:
         self.track_meta = {tid: meta for tid, meta in self.track_meta.items() if tid in active_ids}
         for tid, attrs in track_attrs.items():
             meta = self.track_meta.setdefault(tid, {})
-            color = attrs.get("color")
+            color = normalize_color_label(attrs.get("color"))
             if color:
                 meta["color"] = color
+                hex_color = color_label_to_hex(color)
+                if hex_color:
+                    meta["color_hex"] = hex_color
             if "color_confidence" in attrs:
                 meta["color_confidence"] = attrs["color_confidence"]
         for tid, det_idx in matches:
@@ -689,9 +711,12 @@ class RealtimeFusionServer:
                 "score": float(det.get("score", 0.0)),
                 "source_cams": list(det.get("source_cams", [])),
             })
-            color = det.get("color")
+            color = normalize_color_label(det.get("color"))
             if color:
                 meta["color"] = color
+                hex_color = color_label_to_hex(color)
+                if hex_color:
+                    meta["color_hex"] = hex_color
             votes = det.get("color_votes")
             if votes:
                 meta["color_votes"] = dict(votes)
@@ -726,6 +751,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
+                hex_color = color_label_to_hex(color)
+                if hex_color:
+                    vis["color_hex"] = hex_color
             payload.append(vis)
         return payload
 
@@ -753,6 +781,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
+                hex_color = color_label_to_hex(color)
+                if hex_color:
+                    vis["color_hex"] = hex_color
             votes = det.get("color_votes")
             if votes:
                 vis["color_votes"] = dict(votes)
@@ -788,6 +819,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(extra.get("color"))
             if color:
                 vis["color"] = color
+                hex_color = color_label_to_hex(color)
+                if hex_color:
+                    vis["color_hex"] = hex_color
             if "color_confidence" in extra:
                 vis["color_confidence"] = float(extra["color_confidence"])
             if "color_votes" in extra:

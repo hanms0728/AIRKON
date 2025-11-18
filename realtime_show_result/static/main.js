@@ -45,6 +45,15 @@ const state = {
     globalCloud: null,
 };
 
+const COLOR_PALETTE = {
+    red: "#ff4d4f",
+    pink: "#ff85c0",
+    green: "#73d13d",
+    white: "#f0f0f0",
+    yellow: "#fadb14",
+    purple: "#9254de",
+};
+
 const fusionEndpointMap = {
     raw: "/api/raw",
     fused: "/api/fused",
@@ -540,9 +549,15 @@ function getDetectionColor(det) {
     if (!det) {
         return null;
     }
-    const raw = typeof det.color_hex === "string" && det.color_hex.length
+    let raw = typeof det.color_hex === "string" && det.color_hex.length
         ? det.color_hex.trim()
         : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
+    if (!raw) {
+        const label = typeof det.color === "string" ? det.color.trim().toLowerCase() : "";
+        if (label && COLOR_PALETTE[label]) {
+            raw = COLOR_PALETTE[label];
+        }
+    }
     if (!raw) {
         return null;
     }
@@ -579,7 +594,6 @@ function renderDetections(detections) {
             const det = detections[i];
             const transformArray = Array.isArray(det.transform) ? det.transform : null;
             const detColor = getDetectionColor(det);
-            console.log("get color_hex", detColor)
 
             if (transformArray && transformArray.length === 16) {
                 tmpMatrix.fromArray(transformArray);
