@@ -14,6 +14,7 @@ PLY 색 편집 도구 (XY 탑뷰 기준)
     - B : Brush 페인트 모드
     - C : Color Picker (스포이드) 모드
     - S : 현재 결과 저장 (alive+색 수정 포함)
+    - Z : 직전 편집(브러시/지우기) 되돌리기
     - ESC : 종료
 
 Controls 창:
@@ -23,6 +24,7 @@ Controls 창:
 
 import os
 import argparse
+from collections import deque
 import numpy as np
 import cv2
 import open3d as o3d
@@ -84,7 +86,7 @@ def main():
     ap = argparse.ArgumentParser("PLY XY painter (brush + erase + picker)")
     ap.add_argument("--ply", required=True, help="입력 PLY 경로")
     ap.add_argument("--out", default="", help="출력 PLY (미지정 시 *_paint.ply)")
-    ap.add_argument("--win-w", type=int, default=1400)
+    ap.add_argument("--win-w", type=int, default=1000)
     ap.add_argument("--win-h", type=int, default=1000)
     args = ap.parse_args()
 
@@ -114,6 +116,7 @@ def main():
     px_all = xy_to_px(xy)  # 모든 점의 화면 좌표 (N,2), int32
 
     alive = np.ones(N, dtype=bool)  # 삭제 여부
+    undo_stack = deque(maxlen=50)   # 최근 50회 편집까지 되돌리기
 
     # 상태 변수들
     base = None      # 배경 (점 렌더링)
@@ -140,7 +143,7 @@ def main():
     cv2.createTrackbar("Brush", controls_win, brush_radius, 100, lambda v: None)
 
     help1 = "LMB drag: edit | E:erase  B:brush  C:picker"
-    help2 = "S:save  ESC:quit"
+    help2 = "S:save  Z:undo  ESC:quit"
     info3 = f"INPUT: {os.path.basename(src_path)}  ->  OUTPUT: {os.path.basename(out_path)}"
 
     def redraw_base():
@@ -202,6 +205,25 @@ def main():
 
         cv2.imshow(win, canvas)
 
+    def undo_last():
+        """최근 브러시/지우기 동작을 되돌린다."""
+        nonlocal alive, cols
+        if not undo_stack:
+            print("[UNDO] nothing to undo.")
+            return
+
+        change = undo_stack.pop()
+        idx = change["idx"]
+
+        if "prev_alive" in change:
+            alive[idx] = change["prev_alive"]
+        if "prev_cols" in change:
+            cols[idx] = change["prev_cols"]
+
+        redraw_base()
+        redraw()
+        print(f"[UNDO] reverted {len(idx)} points.")
+
     def apply_brush(x, y):
         nonlocal alive, cols, base
         # vis_idx 서브셋에 대해서만 거리 계산 (화면에 보이는 점들만 편집)
@@ -215,11 +237,30 @@ def main():
             return
 
         hit_idx = vis_idx[hit_local]
+        change = {"idx": hit_idx}
 
         if mode == "erase":
-            alive[hit_idx] = False
+            # 이미 삭제된 점은 기록/처리하지 않음
+            changed_mask = alive[hit_idx]
+            if not np.any(changed_mask):
+                return
+            changed_idx = hit_idx[changed_mask]
+            change["idx"] = changed_idx
+            change["prev_alive"] = alive[changed_idx].copy()
+            alive[changed_idx] = False
         elif mode == "brush":
-            cols[hit_idx] = paint_color
+            # 현재 색과 다른 점만 기록/변경
+            need_change = np.any(np.abs(cols[hit_idx] - paint_color) > 1e-6, axis=1)
+            if not np.any(need_change):
+                return
+            changed_idx = hit_idx[need_change]
+            change["idx"] = changed_idx
+            change["prev_cols"] = cols[changed_idx].copy()
+            cols[changed_idx] = paint_color
+        else:
+            return
+
+        undo_stack.append(change)
 
         redraw_base()
         redraw()
@@ -278,7 +319,7 @@ def main():
     redraw()
 
     print("[INFO] Controls window에서 R,G,B,Brush 조절 가능.")
-    print("[INFO] E(erase), B(brush), C(picker), S(save), ESC(quit)")
+    print("[INFO] E(erase), B(brush), C(picker), S(save), Z(undo), ESC(quit)")
 
     while True:
         # Trackbar 값 읽어서 paint_color / brush_radius 업데이트
@@ -306,6 +347,8 @@ def main():
             mode = "picker"
             print("[MODE] color picker (click on point)")
             redraw()
+        elif key in (ord('z'), ord('Z')):
+            undo_last()
         elif key in (ord('s'), ord('S')):
             # 저장 시점: vis_idx의 편집 결과를 전체 포인트로 전파
             kept_vis = vis_idx[alive[vis_idx]]
