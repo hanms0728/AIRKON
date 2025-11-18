@@ -45,6 +45,15 @@ const state = {
     globalCloud: null,
 };
 
+const COLOR_PALETTE = {
+    red: "#ff4d4f",
+    pink: "#ff85c0",
+    green: "#73d13d",
+    white: "#f0f0f0",
+    yellow: "#fadb14",
+    purple: "#9254de",
+};
+
 const fusionEndpointMap = {
     raw: "/api/raw",
     fused: "/api/fused",
@@ -91,6 +100,8 @@ const tmpPosition = new THREE.Vector3();
 const tmpQuaternion = new THREE.Quaternion();
 const tmpScale = new THREE.Vector3();
 const tmpEuler = new THREE.Euler(0, 0, 0, "ZYX");
+const tmpColor = new THREE.Color();
+const defaultVehicleColor = new THREE.Color(0xffffff);
 const debugMarker = new THREE.Mesh(
     new THREE.SphereGeometry(0.4, 12, 12),
     new THREE.MeshBasicMaterial({ color: 0xff5555 })
@@ -271,6 +282,7 @@ async function loadVehiclePrototype() {
                     reject(new Error("Vehicle GLB has no scene"));
                     return;
                 }
+                
 
                 content.updateMatrixWorld(true);
                 const bbox = new THREE.Box3().setFromObject(content);
@@ -318,11 +330,26 @@ async function loadVehiclePrototype() {
                 state.vehicleTemplates = [];
                 unitGroup.traverse((obj) => {
                     if (obj.isMesh) {
-                        const templateMaterial = obj.material && obj.material.clone ? obj.material.clone() : obj.material;
+                        const srcMaterial = obj.material;
+                        const templateMaterial = new THREE.MeshBasicMaterial({
+                            color: 0xffffff,
+                            transparent: Boolean(srcMaterial?.transparent),
+                            opacity: srcMaterial?.opacity !== undefined ? srcMaterial.opacity : 1.0,
+                            side: srcMaterial?.side ?? THREE.FrontSide,
+                            depthWrite: srcMaterial?.depthWrite !== undefined ? srcMaterial.depthWrite : true,
+                            depthTest: srcMaterial?.depthTest !== undefined ? srcMaterial.depthTest : true,
+                        });
+                        const vertexCount = obj.geometry.attributes.position.count;
+                        const colorAttr = new Float32Array(vertexCount * 3).fill(1);
+                        obj.geometry.setAttribute("color", new THREE.BufferAttribute(colorAttr, 3));
+                        templateMaterial.vertexColors = true;
+                        templateMaterial.needsUpdate = true;
+                        const baseColor = defaultVehicleColor.clone();
                         state.vehicleTemplates.push({
                             geometry: obj.geometry.clone(),
                             material: templateMaterial,
                             localMatrix: obj.matrix.clone(),
+                            baseColor,
                         });
                     }
                 });
@@ -480,11 +507,22 @@ function rebuildInstancedMeshes(capacity) {
     state.instancedMeshes = state.vehicleTemplates.map((tpl) => {
         const geometry = tpl.geometry.clone();
         const material = tpl.material && tpl.material.clone ? tpl.material.clone() : tpl.material;
+        if (material) {
+            material.vertexColors = true;
+            material.needsUpdate = true;
+        }
         const inst = new THREE.InstancedMesh(geometry, material, capacity);
         inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         inst.count = 0;
         inst.frustumCulled = false;
         inst.matrixAutoUpdate = false;
+        const colorArray = new Float32Array(capacity * 3);
+        for (let i = 0; i < capacity; i += 1) {
+            colorArray[i * 3 + 0] = 1.0;
+            colorArray[i * 3 + 1] = 1.0;
+            colorArray[i * 3 + 2] = 1.0;
+        }
+        inst.instanceColor = new THREE.InstancedBufferAttribute(colorArray, 3);
         vehicleRoot.add(inst);
         return inst;
     });
@@ -507,6 +545,34 @@ function ensureInstancedCapacity(requiredCount) {
     rebuildInstancedMeshes(newCapacity);
 }
 
+function getDetectionColor(det) {
+    if (!det) {
+        return null;
+    }
+    let raw = typeof det.color_hex === "string" && det.color_hex.length
+        ? det.color_hex.trim()
+        : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
+    if (!raw) {
+        const label = typeof det.color === "string" ? det.color.trim().toLowerCase() : "";
+        if (label && COLOR_PALETTE[label]) {
+            raw = COLOR_PALETTE[label];
+        }
+    }
+    if (!raw) {
+        return null;
+    }
+    const normalized = raw.startsWith("#") ? raw : `#${raw}`;
+    if (!/^#([0-9a-fA-F]{6})$/.test(normalized)) {
+        return null;
+    }
+    try {
+        tmpColor.set(normalized);
+        return tmpColor;
+    } catch (err) {
+        return null;
+    }
+}
+
 function renderDetections(detections) {
     const count = Array.isArray(detections) ? detections.length : 0;
     ensureInstancedCapacity(count);
@@ -527,6 +593,7 @@ function renderDetections(detections) {
         for (let i = 0; i < count; i += 1) {
             const det = detections[i];
             const transformArray = Array.isArray(det.transform) ? det.transform : null;
+            const detColor = getDetectionColor(det);
 
             if (transformArray && transformArray.length === 16) {
                 tmpMatrix.fromArray(transformArray);
@@ -557,6 +624,10 @@ function renderDetections(detections) {
                     tmpMatrix2.multiplyMatrices(tmpMatrix, correction);
                     tmpMatrix2.multiply(tpl.localMatrix);
                     inst.setMatrixAt(i, tmpMatrix2);
+                    const colorToApply = detColor || tpl.baseColor || defaultVehicleColor;
+                    if (inst.setColorAt) {
+                        inst.setColorAt(i, colorToApply);
+                    }
                 }
             }
 
@@ -570,6 +641,9 @@ function renderDetections(detections) {
 
         state.instancedMeshes.forEach((inst) => {
             inst.instanceMatrix.needsUpdate = true;
+            if (inst.instanceColor) {
+                inst.instanceColor.needsUpdate = true;
+            }
         });
         vehicleRoot.visible = true;
         if (!state.showDebugMarker) {
@@ -784,6 +858,7 @@ async function loadVisibleCloudForCamera(camId) {
                 colorArray[i * 3 + 2] = data[base + 5] ?? 0.5;
             }
             geometry.setAttribute("color", new THREE.BufferAttribute(colorArray, 3));
+
         }
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();

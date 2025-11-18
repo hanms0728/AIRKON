@@ -2,7 +2,7 @@ import os
 import math
 import glob
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 CAMERA_SETUPS = [
     {"name": "cam1",  "pos": {"x": -46,  "y": -74, "z": 9}, "rot": {"pitch": -40, "yaw": 90,  "roll": 0}},
@@ -178,6 +178,7 @@ def fuse_cluster_weighted( # 가중 평균 대표 생성
     cam_ground_xy: Dict[str, Tuple[float, float]],
     d0: float = 5.0,
     p: float = 2.0,
+    extra_weights: Optional[List[float]] = None,
     w_floor: float = 1e-4,
     max_cam_frac: float = 0.65,      # 가중치 한 캠에 못 쏠리게 
     yaw_flip_thr: float = 90.0,      # ref와 90° 초과면 180° 뒤집어 정렬 ~ 각도 못ㅋ튀게
@@ -197,13 +198,26 @@ def fuse_cluster_weighted( # 가중 평균 대표 생성
     if M == 1:
         return cluster_boxes[0].astype(float)
 
+    weight_bias = np.ones(M, dtype=float)
+    if extra_weights is not None:
+        try:
+            arr = np.array(extra_weights, dtype=float)
+            if arr.size == M:
+                arr = np.clip(arr, 0.0, None)
+                if np.all(arr <= 0):
+                    arr = np.ones(M, dtype=float)
+                weight_bias = arr
+        except Exception:
+            pass
+
     # 캠 - 객체 거리 가중치---
     w_dist = []
-    for b, cam in zip(cluster_boxes, cluster_cams):
+    for idx, (b, cam) in enumerate(zip(cluster_boxes, cluster_cams)):
         cx, cy = b[0], b[1]
         cam_xy = cam_ground_xy.get(cam, (0.0, 0.0))
         d = math.hypot(cx - cam_xy[0], cy - cam_xy[1])
-        w = distance_weight(d, d0=d0, p=p)
+        bias = weight_bias[idx] if idx < len(weight_bias) else 1.0
+        w = distance_weight(d, d0=d0, p=p) * max(bias, 1e-6)
         w_dist.append(max(w, w_floor))
     w_dist = np.array(w_dist, dtype=float)
     w_base = _normalize_with_cap(w_dist, max_frac=max_cam_frac) 

@@ -94,10 +94,20 @@ def iou_polygon(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
         return float(inter / max(union, 1e-9))
 
 
-def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
-    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
-    os.makedirs(os.path.dirname(save_path_txt), exist_ok=True)
-    img = image_bgr.copy()
+def draw_pred_only(
+    image_bgr,
+    dets,
+    save_path_img,
+    save_path_txt,
+    W,
+    H,
+    W0,
+    H0,
+    *,
+    draw_visual: bool = True,
+):
+    draw_vis = bool(draw_visual or save_path_img)
+    img = image_bgr.copy() if draw_vis else None
     sx, sy = float(W0) / float(W), float(H0) / float(H)
 
     lines = []
@@ -107,10 +117,19 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
-        cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
-        cx, cy = int(tri[0][0]), int(tri[0][1])
-        cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+        if draw_vis and img is not None:
+            cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
+            cx, cy = int(tri[0][0]), int(tri[0][1])
+            cv2.putText(
+                img,
+                f"{score:.2f}",
+                (cx, max(0, cy-4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0,255,0),
+                1,
+                cv2.LINE_AA,
+            )
         # 원본 해상도 좌표로 스케일 복원
         tri_orig = tri.copy()
         tri_orig[:, 0] *= sx
@@ -119,7 +138,7 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         p0o, p1o, p2o = tri_orig[0], tri_orig[1], tri_orig[2]
 
         # 화면 상 평행사변형 영역에서 평균 색상 계산 (BGR)
-        Hc, Wc = img.shape[:2]
+        Hc, Wc = image_bgr.shape[:2]
         mask = np.zeros((Hc, Wc), dtype=np.uint8)
         cv2.fillPoly(mask, [poly4], 1)
         roi = image_bgr[mask == 1]
@@ -140,9 +159,18 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
             f"{score:.4f} {hexcol}"
         )
 
-    cv2.imwrite(save_path_img, img)
-    with open(save_path_txt, "w") as f:
-        f.write("\n".join(lines))
+    if save_path_img and img is not None:
+        parent = os.path.dirname(save_path_img)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        cv2.imwrite(save_path_img, img)
+
+    if save_path_txt:
+        parent = os.path.dirname(save_path_txt)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(save_path_txt, "w") as f:
+            f.write("\n".join(lines))
     return tri_orig_list, hex_list
 
 
@@ -194,19 +222,21 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
 def draw_pred_pseudo3d(
     image_bgr: np.ndarray,
     tris_orig: List[np.ndarray],
-    save_path_img: str,
+    save_path_img: Optional[str] = None,
     dy: Optional[int] = None,      # None이면 자동 스케일
     height_scale: float = 0.5,    # 폴리곤 높이 * 0.25
     min_dy: int = 8,
     max_dy: int = 80,
-) -> None:
+    *,
+    return_image: bool = False,
+) -> Optional[np.ndarray]:
     """
     원본 이미지 좌표계의 삼각형(tris_orig)을 이용해
     이미지 위에 pseudo-3D 박스를 그려 저장.
     tris_orig: 각 원소가 (3,2) [p0, p1, p2] 인 삼각형 리스트 (원본 해상도 기준).
     """
     if not tris_orig:
-        return
+        return None
 
     img = image_bgr.copy()
     H, W = image_bgr.shape[:2]
@@ -234,7 +264,7 @@ def draw_pred_pseudo3d(
         polys.append((poly4, i_front1, i_front2))
 
     if not polys:
-        return
+        return None
 
     # 2) 아래에 있는 것(큰 y_max)부터 먼저 그려서 겹침 자연스럽게
     polys.sort(key=lambda item: item[0][:, 1].max())
@@ -320,8 +350,12 @@ def draw_pred_pseudo3d(
             cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=-1)
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
 
-    os.makedirs(os.path.dirname(save_path_img), exist_ok=True)
-    cv2.imwrite(save_path_img, img)
+    if save_path_img:
+        parent = os.path.dirname(save_path_img)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        cv2.imwrite(save_path_img, img)
+    return img if return_image else None
 
 
 def normalize_angle_deg(angle: float) -> float:
@@ -688,7 +722,7 @@ def _lut_pick_valid_mask(lut):
     Y = np.asarray(lut["Y"])
     H, W = X.shape
 
-    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+    for key in ("floor_mask", "ground_valid_mask", "valid_mask"):
         if key in lut:
             V = np.asarray(lut[key]).astype(bool)
             break
@@ -975,7 +1009,7 @@ class ONNXTemporalRunner:
         outs = self.sess.run(self.outs, feeds)
         out_map = {n: v for n, v in zip(self.outs, outs)}
 
-        # 상태 갱신
+        # 상태 갱신 
         if self.ho_name:
             self.h_buf = out_map[self.ho_name]
         if self.co_name:
