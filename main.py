@@ -421,6 +421,7 @@ class InferWorker(threading.Thread):
         )
 
         bev = []
+
         color_list = colors_hex or []
         for idx, (d, tri_xy, tri_z, ok) in enumerate(zip(dets, tris_bev_xy, tris_bev_z, tri_ok)):
             if not ok or (not np.all(np.isfinite(tri_xy))):
@@ -455,7 +456,7 @@ class InferWorker(threading.Thread):
                     entry["color_confidence"] = confidence
                 if embedding is not None:
                     entry["color_embedding"] = embedding
-        bev.append(entry)
+            bev.append(entry)
         return bev
 
 
