@@ -42,7 +42,7 @@ class CameraAssets:
 def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
     if lut is None:
         return None
-    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+    for key in ("floor_mask", "ground_valid_mask", "valid_mask"):
         if key in lut:
             mask = np.asarray(lut[key]).astype(bool)
             if mask.shape == lut["X"].shape:
