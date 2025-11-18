@@ -18,7 +18,6 @@ Merge multiple ASCII PLY point clouds (x y z [r g b]) into a single PLY.
 
 import os
 import sys
-import glob
 import math
 import argparse
 import numpy as np
@@ -204,9 +203,9 @@ def dedup_by_eps(xyz, rgb01, eps):
 # ---------------------------
 
 def main():
-    ap = argparse.ArgumentParser("Merge multiple ASCII PLYs (x y z [r g b])")
-    ap.add_argument("--inputs", nargs="+", required=True,
-                    help="Input PLY paths (globs allowed). Example: ./out/*.ply ./cam2/*.ply")
+    ap = argparse.ArgumentParser("Merge ASCII PLYs (x y z [r g b]) under a root folder")
+    ap.add_argument("--root", required=True,
+                    help="Root folder containing PLY files (non-PLY files are ignored; subfolders are also scanned)")
     ap.add_argument("--out", required=True, help="Output merged PLY path")
     ap.add_argument("--voxel", type=float, default=0.0,
                     help="Voxel size (meters) for grid downsampling (default: 0=off)")
@@ -214,42 +213,22 @@ def main():
                     help="Duplicate-merge distance eps (meters). Applied after voxel (default: 0=off)")
     args = ap.parse_args()
 
-    # Expand globs / files / directories
+    if not os.path.isdir(args.root):
+        print(f"[ERROR] Root folder not found: {args.root}", file=sys.stderr)
+        sys.exit(1)
+
+    # Collect .ply files (recursive)
     paths = []
-    unmatched = []
-    for pat in args.inputs:
-        # If it's a directory, take all .ply inside
-        if os.path.isdir(pat):
-            found = glob.glob(os.path.join(pat, "*.ply"))
-            if not found:
-                unmatched.append(pat + " (empty dir or no .ply)")
-            else:
-                paths.extend(found)
-            continue
-
-        # Glob patterns
-        g = glob.glob(pat)
-        if g:
-            paths.extend(g)
-            continue
-
-        # Exact file path
-        if os.path.isfile(pat):
-            paths.append(pat)
-        else:
-            unmatched.append(pat)
+    for dirpath, _, filenames in os.walk(args.root):
+        for fn in filenames:
+            if fn.lower().endswith(".ply"):
+                paths.append(os.path.join(dirpath, fn))
 
     # De-duplicate & sort
     paths = sorted(set(paths))
 
-    # Diagnostics
-    if unmatched:
-        print("[WARN] The following inputs matched nothing:", file=sys.stderr)
-        for u in unmatched:
-            print(f"  - {u}", file=sys.stderr)
-
     if not paths:
-        print("No input PLYs found. (All patterns unmatched)", file=sys.stderr)
+        print("No input PLYs found under root (looked for *.ply)", file=sys.stderr)
         sys.exit(1)
 
     print("[INFO] Matched input files:")
@@ -296,7 +275,9 @@ def main():
         print(f"[INFO] After dedup-eps({args.dedup_eps} m): {xyz.shape[0]:,}")
 
     # Write
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     write_ascii_ply(args.out, xyz, rgb)
     print("\n[DONE]")
     print(f"  Inputs : {len(paths)} files")
