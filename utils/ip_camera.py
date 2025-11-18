@@ -160,7 +160,7 @@ class IPCameraStreamer:
 
                 # 각 카메라 첫 프레임만 저장
                 if not self.saved_first_frame[cam_id]:
-                    filename = os.path.join(self.save_dir, f"camera_{cam_id}_first.jpg")
+                    filename = os.path.join(self.save_dir, f"cam_{cam_id}_{cfg['ip'].split('.')[-1]}.jpg")
                     try:
                         cv2.imwrite(filename, frame)
                         print(f"[SAVE] Camera {cam_id} first frame saved: {filename}")
@@ -183,7 +183,8 @@ class IPCameraStreamer:
                 cam_id = cfg['camera_id']
                 if self.latest[cam_id]:
                     frame = self.latest[cam_id][-1]
-                    cv2.imshow(f"Camera {cam_id}", frame)
+                    small = cv2.resize(frame, (0, 0), fx=0.4, fy=0.4)
+                    cv2.imshow(f"Camera {cam_id}", small)
 
             cv2.waitKey(1)
             time.sleep(0.01)
