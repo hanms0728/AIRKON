@@ -822,7 +822,7 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="pointcloud/merged.ply")
+    ap.add_argument("--global-ply", default="pointcloud/global_fused_small.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
     ap.add_argument("--web-port", type=int, default=18090)

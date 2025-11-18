@@ -21,8 +21,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calib", default="cam2_calibration_results.npz")
     ap.add_argument("--img", required=True, help="보정할 이미지 경로")
-    ap.add_argument("--mode", choices=["scaled-k", "dist-only"], default="scaled-k")
-    ap.add_argument("--focal_ratio", type=float, default=0.9, help="dist-only 모드용 f 비율")
+    ap.add_argument("--mode", choices=["scaled-k", "dist-only"], default="dist-only")
+    ap.add_argument("--focal_ratio", type=float, default=1.0, help="dist-only 모드용 f 비율")
     ap.add_argument("--out", default="cam1_undistorted_image.jpg")
     args = ap.parse_args()
 
@@ -43,7 +43,7 @@ def main():
         K_use = build_dist_only_K(w, h, focal_ratio=args.focal_ratio)
 
         # --- 로드 직후 Debug 출력 ---
-    print("[DBG] calib_w,h:", int(data["size"][0]), int(data["size"][1]))
+    # print("[DBG] calib_w,h:", int(data["calib_w"]), int(data["calib_h"]))
     print("[DBG] target_w,h:", w, h)
     print("[DBG] K (loaded):\n", data["K"])
     print("[DBG] dist:", dist.ravel())
@@ -55,6 +55,40 @@ def main():
 
     map1, map2 = cv2.initUndistortRectifyMap(K_use, dist, None, newK, (w, h), cv2.CV_16SC2)
     und = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
-    cv2.imwrite("und_remap2.jpg", und)
+    cv2.imwrite("real_image/undist_img/cam_3_36.jpg", und)
+    # Save next to original calib npz, same name + "_params"
+    calib_path = args.calib
+    calib_base = calib_path.rsplit(".", 1)[0]
+    out_prefix = calib_base + "_params"
+
+    # --- Original K-based FOV (input/calibration FOV) ---
+    hfov_in_rad = 2 * np.arctan(w / (2 * K_use[0,0]))
+    vfov_in_rad = 2 * np.arctan(h / (2 * K_use[1,1]))
+
+    hfov_in = np.degrees(hfov_in_rad)
+    vfov_in = np.degrees(vfov_in_rad)
+
+    # --- Undistorted (newK) FOV ---
+    hfov_rad = 2 * np.arctan(w / (2 * newK[0,0]))
+    vfov_rad = 2 * np.arctan(h / (2 * newK[1,1]))
+
+    hfov = np.degrees(hfov_rad)
+    vfov = np.degrees(vfov_rad)
+
+    # --- Save new calibration npz ---
+    np.savez(
+        f"{out_prefix}",
+        K=K_use,
+        new_K=newK,
+        roi=np.array([0, 0, w, h]),
+        size=np.array([w, h]),
+        alpha=float(1.0),
+        hfov=hfov,
+        vfov=vfov,
+        hfov_in=hfov_in,
+        vfov_in=vfov_in,
+        variant=np.array("noopt"),
+        dist=dist.reshape(1, -1)
+    )
 if __name__ == "__main__":
     main()

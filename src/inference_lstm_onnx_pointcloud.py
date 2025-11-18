@@ -521,7 +521,7 @@ def _lut_pick_valid_mask(lut):
     Y = np.asarray(lut["Y"])
     H, W = X.shape
 
-    for key in ("ground_valid_mask", "valid_mask", "floor_mask"):
+    for key in ("floor_mask", "ground_valid_mask", "valid_mask"):
         if key in lut:
             V = np.asarray(lut[key]).astype(bool)
             break
