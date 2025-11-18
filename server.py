@@ -444,6 +444,8 @@ class RealtimeFusionServer:
         self.iou_thr = iou_cluster_thr
         self.track_meta: Dict[int, dict] = {}
         self.active_cams = set()
+        self.color_bias_strength = 0.3
+        self.color_bias_min_votes = 2
 
         # 단일 소켓 리시버 (엣지→서버 UDP)
         self.receiver = UDPReceiverSingle(single_port)
@@ -610,25 +612,37 @@ class RealtimeFusionServer:
         clusters = cluster_by_aabb_iou(boxes, iou_cluster_thr=self.iou_thr)
         fused_list = []
         for idxs in clusters:
-            grouped: Dict[Optional[str], List[int]] = {}
-            for idx in idxs:
-                color = normalize_color_label(raw_detections[idx].get("color"))
-                grouped.setdefault(color, []).append(idx)
-            for color_idxs in grouped.values():
-                rep = fuse_cluster_weighted(
-                    boxes, cams, color_idxs, self.cam_xy,
-                    d0=5.0, p=2.0
-                )
-                extras = self._aggregate_cluster(raw_detections, color_idxs)
-                fused_list.append({
-                    "cx": float(rep[0]),
-                    "cy": float(rep[1]),
-                    "length": float(rep[2]),
-                    "width": float(rep[3]),
-                    "yaw": float(rep[4]),
-                    **extras,
-                })
+            weight_bias = self._color_weight_biases(raw_detections, idxs)
+            rep = fuse_cluster_weighted(
+                boxes, cams, idxs, self.cam_xy,
+                d0=5.0, p=2.0, extra_weights=weight_bias
+            )
+            extras = self._aggregate_cluster(raw_detections, idxs)
+            fused_list.append({
+                "cx": float(rep[0]),
+                "cy": float(rep[1]),
+                "length": float(rep[2]),
+                "width": float(rep[3]),
+                "yaw": float(rep[4]),
+                **extras,
+            })
         return fused_list
+
+    def _color_weight_biases(self, detections: List[dict], idxs: List[int]) -> List[float]:
+        normalized = [normalize_color_label(detections[i].get("color")) for i in idxs]
+        color_counts = Counter([c for c in normalized if c])
+        if not color_counts:
+            return [1.0] * len(idxs)
+        top_color, top_count = color_counts.most_common(1)[0]
+        if top_count < max(self.color_bias_min_votes, 1) or self.color_bias_strength <= 0.0:
+            return [1.0] * len(idxs)
+        biases = []
+        for color in normalized:
+            if color == top_color:
+                biases.append(1.0 + self.color_bias_strength)
+            else:
+                biases.append(1.0)
+        return biases
 
     def _aggregate_cluster(self, detections: List[dict], idxs: List[int]) -> dict:
         subset = [detections[i] for i in idxs]
