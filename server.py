@@ -613,11 +613,11 @@ class RealtimeFusionServer:
         fused_list = []
         for idxs in clusters:
             weight_bias = self._color_weight_biases(raw_detections, idxs)
-            rep = fuse_cluster_weighted(
+            rep = fuse_cluster_weighted( # 거리기반가중에 바이어스를 넣음
                 boxes, cams, idxs, self.cam_xy,
                 d0=5.0, p=2.0, extra_weights=weight_bias
             )
-            extras = self._aggregate_cluster(raw_detections, idxs)
+            extras = self._aggregate_cluster(raw_detections, idxs) # 얘는일단그냥평균내고잇음 수정필요?
             fused_list.append({
                 "cx": float(rep[0]),
                 "cy": float(rep[1]),
@@ -629,6 +629,7 @@ class RealtimeFusionServer:
         return fused_list
 
     def _color_weight_biases(self, detections: List[dict], idxs: List[int]) -> List[float]:
+        '''이 클러스터 안에 색상 합의가 됐으면 걔네 바이어스 더 주고 아님 1'''
         normalized = [normalize_color_label(detections[i].get("color")) for i in idxs]
         color_counts = Counter([c for c in normalized if c])
         if not color_counts:
