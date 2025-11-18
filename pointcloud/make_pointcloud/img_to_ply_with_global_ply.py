@@ -791,7 +791,7 @@ def main():
     ap.add_argument("--fov-y", type=float, default=None, help="(optional) vertical field of view in degrees; if set, use both HFOV/VFOV")
     ap.add_argument("--z-near", type=float, default=0.05)
     ap.add_argument("--z-far", type=float, default=300.0)
-    ap.add_argument("--splat", type=int, default=2)
+    ap.add_argument("--splat", type=int, default=3)
     ap.add_argument("--strict-carla", action="store_true",
                     help="Interpret --pos/--rot strictly as CARLA world pose (default). Matches compute_H_img_to_ground mapping.")
     ap.add_argument("--debug-pos", action="store_true",
