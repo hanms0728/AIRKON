@@ -43,7 +43,7 @@ def main():
         K_use = build_dist_only_K(w, h, focal_ratio=args.focal_ratio)
 
         # --- 로드 직후 Debug 출력 ---
-    print("[DBG] calib_w,h:", int(data["calib_w"]), int(data["calib_h"]))
+    # print("[DBG] calib_w,h:", int(data["calib_w"]), int(data["calib_h"]))
     print("[DBG] target_w,h:", w, h)
     print("[DBG] K (loaded):\n", data["K"])
     print("[DBG] dist:", dist.ravel())
@@ -55,7 +55,7 @@ def main():
 
     map1, map2 = cv2.initUndistortRectifyMap(K_use, dist, None, newK, (w, h), cv2.CV_16SC2)
     und = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
-    cv2.imwrite("und_remap2.jpg", und)
+    cv2.imwrite("real_image/undist_img/cam_3_36.jpg", und)
     # Save next to original calib npz, same name + "_params"
     calib_path = args.calib
     calib_base = calib_path.rsplit(".", 1)[0]
