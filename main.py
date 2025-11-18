@@ -7,6 +7,7 @@ from src.inference_lstm_onnx_pointcloud_add_color import (
     poly_from_tri,
     compute_bev_properties,
     draw_pred_only,
+    draw_pred_pseudo3d,
 )
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 from pathlib import Path
@@ -536,7 +537,28 @@ class InferWorker(threading.Thread):
                         tris_img_orig=tris_img_orig,
                         colors_hex=colors_hex,
                     )
-                overlay_frame = draw_detections(frame_bgr, dets)
+                overlay_frame = None
+                if frame_bgr is not None and dets:
+                    tris_for_gui = [
+                        np.asarray(d.get("tri"), dtype=np.float32)
+                        for d in dets
+                        if d.get("tri") is not None
+                    ]
+                    pseudo3d = None
+                    if tris_for_gui:
+                        pseudo3d = draw_pred_pseudo3d(
+                            frame_bgr,
+                            tris_for_gui,
+                            save_path_img=None,
+                            dy=None,
+                            height_scale=0.25,
+                            min_dy=8,
+                            max_dy=80,
+                            return_image=True,
+                        )
+                    overlay_frame = pseudo3d
+                if overlay_frame is None:
+                    overlay_frame = draw_detections(frame_bgr, dets)
 
                 if self.web_publisher is not None:
                     try:
