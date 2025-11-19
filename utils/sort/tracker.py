@@ -280,7 +280,7 @@ class SortTracker:
         matched_indices: List[Tuple[int, int]] = []
         unmatched_detections = list(range(len(detections_carla)))
         unmatched_tracks = list(range(len(active_tracks)))
-        det_colors = self._prepare_detection_colors(detection_colors, len(detections_carla))
+        det_colors = self._prepare_detection_colors(detection_colors, len(detections_carla)) # 색상정규화, 길이맞추기
 
         if len(detections_carla) > 0 and len(active_tracks) > 0:
             cost_matrix = iou_batch(detections_carla, active_tracks)

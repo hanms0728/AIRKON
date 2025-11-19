@@ -463,6 +463,9 @@ class RealtimeFusionServer:
         self.active_cams = set()
         self.color_bias_strength = 0.3
         self.color_bias_min_votes = 2
+        delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.08)
+        self.color_cluster_bonus = delta
+        self.color_cluster_penalty = delta
 
         # 단일 소켓 리시버 (엣지→서버 UDP)
         self.receiver = UDPReceiverSingle(single_port)
@@ -575,7 +578,8 @@ class RealtimeFusionServer:
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
                     det["yaw"],
                 ])
-                det_colors.append(normalize_color_label(det.get("color")))
+                # det_colors.append(normalize_color_label(det.get("color"))) 이미 하고 왔는데 굳이?
+                det_colors.append(det.get("color"))
             dets_for_tracker = np.array(det_rows, dtype=float) if det_rows else np.zeros((0,6), dtype=float)
             t2 = time.perf_counter()
             tracks = self.tracker.update(dets_for_tracker, det_colors)  # shape: [N, 8] = [track_id, class, x, y, l, w, yaw]
@@ -626,9 +630,16 @@ class RealtimeFusionServer:
             return []
         boxes = np.array([[d["cx"], d["cy"], d["length"], d["width"], d["yaw"]] for d in raw_detections], dtype=float)
         cams  = [d.get("cam", "?") for d in raw_detections]
-        clusters = cluster_by_aabb_iou(boxes, iou_cluster_thr=self.iou_thr)
+        colors = [normalize_color_label(d.get("color")) for d in raw_detections]
+        clusters = cluster_by_aabb_iou( # 색상 같으면 iou 스레쉬홀드 낮추고 다르면 높여서 aabb기준 iou계산 클러스터
+            boxes,
+            iou_cluster_thr=self.iou_thr,
+            color_labels=colors,
+            color_bonus=self.color_cluster_bonus,
+            color_penalty=self.color_cluster_penalty,
+        )
         fused_list = []
-        for idxs in clusters:
+        for idxs in clusters: # 클러스터마다 대표값 생성 
             weight_bias = self._color_weight_biases(raw_detections, idxs)
             rep = fuse_cluster_weighted( # 거리기반가중에 바이어스를 넣음
                 boxes, cams, idxs, self.cam_xy,
@@ -654,10 +665,14 @@ class RealtimeFusionServer:
         top_color, top_count = color_counts.most_common(1)[0]
         if top_count < max(self.color_bias_min_votes, 1) or self.color_bias_strength <= 0.0:
             return [1.0] * len(idxs)
+        boost = 1.0 + self.color_bias_strength
+        penalty = max(1.0 - self.color_bias_strength, 0.1)
         biases = []
         for color in normalized:
             if color == top_color:
-                biases.append(1.0 + self.color_bias_strength)
+                biases.append(boost)
+            elif color:
+                biases.append(penalty)
             else:
                 biases.append(1.0)
         return biases
@@ -666,15 +681,15 @@ class RealtimeFusionServer:
         subset = [detections[i] for i in idxs]
         if not subset:
             return {"cz": 0.0, "pitch": 0.0, "roll": 0.0, "score": 0.0, "source_cams": []}
-        score = np.mean([float(d.get("score", 0.0)) for d in subset])
-        cz = np.mean([float(d.get("cz", 0.0)) for d in subset])
-        pitch = np.mean([float(d.get("pitch", 0.0)) for d in subset])
-        roll = np.mean([float(d.get("roll", 0.0)) for d in subset])
-        cams = [d.get("cam", "?") for d in subset]
+        score = np.mean([float(d.get("score", 0.0)) for d in subset]) # 필요없음
+        cz = np.mean([float(d.get("cz", 0.0)) for d in subset]) # 어차피 다 같지 않나? 아니면 xy기반 그 맵의 z값을 받아와야하지않나? z누가쓰더라
+        pitch = np.mean([float(d.get("pitch", 0.0)) for d in subset]) # 얘도 거의 안쓰지 않나
+        roll = np.mean([float(d.get("roll", 0.0)) for d in subset]) # 얘도
+        cams = [d.get("cam", "?") for d in subset] # 캠 어디어디에서 따왓는지
         normalized_colors = [normalize_color_label(d.get("color")) for d in subset]
         color_counts = Counter([c for c in normalized_colors if c])
-        color = color_counts.most_common(1)[0][0] if color_counts else None
-        color_hex = color_label_to_hex(color)
+        color = color_counts.most_common(1)[0][0] if color_counts else None # 투표
+        color_hex = color_label_to_hex(color) # 헥사코드 6중 1로 변환
         return {
             "cz": float(cz),
             "pitch": float(pitch),
