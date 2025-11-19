@@ -3,6 +3,62 @@ import time
 import socket
 import json
 
+
+COLOR_HEX_MAP = {
+    "red": "#f52629",
+    "pink": "#f53e96",
+    "green": "#48ad0d",
+    "white": "#f0f0f0",
+    "yellow": "#ffdd00",
+    "purple": "#781de7",
+}
+
+DEFAULT_COLOR_LABEL = "white"
+
+
+def _hex_to_rgb_tuple(value):
+    """Convert a #RRGGBB string into an (R, G, B) tuple."""
+    if not value:
+        return None
+    hex_value = value.lstrip("#")
+    if len(hex_value) != 6:
+        return None
+    try:
+        r = int(hex_value[0:2], 16)
+        g = int(hex_value[2:4], 16)
+        b = int(hex_value[4:6], 16)
+        return (r, g, b)
+    except ValueError:
+        return None
+
+
+COLOR_RGB_MAP = {
+    name: _hex_to_rgb_tuple(hex_value)
+    for name, hex_value in COLOR_HEX_MAP.items()
+}
+
+
+def normalize_color_label(value):
+    """Return a normalized color label if supported, otherwise None."""
+    if value is None:
+        return None
+    color = str(value).strip().lower()
+    return color if color in COLOR_RGB_MAP else None
+
+
+def color_label_to_attr_value(color_label):
+    rgb = COLOR_RGB_MAP.get(color_label)
+    if not rgb:
+        return None
+    return f"{rgb[0]},{rgb[1]},{rgb[2]}"
+
+
+def color_label_to_carla_color(color_label):
+    rgb = COLOR_RGB_MAP.get(color_label)
+    if not rgb:
+        return None
+    return carla.Color(*rgb)
+
 FPS = 30
 UDP_IP = "0.0.0.0"
 UDP_PORT = 60200 
@@ -12,10 +68,69 @@ client = carla.Client("localhost", 2000)
 client.set_timeout(10.0)
 world = client.get_world()
 bp_lib = world.get_blueprint_library()
-vehicle_bp = bp_lib.find('vehicle.audi.a2')
+
+
+def get_vehicle_blueprint_with_color(blueprint_library):
+    preferred_ids = [
+        'vehicle.vehicle.coloredxycar'
+    ]
+
+    for vid in preferred_ids:
+        try:
+            bp = blueprint_library.find(vid)
+        except RuntimeError:
+            bp = None
+        if bp and bp.has_attribute('color'):
+            return bp
+
+    for bp in blueprint_library.filter('vehicle.*'):
+        if bp.has_attribute('color'):
+            return bp
+
+    for vid in preferred_ids:
+        try:
+            bp = blueprint_library.find(vid)
+            if bp:
+                return bp
+        except RuntimeError:
+            continue
+
+    return None
+
+
+vehicle_bp = get_vehicle_blueprint_with_color(bp_lib)
+if vehicle_bp is None:
+    raise RuntimeError("No vehicle blueprint available")
+
+VEHICLE_BP_ID = vehicle_bp.id
+VEHICLE_BP_SUPPORTS_COLOR = vehicle_bp.has_attribute('color')
+
+print(f"[CARLA] Using blueprint: {VEHICLE_BP_ID} (color attribute: {VEHICLE_BP_SUPPORTS_COLOR})")
 
 vehicle_map = {}
+vehicle_colors = {}
 z_offset = 0.2
+
+
+def build_vehicle_blueprint(color_label):
+    bp = bp_lib.find(VEHICLE_BP_ID)
+    if bp is None:
+        return None
+    attr_value = color_label_to_attr_value(color_label)
+    if attr_value and bp.has_attribute('color'):
+        bp.set_attribute('color', attr_value)
+    return bp
+
+
+def apply_vehicle_color(vehicle, color_label):
+    carla_color = color_label_to_carla_color(color_label)
+    if not carla_color:
+        return False
+    try:
+        vehicle.set_color(carla_color)
+        return True
+    except Exception:
+        return False
 
 def move_vehicle_to(vehicle, x, y, z,pitch ,yaw_deg):
     """Teleport vehicle to (x, y, z) with yaw/pitch (degrees)."""
@@ -27,11 +142,11 @@ def move_vehicle_to(vehicle, x, y, z,pitch ,yaw_deg):
 
 def move_or_spawn_vehicles(info_dict):
     """
-    info_dict: { id: (x, y, z, pitch,yaw_deg), ... }
+    info_dict: { id: (x, y, z, pitch, yaw_deg, color), ... }
     - Destroy vehicles that disappeared
-    - Move existing or spawn new ones
+    - Move existing or spawn new ones and update their colors
     """
-    global vehicle_map
+    global vehicle_map, vehicle_colors
     current_ids = set(info_dict.keys())
     existing_ids = set(vehicle_map.keys())
 
@@ -42,19 +157,31 @@ def move_or_spawn_vehicles(info_dict):
         except:
             pass
         vehicle_map.pop(vid, None)
+        vehicle_colors.pop(vid, None)
 
     # Move existing or spawn new
-    for vid, (x, y, z,pitch ,yaw) in info_dict.items():
+    for vid, (x, y, z, pitch, yaw, color_label) in info_dict.items():
+        normalized_color = normalize_color_label(color_label)
         if vid in vehicle_map:
-            move_vehicle_to(vehicle_map[vid], x, y, z+z_offset, pitch ,yaw)
+            vehicle = vehicle_map[vid]
+            move_vehicle_to(vehicle, x, y, z+z_offset, pitch, yaw)
+            if normalized_color and normalized_color != vehicle_colors.get(vid):
+                if apply_vehicle_color(vehicle, normalized_color):
+                    vehicle_colors[vid] = normalized_color
         else:
             transform = carla.Transform(
                 carla.Location(x=x, y=y, z=z+z_offset),
                 carla.Rotation(pitch=pitch, yaw=yaw)
             )
-            vehicle = world.try_spawn_actor(vehicle_bp, transform)
+            spawn_color = normalized_color or DEFAULT_COLOR_LABEL
+            bp = build_vehicle_blueprint(spawn_color)
+            if bp is None:
+                continue
+            vehicle = world.try_spawn_actor(bp, transform)
             if vehicle:
                 vehicle_map[vid] = vehicle
+                if spawn_color and apply_vehicle_color(vehicle, spawn_color):
+                    vehicle_colors[vid] = spawn_color
             else:
                 # Spawn failed (collision, blocked, etc.)
                 pass
@@ -67,6 +194,7 @@ def cleanup():
         except:
             pass
     vehicle_map.clear()
+    vehicle_colors.clear()
 
 def main():
     # --- UDP socket (JSON receiver) ---
@@ -117,9 +245,11 @@ def main():
                     cz = float(center[2])
                     pitch = float(it.get("pitch", 0.0))  # degree
                     yaw = float(it.get("yaw", 0.0))  # degree
+                    color = normalize_color_label(it.get("color"))  # normalized color label
+
                     # NOTE: If your BEV Y-axis is inverted against CARLA's Y,
                     # you may apply cy = -cy or yaw = -yaw here.
-                    vehicle_info[vid] = (cx, cy, cz, pitch,yaw)
+                    vehicle_info[vid] = (cx, cy, cz, pitch, yaw, color)
                 except Exception:
                     # Skip malformed item
                     continue
