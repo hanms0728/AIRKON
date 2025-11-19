@@ -2,26 +2,7 @@ import os
 import math
 import glob
 import numpy as np
-from typing import List, Dict, Tuple
-
-CAMERA_SETUPS = [
-    {"name": "cam1",  "pos": {"x": -46,  "y": -74, "z": 9}, "rot": {"pitch": -40, "yaw": 90,  "roll": 0}},
-    {"name": "cam2",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 197, "roll": 0}},
-    {"name": "cam3",  "pos": {"x": -35,  "y": -36, "z": 9}, "rot": {"pitch": -45, "yaw": 163, "roll": 0}},
-    {"name": "cam4",  "pos": {"x": -35,  "y": 0,   "z": 9}, "rot": {"pitch": -45, "yaw": 190, "roll": 0}},
-    {"name": "cam5",  "pos": {"x": -35,  "y": 5,   "z": 9}, "rot": {"pitch": -45, "yaw": 135, "roll": 0}},
-    {"name": "cam6",  "pos": {"x": -77,  "y": 7,   "z": 9}, "rot": {"pitch": -40, "yaw": 73,  "roll": 0}},
-    {"name": "cam7",  "pos": {"x": -77,  "y": 7,   "z": 9}, "rot": {"pitch": -40, "yaw": 107, "roll": 0}},
-    {"name": "cam8",  "pos": {"x": -122, "y": 19,  "z": 9}, "rot": {"pitch": -40, "yaw": 0,   "roll": 0}},
-    {"name": "cam9",  "pos": {"x": -95,  "y": -20, "z": 9}, "rot": {"pitch": -40, "yaw": 150, "roll": 0}},
-    {"name": "cam10", "pos": {"x": -121, "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw": -17, "roll": 0}},
-    {"name": "cam11", "pos": {"x": -113, "y": -63, "z": 9}, "rot": {"pitch": -40, "yaw": 40,  "roll": 0}},
-    {"name": "cam12", "pos": {"x": -60,  "y": -76, "z": 9}, "rot": {"pitch": -40, "yaw": 120, "roll": 0}},
-    {"name": "cam13", "pos": {"x": -77,  "y": 34,  "z": 9}, "rot": {"pitch": -45, "yaw": -73, "roll": 0}},
-    {"name": "cam14", "pos": {"x": -68,  "y": 34,  "z": 9}, "rot": {"pitch": -45, "yaw": -30, "roll": 0}},
-    {"name": "cam15", "pos": {"x": -120, "y": -40, "z": 9}, "rot": {"pitch": -40, "yaw": 30,  "roll": 0}},
-    {"name": "cam16", "pos": {"x": -61,  "y": -15, "z": 9}, "rot": {"pitch": -45, "yaw": 0,   "roll": 0}},
-]
+from typing import List, Dict, Tuple, Optional
 
 # ---------------- I/O ----------------
 def load_cam_labels(pred_dir: str, frame_key: str) -> List[Tuple[str, np.ndarray]]:
@@ -70,13 +51,24 @@ def obb_to_corners(cx, cy, L, W, yaw_deg): # OBB → 꼭짓점 변환함
     return corners @ R.T + np.array([cx, cy], dtype=float)
 
 # ---------------- 클러스터링 ----------------
-def cluster_by_aabb_iou(boxes: np.ndarray, iou_cluster_thr: float = 0.15) -> List[List[int]]:
+def cluster_by_aabb_iou(
+    boxes: np.ndarray,
+    iou_cluster_thr: float = 0.15,
+    color_labels: Optional[List[Optional[str]]] = None,
+    color_bonus: float = 0.0,
+    color_penalty: float = 0.0,
+) -> List[List[int]]:
     # AABB IoU 계산해서 thr 이상이면 클러스터에 넣기
     if boxes.size == 0:
         return []
     N = len(boxes)
     used = np.zeros(N, dtype=bool)
     clusters: List[List[int]] = []
+    use_color = (
+        color_labels is not None
+        and len(color_labels) == N
+        and (color_bonus > 0.0 or color_penalty > 0.0)
+    )
     for i in range(N):
         if used[i]:
             continue
@@ -88,7 +80,16 @@ def cluster_by_aabb_iou(boxes: np.ndarray, iou_cluster_thr: float = 0.15) -> Lis
             for j in range(N):
                 if used[j]:
                     continue
-                if aabb_iou_axis_aligned(boxes[k], boxes[j]) >= iou_cluster_thr:
+                thr = iou_cluster_thr
+                if use_color:
+                    c1 = color_labels[k]
+                    c2 = color_labels[j]
+                    if c1 and c2:
+                        if c1 == c2:
+                            thr = max(iou_cluster_thr - color_bonus, 0.0)
+                        else:
+                            thr = min(iou_cluster_thr + color_penalty, 1.0)
+                if aabb_iou_axis_aligned(boxes[k], boxes[j]) >= thr:
                     used[j] = True
                     q.append(j)
                     cluster.append(j)
@@ -178,6 +179,7 @@ def fuse_cluster_weighted( # 가중 평균 대표 생성
     cam_ground_xy: Dict[str, Tuple[float, float]],
     d0: float = 5.0,
     p: float = 2.0,
+    extra_weights: Optional[List[float]] = None,
     w_floor: float = 1e-4,
     max_cam_frac: float = 0.65,      # 가중치 한 캠에 못 쏠리게 
     yaw_flip_thr: float = 90.0,      # ref와 90° 초과면 180° 뒤집어 정렬 ~ 각도 못ㅋ튀게
@@ -197,13 +199,26 @@ def fuse_cluster_weighted( # 가중 평균 대표 생성
     if M == 1:
         return cluster_boxes[0].astype(float)
 
+    weight_bias = np.ones(M, dtype=float)
+    if extra_weights is not None:
+        try:
+            arr = np.array(extra_weights, dtype=float)
+            if arr.size == M:
+                arr = np.clip(arr, 0.0, None)
+                if np.all(arr <= 0):
+                    arr = np.ones(M, dtype=float)
+                weight_bias = arr
+        except Exception:
+            pass
+
     # 캠 - 객체 거리 가중치---
     w_dist = []
-    for b, cam in zip(cluster_boxes, cluster_cams):
+    for idx, (b, cam) in enumerate(zip(cluster_boxes, cluster_cams)):
         cx, cy = b[0], b[1]
         cam_xy = cam_ground_xy.get(cam, (0.0, 0.0))
         d = math.hypot(cx - cam_xy[0], cy - cam_xy[1])
-        w = distance_weight(d, d0=d0, p=p)
+        bias = weight_bias[idx] if idx < len(weight_bias) else 1.0
+        w = distance_weight(d, d0=d0, p=p) * max(bias, 1e-6)
         w_dist.append(max(w, w_floor))
     w_dist = np.array(w_dist, dtype=float)
     w_base = _normalize_with_cap(w_dist, max_frac=max_cam_frac) 

@@ -1,11 +1,13 @@
 from realtime.v1.realtime_edge import IPCameraStreamerUltraLL as Streamer
 from realtime.v1.batch_infer import BatchedTemporalRunner
-from src.inference_lstm_onnx_pointcloud import (
-    decode_predictions,       
-    tiny_filter_on_dets,       
-    tris_img_to_bev_by_lut, 
+from src.inference_lstm_onnx_pointcloud_add_color import (
+    decode_predictions,
+    tiny_filter_on_dets,
+    tris_img_to_bev_by_lut,
     poly_from_tri,
-    compute_bev_properties
+    compute_bev_properties,
+    draw_pred_only,
+    draw_pred_pseudo3d,
 )
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 from pathlib import Path
@@ -18,6 +20,7 @@ import queue
 from typing import Optional, Dict, List, Tuple
 import socket, json
 import os
+import colorsys
 from contextlib import contextmanager
 import open3d as o3d
 from fastapi import FastAPI, HTTPException
@@ -25,7 +28,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
-from PIL import Image
 
 @dataclass
 class CameraAssets:
@@ -38,6 +40,73 @@ class CameraAssets:
     visible_source: Optional[str]
     raw_config: Dict
 
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
+_COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
+_COLOR_HUE_BANDS = (
+    ("red", 0.0, 40.0),
+    ("yellow", 60.0, 35.0),
+    ("green", 130.0, 45.0),
+    ("purple", 280.0, 80.0),  # covers purple/blue-ish tones
+    ("pink", 335.0, 30.0),
+)
+
+
+def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
+    if not hex_color:
+        return None
+    hex_color = hex_color.strip().lstrip("#")
+    if len(hex_color) != 6:
+        return None
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+    except ValueError:
+        return None
+    return r / 255.0, g / 255.0, b / 255.0
+
+
+def _hue_score(hue_deg: float, center: float, window: float) -> float:
+    diff = abs(hue_deg - center) % 360.0
+    if diff > 180.0:
+        diff = 360.0 - diff
+    return max(0.0, 1.0 - diff / max(window, 1e-6))
+
+
+def _classify_hex_color(hex_color: Optional[str]):
+    rgb = _hex_to_rgb_unit(hex_color)
+    if rgb is None:
+        return None, 0.0, None
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+    h_deg = (h * 360.0) % 360.0
+    if v < 0.2:
+        return None, 0.0, None
+
+    if v >= 0.65 and s <= 0.25:
+        sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))
+        val_term = max(0.0, min(1.0, (v - 0.65) / max(1e-6, 0.35)))
+        confidence = float(0.5 * sat_term + 0.5 * val_term)
+        embedding = [0.0] * len(COLOR_LABELS)
+        embedding[_COLOR_LABEL_TO_INDEX["white"]] = confidence
+        return "white", confidence, embedding
+
+    best_label = None
+    best_score = 0.0
+    sat_term = max(0.0, min(1.0, (s - 0.2) / 0.8))
+    val_term = max(0.0, min(1.0, (v - 0.3) / 0.7))
+    for label, center, window in _COLOR_HUE_BANDS:
+        hue_component = _hue_score(h_deg, center, window)
+        if hue_component <= 0.0:
+            continue
+        score = float(hue_component * 0.6 + sat_term * 0.25 + val_term * 0.15)
+        if score > best_score:
+            best_score = score
+            best_label = label
+    if not best_label or best_score < 0.2:
+        return None, float(best_score), None
+    embedding = [0.0] * len(COLOR_LABELS)
+    embedding[_COLOR_LABEL_TO_INDEX[best_label]] = best_score
+    return best_label, float(best_score), embedding
 
 def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
     if lut is None:
@@ -199,7 +268,7 @@ def load_undistort_map(desc, frame_hw: Tuple[int, int]) -> Optional[Tuple[np.nda
         K, dist, None, newK, (int(width), int(height)), cv2.CV_32FC1
     )
     return map1, map2
-
+ 
 
 def load_camera_config_file(path: str, default_hw: Tuple[int, int]) -> List[Dict]:
     cfg_path = Path(path)
@@ -317,13 +386,14 @@ class InferWorker(threading.Thread):
         if assets and assets.undistort_map is not None:
             map1, map2 = assets.undistort_map
             frame_bgr = cv2.remap(frame_bgr, map1, map2, interpolation=cv2.INTER_LINEAR)
-        if frame_bgr.shape[:2] != (self.H, self.W):
+        orig_h, orig_w = frame_bgr.shape[:2]
+        if (orig_h, orig_w) != (self.H, self.W):
             bgr = cv2.resize(frame_bgr, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
         else:
             bgr = frame_bgr
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         chw = rgb.transpose(2,0,1).astype(np.float32) / 255.0
-        return chw, bgr
+        return chw, bgr, (orig_h, orig_w)
 
     def _decode(self, outs):
         dets = decode_predictions(
@@ -335,17 +405,25 @@ class InferWorker(threading.Thread):
         )[0]
         return tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
 
-    def _make_bev(self, dets, lut_data: Optional[dict]): 
+    def _make_bev(self, dets, lut_data: Optional[dict], tris_img_orig=None, colors_hex=None):
         if lut_data is None or not dets:
             return []
 
-        tris_img = np.asarray([d["tri"] for d in dets], dtype=np.float32)  # (N,3,2) in image pixel
+        if tris_img_orig is not None:
+            tris_img = np.asarray(tris_img_orig, dtype=np.float32)
+        else:
+            tris_img = np.asarray([d["tri"] for d in dets], dtype=np.float32)
+        if tris_img.size == 0:
+            return []
+
         tris_bev_xy, tris_bev_z, tri_ok = tris_img_to_bev_by_lut(
             tris_img, lut_data, bev_scale=self.bev_scale
         )
 
         bev = []
-        for d, tri_xy, tri_z, ok in zip(dets, tris_bev_xy, tris_bev_z, tri_ok):
+
+        color_list = colors_hex or []
+        for idx, (d, tri_xy, tri_z, ok) in enumerate(zip(dets, tris_bev_xy, tris_bev_z, tri_ok)):
             if not ok or (not np.all(np.isfinite(tri_xy))):
                 continue
 
@@ -355,7 +433,7 @@ class InferWorker(threading.Thread):
                 continue
             center, length, width, yaw, front_edge, cz, pitch_deg, roll_deg = props
 
-            bev.append({
+            entry = {
                 "score":      float(d["score"]),
                 "tri":        tri_xy,          
                 "z3":         tri_z,          
@@ -368,7 +446,17 @@ class InferWorker(threading.Thread):
                 "cz":         float(cz),
                 "pitch":      float(pitch_deg),
                 "roll":       float(roll_deg),
-            })
+            }
+            if idx < len(color_list):
+                color_hex = color_list[idx]
+                entry["color_hex"] = color_hex
+                label, confidence, embedding = _classify_hex_color(color_hex)
+                if label:
+                    entry["color"] = label
+                    entry["color_confidence"] = confidence
+                if embedding is not None:
+                    entry["color_embedding"] = embedding
+            bev.append(entry)
         return bev
 
 
@@ -376,11 +464,11 @@ class InferWorker(threading.Thread):
         wrk = StageTimer(name="WORKER", print_every=5.0)
 
         while not self.stop_evt.is_set():
+            frame_meta: Dict[int, Dict] = {}
             # 1) 최신 프레임 수집
             with wrk.span("grab"):
                 ready = True
                 imgs_chw = {}
-                bgr_for_gui = {}
                 for cid in self.cam_ids:
                     fr= self.streamer.get_latest(cid)
                     # ts_capture = time.time() 
@@ -389,10 +477,13 @@ class InferWorker(threading.Thread):
                         break
                     with wrk.span("preproc"):
                         fr, ts_capture = fr
-                        chw, bgr = self._preprocess(cid, fr)
-                    imgs_chw[cid] = chw # <================
-                    bgr_for_gui[cid] = bgr # <====================
-                    # cv2.imwrite('sfs.jpg',np.flip(bgr, axis=1)) flip delete!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+                        chw, bgr, orig_hw = self._preprocess(cid, fr)
+                    imgs_chw[cid] = chw
+                    frame_meta[cid] = {
+                        "bgr": bgr,
+                        "orig_hw": orig_hw,
+                        "capture_ts": ts_capture,
+                    }
 
             if not ready:
                 time.sleep(0.002)
@@ -415,19 +506,67 @@ class InferWorker(threading.Thread):
             # 4) 디코드/BEV/UDP/GUI 큐
             ts = time.time()
             for cid, outs in per_cam_outs.items():
+                meta = frame_meta.get(cid)
+                if meta is None:
+                    continue
+                capture_ts = meta.get("capture_ts")
+                frame_bgr = meta.get("bgr")
+                orig_hw = meta.get("orig_hw", (self.H, self.W))
+                orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
                 with wrk.span("decode"):
                     dets = self._decode(outs)
 
+                tris_img_orig = None
+                colors_hex = None
+                if dets and frame_bgr is not None:
+                    tris_img_orig, colors_hex = draw_pred_only(
+                        frame_bgr,
+                        dets,
+                        None,
+                        None,
+                        self.W,
+                        self.H,
+                        orig_w,
+                        orig_h,
+                        draw_visual=False,
+                    )
+
                 with wrk.span("bev"):
-                    bev = self._make_bev(dets, self.LUT_cache.get(cid)) 
-                overlay_frame = draw_detections(bgr_for_gui[cid], dets)
-                
+                    bev = self._make_bev(
+                        dets,
+                        self.LUT_cache.get(cid),
+                        tris_img_orig=tris_img_orig,
+                        colors_hex=colors_hex,
+                    )
+                overlay_frame = None
+                if frame_bgr is not None and dets:
+                    tris_for_gui = [
+                        np.asarray(d.get("tri"), dtype=np.float32)
+                        for d in dets
+                        if d.get("tri") is not None
+                    ]
+                    pseudo3d = None
+                    if tris_for_gui:
+                        pseudo3d = draw_pred_pseudo3d(
+                            frame_bgr,
+                            tris_for_gui,
+                            save_path_img=None,
+                            dy=None,
+                            height_scale=0.25,
+                            min_dy=8,
+                            max_dy=80,
+                            return_image=True,
+                        )
+                    overlay_frame = pseudo3d
+                if overlay_frame is None:
+                    overlay_frame = draw_detections(frame_bgr, dets)
+
                 if self.web_publisher is not None:
                     try:
                         self.web_publisher.update(
                             cam_id=cid,
                             ts=ts,
-                            capture_ts=ts_capture,
+                            capture_ts=capture_ts,
                             bev_dets=bev,
                             overlay_bgr=overlay_frame,
                         )
@@ -437,18 +576,18 @@ class InferWorker(threading.Thread):
                 if self.udp_sender is not None:
                     with wrk.span("udp"):
                         try:
-                            self.udp_sender.send(cam_id=cid, ts=ts, bev_dets=bev, capture_ts=ts_capture)
+                            self.udp_sender.send(cam_id=cid, ts=ts, bev_dets=bev, capture_ts=capture_ts)
                         except Exception as e:
                             print(f"[UDP] send error cam{cid}: {e}")
 
                 if self.gui_queue is not None:
                     with wrk.span("gui.put"):
                         try:
-                            self.gui_queue.put_nowait((cid, overlay_frame, ts_capture))
+                            self.gui_queue.put_nowait((cid, overlay_frame, capture_ts))
                         except queue.Full:
                             try:
                                 _ = self.gui_queue.get_nowait()
-                                self.gui_queue.put_nowait((cid, overlay_frame, ts_capture))
+                                self.gui_queue.put_nowait((cid, overlay_frame, capture_ts))
                             except Exception:
                                 pass
 
@@ -469,30 +608,45 @@ class UDPSender:
         except: pass
 
     def _pack_json(self, cam_id: int, ts: float, bev_dets, capture_ts: Optional[float]):
+        items = []
+        for d in bev_dets or []:
+            item = {
+                "center": [float(d["center"][0]), float(d["center"][1])],
+                "length": float(d["length"]),
+                "width": float(d["width"]),
+                "yaw": float(d["yaw"]),
+                "score": float(d["score"]),
+                "cz":     float(d.get("cz", 0.0)),
+                "pitch":  float(d.get("pitch", 0.0)),
+                "roll":   float(d.get("roll", 0.0)),
+            }
+            color_hex = d.get("color_hex")
+            if color_hex:
+                item["color_hex"] = color_hex
+            color_label = d.get("color")
+            if color_label:
+                item["color"] = color_label
+            color_conf = d.get("color_confidence")
+            if color_conf is not None:
+                item["color_confidence"] = float(color_conf)
+            items.append(item)
         msg = {
             "type": "bev_labels",
             "camera_id": cam_id,
             "timestamp": ts,
             "capture_ts": capture_ts,
-            "items": [
-                {
-                    "center": [float(d["center"][0]), float(d["center"][1])],
-                    "length": float(d["length"]),
-                    "width": float(d["width"]),
-                    "yaw": float(d["yaw"]),
-                    "score": float(d["score"]),
-                    "cz":     float(d.get("cz", 0.0)),
-                    "pitch":  float(d.get("pitch", 0.0)),
-                    "roll":   float(d.get("roll", 0.0)),
-                } for d in bev_dets
-            ],
+            "items": items,
         }
         return json.dumps(msg, ensure_ascii=False).encode("utf-8")
 
     def send(self, cam_id: int, ts: float, bev_dets=None, capture_ts: Optional[float] = None):
+        bev_list = bev_dets or []
+        payload = None
         if self.fmt == "json":
-            payload = self._pack_json(cam_id, ts, bev_dets or [], capture_ts)
-
+            payload = self._pack_json(cam_id, ts, bev_list, capture_ts)
+        else:
+            raise ValueError(f"Unsupported UDP payload fmt: {self.fmt}")
+        print(payload)
         if len(payload) <= self.max_bytes:
             self.sock.sendto(payload, self.addr)
             return
@@ -503,6 +657,7 @@ class UDPSender:
             part = payload[idx*self.max_bytes:(idx+1)*self.max_bytes]
             prefix = f"CHUNK {chunk_id} {total} {idx}\n".encode("utf-8")
             self.sock.sendto(prefix + part, self.addr)
+        # print(payload)
 
 class EdgeWebBridge:
     def __init__(self, *, host: str, port: int, global_ply: str, vehicle_glb: str,
@@ -680,14 +835,27 @@ class EdgeWebBridge:
             front_edge = d.get("front_edge")
             if hasattr(front_edge, "tolist"):
                 front_edge = front_edge.tolist()
-            items.append({
+            payload = {
                 **vis,
                 "yaw": float(d.get("yaw", 0.0)),
                 "pitch": float(d.get("pitch", 0.0)),
                 "roll": float(d.get("roll", 0.0)),
                 "front_edge": front_edge,
                 "tri": tri,
-            })
+            }
+            color_hex = d.get("color_hex")
+            if color_hex:
+                payload["color_hex"] = color_hex
+            color_label = d.get("color")
+            if color_label:
+                payload["color"] = color_label
+            color_embedding = d.get("color_embedding")
+            if color_embedding is not None:
+                payload["color_embedding"] = color_embedding
+            color_conf = d.get("color_confidence")
+            if color_conf is not None:
+                payload["color_confidence"] = float(color_conf)
+            items.append(payload)
         return items
 
     def _safe_json(self, obj):
@@ -831,9 +999,8 @@ def main():
     ap.add_argument("--udp-host", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=50050)
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
-    ap.add_argument("--visual-size", default="400,700", type=str)
+    ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
-    ap.add_argument("--no-gui", action="store_true", help="Disable OpenCV visualization windows")
     # visualization scaling (shared across web/3d)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
     ap.add_argument("--fixed-length", type=float, default=4.5)
@@ -844,7 +1011,7 @@ def main():
     ap.add_argument("--z-offset", type=float, default=0.0)
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")
-    ap.set_defaults(invert_bev_y=True)
+    ap.set_defaults(no_invert_bev_y=True)
     ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true")
     ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false")
     ap.set_defaults(normalize_vehicle=True)
@@ -869,8 +1036,6 @@ def main():
         except Exception:
             return False
     USE_GUI = gui_available()
-    if args.no_gui:
-        USE_GUI = False
 
     # 웹
     viz_cfg = VizSizeConfig(
@@ -999,22 +1164,22 @@ def main():
                         gui_timer.bump()
                         continue
 
-                    if not USE_GUI:
-                        if not ticker.tick():
-                            break
-                        gui_timer.bump()
-                        continue
-                    vis = overlay_bgr
-                    if vis is None:
-                        vis = np.zeros((H, W, 3), dtype=np.uint8)
+                if not USE_GUI:
+                    if not ticker.tick():
+                        break
+                    gui_timer.bump()
+                    continue
+                vis = overlay_bgr
+                if vis is None:
+                    vis = np.zeros((H, W, 3), dtype=np.uint8)
 
-                    with gui_timer.span("gui.show"):
-                        cv2.imshow(f"cam{cid}", vis)
-                        e2e_ms = (time.time() - ts_capture) * 1000.0
-                        print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
-                        if not ticker.tick():
-                            break
-                gui_timer.bump()
+                with gui_timer.span("gui.show"):
+                    cv2.imshow(f"cam{cid}", vis)
+                    e2e_ms = (time.time() - ts_capture) * 1000.0
+                    print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
+                    if not ticker.tick():
+                        break
+            gui_timer.bump()
     finally:
         worker.stop()
         worker.join(timeout=1)
