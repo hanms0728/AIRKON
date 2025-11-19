@@ -52,6 +52,6 @@ python ./src/train_lstm_onnx.py \
    - IP별로 이미지를 분리해 각 root 폴더를 나누고, 해당 root를 `--root` 인자로 전달  
    - 보정 결과는 `root__undist`에 생성됨
 2. 자동 라벨 생성: `auto_labels/inference_onnx_eval.py`로 추론  
-   - 필요 시 `conf_thres` 조정, 부분 라벨 손수 수정
+   - 필요 시  `auto_labels/detection_inference_onnx.py`의 `conf_thres` 조정, 부분 라벨 손수 수정
 3. 학습: `src/train_lstm_onnx.py` 실행  
    - 학습/검증 데이터 루트를 위 구조에 맞춰 준비 후 학습 진행
