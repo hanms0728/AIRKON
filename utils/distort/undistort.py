@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import argparse
+import os
 
 def build_scaled_K(K, calib_w, calib_h, new_w, new_h):
     sx, sy = new_w / calib_w, new_h / calib_h
@@ -23,7 +24,12 @@ def main():
     ap.add_argument("--img", required=True, help="보정할 이미지 경로")
     ap.add_argument("--mode", choices=["scaled-k", "dist-only"], default="dist-only")
     ap.add_argument("--focal_ratio", type=float, default=1.0, help="dist-only 모드용 f 비율")
-    ap.add_argument("--out", default="cam1_undistorted_image.jpg")
+    ap.add_argument(
+        "--output",
+        "-o",
+        default="undistorted_image.jpg",
+        help="보정된 이미지를 저장할 경로"
+    )
     args = ap.parse_args()
 
     data = np.load(args.calib)
@@ -55,7 +61,12 @@ def main():
 
     map1, map2 = cv2.initUndistortRectifyMap(K_use, dist, None, newK, (w, h), cv2.CV_16SC2)
     und = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
-    cv2.imwrite("real_image/undist_img/cam_3_36.jpg", und)
+
+    out_path = args.output
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    cv2.imwrite(out_path, und)
     # Save next to original calib npz, same name + "_params"
     calib_path = args.calib
     calib_base = calib_path.rsplit(".", 1)[0]

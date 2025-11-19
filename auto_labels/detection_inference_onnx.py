@@ -199,12 +199,12 @@ class Inferencer:
     def _non_max_suppression(
         self,
         prediction: torch.Tensor,
-        conf_thres: float = 0.01,
+        conf_thres: float = 0.1,
         iou_thres: float = 0.5,
         classes: torch.Tensor = None,
         agnostic: bool = False,
         multi_label: bool = False,
-        max_det: int = 300,
+        max_det: int = 2,
         nc: int = 0,  # number of classes
         max_nms: int = 30000,
         max_wh: int = 7680,

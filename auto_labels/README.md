@@ -32,7 +32,7 @@ dataset_root_폴더 구조
 
 ```bash
 python ./src/train_lstm_onnx.py \
-  --train-root /dataset_root_경로 --val-root /검증_root_경로 --data-layout auto \
+  --train-root /home/airkon/바탕화면/result/train --val-root /home/airkon/바탕화면/result/val --data-layout auto \
   --val-mode metrics --val-interval 1 --val-batch 2 \
   --yolo-weights yolo11m.pt \
   --weights ./onnx/base_pth/yolo11m_2_5d_epoch_005.pth \
