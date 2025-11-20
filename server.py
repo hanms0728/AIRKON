@@ -1130,6 +1130,8 @@ def main():
     ap.add_argument("--web-host", default="0.0.0.0")
     ap.add_argument("--web-port", type=int, default=18090)
     ap.add_argument("--no-web", action="store_true")
+    ap.add_argument("--overlay-base-url", type=str, default=None,
+                    help="Base URL for camera overlay/video API (typically Edge bridge http://host:port)")
     ap.add_argument("--tracker-fixed-length", type=float, default=None)
     ap.add_argument("--tracker-fixed-width", type=float, default=None)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
@@ -1190,6 +1192,8 @@ def main():
         "flipMarkerX": bool(args.flip_marker_x),
         "flipMarkerY": bool(args.flip_marker_y),
     }
+    if args.overlay_base_url:
+        client_config["overlayBaseUrl"] = args.overlay_base_url
 
     server = RealtimeFusionServer(
         cam_ports=cam_ports,

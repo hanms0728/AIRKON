@@ -36,6 +36,38 @@
             font-size: 0.9rem;
             color: #9dd6ff;
         }
+        #camera-panel {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        #camera-panel label {
+            font-size: 0.9rem;
+            color: #ddd;
+        }
+        #camera-panel select {
+            flex: 1;
+            padding: 6px 8px;
+            background: #1b1b1b;
+            border: 1px solid #2a2a2a;
+            color: #fff;
+            border-radius: 4px;
+        }
+        #overlay-wrapper {
+            margin-bottom: 12px;
+            border: 1px solid #1f1f1f;
+            background: #000;
+            min-height: 140px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #overlay-wrapper img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
         #detection-list {
             flex: 1;
             overflow-y: auto;
@@ -57,6 +89,13 @@
         <div id="viewer"></div>
         <div id="sidebar">
             <div id="status">Initializing…</div>
+            <div id="camera-panel">
+                <label for="camera-select">Camera</label>
+                <select id="camera-select"></select>
+            </div>
+            <div id="overlay-wrapper">
+                <img id="overlay-img" alt="Camera overlay stream" />
+            </div>
             <ol id="detection-list"></ol>
         </div>
     </div>

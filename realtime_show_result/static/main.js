@@ -41,6 +41,7 @@ const state = {
     pollingHandle: null,
     overlayToken: 0,
     overlayUrl: null,
+    overlayPollingHandle: null,
     visibleMeshes: new Map(),
     globalCloud: null,
     cameraMarkers: [],
@@ -200,8 +201,10 @@ async function initFusionMode() {
     } catch (err) {
         console.warn("site info error", err);
     }
+    state.cameras = deriveCamerasFromSite(state.site);
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
     setupCameraMarkers(state.site?.camera_positions || []);
+    setupFusionCameraSelect();
     startFusionPolling();
 }
 
@@ -717,6 +720,155 @@ async function fetchConfigWithFallback() {
     }
 }
 
+function deriveCamerasFromSite(site) {
+    const result = [];
+    if (!site) {
+        return result;
+    }
+    const seen = new Set();
+    const markers = Array.isArray(site.camera_positions) ? site.camera_positions : [];
+    markers.forEach((marker) => {
+        if (!marker) {
+            return;
+        }
+        let camId = marker.camera_id ?? marker.id;
+        if (!Number.isFinite(camId)) {
+            const maybeId = parseInt(`${camId}`, 10);
+            if (Number.isFinite(maybeId)) {
+                camId = maybeId;
+            }
+        }
+        if (!Number.isFinite(camId)) {
+            if (marker.name) {
+                const digits = `${marker.name}`.match(/\d+/g);
+                if (digits && digits.length) {
+                    const parsed = parseInt(digits[digits.length - 1], 10);
+                    if (Number.isFinite(parsed)) {
+                        camId = parsed;
+                    }
+                }
+            }
+        }
+        if (!Number.isFinite(camId)) {
+            return;
+        }
+        const numericId = Number(camId);
+        if (seen.has(numericId)) {
+            return;
+        }
+        seen.add(numericId);
+        result.push({
+            camera_id: numericId,
+            name: marker.name || marker.key || `cam${numericId}`,
+        });
+    });
+    if (!result.length && Array.isArray(site.cameras)) {
+        site.cameras.forEach((entry, idx) => {
+            let label = entry;
+            let numericId = null;
+            if (typeof entry === "object" && entry !== null) {
+                label = entry.name || entry.label || entry.id || entry.camera_id;
+            }
+            const text = `${label ?? ""}`;
+            const digits = text.match(/\d+/g);
+            if (digits && digits.length) {
+                numericId = parseInt(digits[digits.length - 1], 10);
+            }
+            if (!Number.isFinite(numericId)) {
+                numericId = idx + 1;
+            }
+            if (seen.has(numericId)) {
+                return;
+            }
+            seen.add(numericId);
+            result.push({
+                camera_id: numericId,
+                name: text || `cam${numericId}`,
+            });
+        });
+    }
+    result.sort((a, b) => a.camera_id - b.camera_id);
+    return result;
+}
+
+function setupFusionCameraSelect() {
+    if (!isFusion) {
+        return;
+    }
+    const cameras = Array.isArray(state.cameras) ? state.cameras : [];
+    stopFusionOverlayPolling();
+    if (!cameraSelectEl) {
+        const first = cameras.length ? cameras[0].camera_id : null;
+        state.cameraId = Number.isFinite(first) ? first : null;
+        if (state.cameraId != null) {
+            startFusionOverlayPolling();
+        } else if (overlayImgEl) {
+            overlayImgEl.removeAttribute("src");
+        }
+        return;
+    }
+    cameraSelectEl.innerHTML = "";
+    if (!cameras.length) {
+        const opt = document.createElement("option");
+        opt.textContent = "No cameras";
+        cameraSelectEl.appendChild(opt);
+        cameraSelectEl.disabled = true;
+        state.cameraId = null;
+        if (overlayImgEl) {
+            overlayImgEl.removeAttribute("src");
+        }
+        return;
+    }
+    cameras.forEach((cam, idx) => {
+        const opt = document.createElement("option");
+        opt.value = cam.camera_id;
+        opt.textContent = `${cam.camera_id} — ${cam.name || `cam${cam.camera_id}`}`;
+        if (idx === 0) {
+            opt.selected = true;
+        }
+        cameraSelectEl.appendChild(opt);
+    });
+    cameraSelectEl.disabled = false;
+    const initial = Number(cameraSelectEl.value);
+    state.cameraId = Number.isFinite(initial) ? initial : null;
+    cameraSelectEl.onchange = () => {
+        const next = Number(cameraSelectEl.value);
+        state.cameraId = Number.isFinite(next) ? next : null;
+        startFusionOverlayPolling();
+    };
+    startFusionOverlayPolling();
+}
+
+function startFusionOverlayPolling() {
+    if (!isFusion) {
+        return;
+    }
+    stopFusionOverlayPolling();
+    if (state.cameraId == null || !overlayImgEl) {
+        return;
+    }
+    const overlayConfigured = typeof state.config?.overlayBaseUrl === "string"
+        && state.config.overlayBaseUrl.trim().length > 0;
+    if (!overlayConfigured) {
+        if (overlayImgEl) {
+            overlayImgEl.removeAttribute("src");
+        }
+        return;
+    }
+    const tick = () => {
+        updateOverlayImage(state.cameraId);
+    };
+    tick();
+    state.overlayPollingHandle = window.setInterval(tick, 900);
+}
+
+function stopFusionOverlayPolling() {
+    if (state.overlayPollingHandle) {
+        clearInterval(state.overlayPollingHandle);
+        state.overlayPollingHandle = null;
+    }
+}
+
 function populateCameraSelect() {
     if (!cameraSelectEl) {
         state.cameraId = state.cameras.length ? state.cameras[0].camera_id : null;
@@ -824,11 +976,30 @@ async function fetchFusionDetections() {
     }
 }
 
-function updateOverlayImage(camId) {
-    if (!overlayImgEl) return;
+function buildOverlayRequestUrl(camId) {
+    if (camId == null) {
+        return null;
+    }
+    const rawBase = typeof state.config?.overlayBaseUrl === "string" ? state.config.overlayBaseUrl.trim() : "";
+    if (isFusion && !rawBase) {
+        return null;
+    }
+    const normalizedBase = rawBase ? rawBase.replace(/\/+$/, "") : "";
+    const path = `/api/cameras/${camId}/overlay.jpg`;
+    const url = normalizedBase ? `${normalizedBase}${path}` : path;
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}cacheBust=${Date.now()}`;
+}
+
+function updateOverlayImage(camId = state.cameraId) {
+    if (!overlayImgEl || camId == null) return;
     state.overlayToken += 1;
     const token = state.overlayToken;
-    fetch(`/api/cameras/${camId}/overlay.jpg?cacheBust=${Date.now()}`, { cache: "no-store" })
+    const requestUrl = buildOverlayRequestUrl(camId);
+    if (!requestUrl) {
+        return;
+    }
+    fetch(requestUrl, { cache: "no-store" })
         .then((resp) => {
             if (!resp.ok) {
                 throw new Error("overlay not ready");
