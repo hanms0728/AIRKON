@@ -346,7 +346,8 @@ class InferWorker(threading.Thread):
     def __init__(self, *, streamer, camera_assets: Dict[int, CameraAssets], img_hw, strides, onnx_path,
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
                  bev_scale=1.0, providers=None,
-                 gui_queue=None, udp_sender=None, web_publisher=None):
+                 gui_queue=None, udp_sender=None, web_publisher=None,
+                 save_undist_dir=None, save_overlay_dir=None):
         super().__init__(daemon=True)
         self.streamer = streamer
         self.camera_assets = camera_assets
@@ -363,6 +364,11 @@ class InferWorker(threading.Thread):
         self.stop_evt = threading.Event()
         self.bev_scale = float(bev_scale)
         self.LUT_cache: Dict[int, Optional[dict]] = {cid: camera_assets[cid].lut for cid in self.cam_ids}
+        self.save_undist_dir = Path(save_undist_dir).expanduser().resolve() if save_undist_dir else None
+        self.save_overlay_dir = Path(save_overlay_dir).expanduser().resolve() if save_overlay_dir else None
+        for root in (self.save_undist_dir, self.save_overlay_dir):
+            if root is not None:
+                root.mkdir(parents=True, exist_ok=True)
 
         if providers is None:
             providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
@@ -380,6 +386,22 @@ class InferWorker(threading.Thread):
         for cid in self.cam_ids:
             if self.LUT_cache[cid] is None:
                 print(f"[EdgeInfer] WARN: cam{cid} has no LUT - BEV/3D disabled")
+
+    def _frame_basename(self, cam_id: int, capture_ts: Optional[float]) -> str:
+        ts_val = capture_ts if capture_ts is not None else time.time()
+        return f"cam{cam_id}_{int(ts_val * 1000):d}"
+
+    def _save_image(self, img: Optional[np.ndarray], root: Optional[Path], cam_id: int,
+                    capture_ts: Optional[float], tag: str):
+        if root is None or img is None:
+            return
+        subdir = root / f"cam{cam_id}"
+        subdir.mkdir(parents=True, exist_ok=True)
+        name = f"{self._frame_basename(cam_id, capture_ts)}_{tag}.jpg"
+        try:
+            cv2.imwrite(str(subdir / name), img)
+        except Exception as exc:
+            print(f"[EdgeInfer] WARN: failed to save {tag} image for cam{cam_id}: {exc}")
 
     def _preprocess(self, cam_id: int, frame_bgr):
         assets = self.camera_assets.get(cam_id)
@@ -513,6 +535,7 @@ class InferWorker(threading.Thread):
                 frame_bgr = meta.get("bgr")
                 orig_hw = meta.get("orig_hw", (self.H, self.W))
                 orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
+                self._save_image(frame_bgr, self.save_undist_dir, cid, capture_ts, "undist")
                 with wrk.span("decode"):
                     dets = self._decode(outs)
 
@@ -560,6 +583,7 @@ class InferWorker(threading.Thread):
                     overlay_frame = pseudo3d
                 if overlay_frame is None:
                     overlay_frame = draw_detections(frame_bgr, dets)
+                self._save_image(overlay_frame, self.save_overlay_dir, cid, capture_ts, "overlay")
 
                 if self.web_publisher is not None:
                     try:
@@ -597,11 +621,21 @@ class InferWorker(threading.Thread):
         self.stop_evt.set()
 
 class UDPSender:
-    def __init__(self, host: str, port: int, fmt: str = "json", max_bytes: int = 65000):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        fmt: str = "json",
+        max_bytes: int = 65000,
+        fixed_length: Optional[float] = None,
+        fixed_width: Optional[float] = None,
+    ):
         self.addr = (host, int(port))
         self.fmt = fmt
         self.max_bytes = max_bytes
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.fixed_length = float(fixed_length) if fixed_length is not None else None
+        self.fixed_width = float(fixed_width) if fixed_width is not None else None
 
     def close(self):
         try: self.sock.close()
@@ -610,10 +644,12 @@ class UDPSender:
     def _pack_json(self, cam_id: int, ts: float, bev_dets, capture_ts: Optional[float]):
         items = []
         for d in bev_dets or []:
+            length = self.fixed_length if self.fixed_length is not None else d["length"]
+            width = self.fixed_width if self.fixed_width is not None else d["width"]
             item = {
                 "center": [float(d["center"][0]), float(d["center"][1])],
-                "length": float(d["length"]),
-                "width": float(d["width"]),
+                "length": float(length),
+                "width": float(width),
                 "yaw": float(d["yaw"]),
                 "score": float(d["score"]),
                 "cz":     float(d.get("cz", 0.0)),
@@ -646,7 +682,7 @@ class UDPSender:
             payload = self._pack_json(cam_id, ts, bev_list, capture_ts)
         else:
             raise ValueError(f"Unsupported UDP payload fmt: {self.fmt}")
-        print(payload)
+        #print(payload)
         if len(payload) <= self.max_bytes:
             self.sock.sendto(payload, self.addr)
             return
@@ -999,12 +1035,22 @@ def main():
     ap.add_argument("--udp-host", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=50050)
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
+    ap.add_argument("--udp-fixed-length", type=float, default=4.4,
+                    help="Override the length value in UDP payloads when set")
+    ap.add_argument("--udp-fixed-width", type=float, default=2.7,
+                    help="Override the width value in UDP payloads when set")
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    ap.add_argument("--no-gui", action="store_true",
+                    help="Disable OpenCV visualization windows")
+    ap.add_argument("--save-undist-dir", type=str, default=None,
+                    help="Set to save undistorted per-camera frames into this directory")
+    ap.add_argument("--save-overlay-dir", type=str, default=None,
+                    help="Set to save overlay (prediction) frames into this directory")
     # visualization scaling (shared across web/3d)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
-    ap.add_argument("--fixed-length", type=float, default=4.5)
-    ap.add_argument("--fixed-width", type=float, default=1.8)
+    ap.add_argument("--fixed-length", type=float, default=4.4)
+    ap.add_argument("--fixed-width", type=float, default=2.7)
     ap.add_argument("--height-scale", type=float, default=0.5)
     ap.add_argument("--mesh-scale", type=float, default=1.0)
     ap.add_argument("--mesh-height", type=float, default=0.0)
@@ -1036,6 +1082,8 @@ def main():
         except Exception:
             return False
     USE_GUI = gui_available()
+    if args.no_gui:
+        USE_GUI = False
 
     # 웹
     viz_cfg = VizSizeConfig(
@@ -1069,7 +1117,7 @@ def main():
     for cid, asset in camera_assets.items():
         cfg = asset.raw_config
         visible_info = asset.visible_source if asset.visible_source else "lut-derived"
-        print(f"[Main] slot cam{cid} ({asset.name}): rtsp={cfg['ip']}:{cfg['port']} size={cfg['width']}x{cfg['height']} LUT={asset.lut_path} visible={visible_info}")
+        #print(f"[Main] slot cam{cid} ({asset.name}): rtsp={cfg['ip']}:{cfg['port']} size={cfg['width']}x{cfg['height']} LUT={asset.lut_path} visible={visible_info}")
     
     cam_ids  = sorted(camera_assets.keys())
     shutdown_evt = threading.Event()
@@ -1090,7 +1138,13 @@ def main():
     
     udp_sender = None
     if args.udp_enable:
-        udp_sender = UDPSender(args.udp_host, args.udp_port, fmt=args.udp_format)
+        udp_sender = UDPSender(
+            args.udp_host,
+            args.udp_port,
+            fmt=args.udp_format,
+            fixed_length=args.udp_fixed_length,
+            fixed_width=args.udp_fixed_width,
+        )
 
     web_bridge = None
     if args.web_enable:
@@ -1127,6 +1181,8 @@ def main():
         gui_queue=gui_queue,
         udp_sender=udp_sender,
         web_publisher=web_bridge,
+        save_undist_dir=args.save_undist_dir,
+        save_overlay_dir=args.save_overlay_dir,
     )
     worker.start()
     if USE_GUI:
@@ -1164,6 +1220,7 @@ def main():
                         gui_timer.bump()
                         continue
 
+
                 if not USE_GUI:
                     if not ticker.tick():
                         break
@@ -1176,7 +1233,7 @@ def main():
                 with gui_timer.span("gui.show"):
                     cv2.imshow(f"cam{cid}", vis)
                     e2e_ms = (time.time() - ts_capture) * 1000.0
-                    print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
+                    #print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
                     if not ticker.tick():
                         break
             gui_timer.bump()
