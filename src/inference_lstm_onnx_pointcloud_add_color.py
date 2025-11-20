@@ -315,20 +315,20 @@ def draw_pred_pseudo3d(
         cv2.fillPoly(overlay, [base], (0, 170, 240))  # 바닥면
         cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
 
-        # 옆면 수직 모서리: 앞부분은 빨간색, 나머지는 노란색
+        # 옆면 수직 모서리: 전부 동일한 색상으로 표시
+        edge_color = (0, 255, 255)
         for i in range(n):
-            color_edge = (0, 0, 255) if i in (idx_front1, idx_front2) else (0, 255, 255)
-            cv2.line(img, tuple(base[i]), tuple(top[i]), color_edge, 2)
+            cv2.line(img, tuple(base[i]), tuple(top[i]), edge_color, 2)
 
         # 바닥/윗면 외곽선: 기본은 노란색
         cv2.polylines(img, [base], True, (0, 255, 255), 2)
         cv2.polylines(img, [top],  True, (0, 255, 255), 2)
 
-        # 앞쪽 바닥/윗면 엣지는 빨간색으로 덮어쓰기
+        # 앞엣지도 동일한 색상(노란색)으로 유지
         bf1, bf2 = base[idx_front1], base[idx_front2]
         tf1, tf2 = top[idx_front1],  top[idx_front2]
-        cv2.line(img, tuple(bf1), tuple(bf2), (0, 0, 255), 3)  # 바닥 앞 엣지
-        cv2.line(img, tuple(tf1), tuple(tf2), (0, 0, 255), 3)  # 윗면 앞 엣지
+        cv2.line(img, tuple(bf1), tuple(bf2), edge_color, 3)  # 바닥 앞 엣지
+        cv2.line(img, tuple(tf1), tuple(tf2), edge_color, 3)  # 윗면 앞 엣지
 
         # --- 평균 색상을 pseudo-3D 박스 "위쪽"에 표시 (겹치지 않게) ---
         if mean_bgr is not None:

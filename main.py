@@ -347,7 +347,7 @@ class InferWorker(threading.Thread):
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
                  bev_scale=1.0, providers=None,
                  gui_queue=None, udp_sender=None, web_publisher=None,
-                 save_undist_dir=None, save_overlay_dir=None):
+                 save_image_root=None):
         super().__init__(daemon=True)
         self.streamer = streamer
         self.camera_assets = camera_assets
@@ -364,11 +364,13 @@ class InferWorker(threading.Thread):
         self.stop_evt = threading.Event()
         self.bev_scale = float(bev_scale)
         self.LUT_cache: Dict[int, Optional[dict]] = {cid: camera_assets[cid].lut for cid in self.cam_ids}
-        self.save_undist_dir = Path(save_undist_dir).expanduser().resolve() if save_undist_dir else None
-        self.save_overlay_dir = Path(save_overlay_dir).expanduser().resolve() if save_overlay_dir else None
-        for root in (self.save_undist_dir, self.save_overlay_dir):
-            if root is not None:
-                root.mkdir(parents=True, exist_ok=True)
+        self.save_dirs: Dict[str, Path] = {}
+        if save_image_root:
+            root = Path(save_image_root).expanduser().resolve()
+            for tag in ("raw", "undist", "overlay"):
+                tag_root = root / f"_{tag}"
+                tag_root.mkdir(parents=True, exist_ok=True)
+                self.save_dirs[tag] = tag_root
 
         if providers is None:
             providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
@@ -499,6 +501,7 @@ class InferWorker(threading.Thread):
                         break
                     with wrk.span("preproc"):
                         fr, ts_capture = fr
+                        self._save_image(fr, self.save_dirs.get("raw"), cid, ts_capture, "raw")
                         chw, bgr, orig_hw = self._preprocess(cid, fr)
                     imgs_chw[cid] = chw
                     frame_meta[cid] = {
@@ -535,7 +538,7 @@ class InferWorker(threading.Thread):
                 frame_bgr = meta.get("bgr")
                 orig_hw = meta.get("orig_hw", (self.H, self.W))
                 orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
-                self._save_image(frame_bgr, self.save_undist_dir, cid, capture_ts, "undist")
+                self._save_image(frame_bgr, self.save_dirs.get("undist"), cid, capture_ts, "undist")
                 with wrk.span("decode"):
                     dets = self._decode(outs)
 
@@ -583,7 +586,7 @@ class InferWorker(threading.Thread):
                     overlay_frame = pseudo3d
                 if overlay_frame is None:
                     overlay_frame = draw_detections(frame_bgr, dets)
-                self._save_image(overlay_frame, self.save_overlay_dir, cid, capture_ts, "overlay")
+                self._save_image(overlay_frame, self.save_dirs.get("overlay"), cid, capture_ts, "overlay")
 
                 if self.web_publisher is not None:
                     try:
@@ -1043,10 +1046,8 @@ def main():
     ap.add_argument("--target-fps", default=30, type=int)
     ap.add_argument("--no-gui", action="store_true",
                     help="Disable OpenCV visualization windows")
-    ap.add_argument("--save-undist-dir", type=str, default=None,
-                    help="Set to save undistorted per-camera frames into this directory")
-    ap.add_argument("--save-overlay-dir", type=str, default=None,
-                    help="Set to save overlay (prediction) frames into this directory")
+    ap.add_argument("--save-image-root", type=str, default=None,
+                    help="Set root dir to save frames; creates _raw/_undist/_overlay subfolders")
     # visualization scaling (shared across web/3d)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
     ap.add_argument("--fixed-length", type=float, default=4.4)
@@ -1181,8 +1182,7 @@ def main():
         gui_queue=gui_queue,
         udp_sender=udp_sender,
         web_publisher=web_bridge,
-        save_undist_dir=args.save_undist_dir,
-        save_overlay_dir=args.save_overlay_dir,
+        save_image_root=args.save_image_root,
     )
     worker.start()
     if USE_GUI:

@@ -678,7 +678,7 @@ class RealtimeFusionServer:
         local_ply_dir: Optional[str] = None,
         local_lut_dir: Optional[str] = None,
         fps: float = 10.0,
-        iou_cluster_thr: float = 0.25,
+        iou_cluster_thr: float = 0.01,
         single_port: int = 50050,
         tx_host: Optional[str] = None, tx_port: int = 60050, tx_protocol: str = "udp",
         carla_host: Optional[str] = None, carla_port: int = 61000,
@@ -702,6 +702,7 @@ class RealtimeFusionServer:
         self.color_bias_strength = 0.3
         self.color_bias_min_votes = 2
         delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.08)
+        delta = 0.5
         self.color_cluster_bonus = delta
         self.color_cluster_penalty = delta
 
@@ -745,7 +746,7 @@ class RealtimeFusionServer:
         self.buffer: Dict[str, deque] = {cam: deque(maxlen=1) for cam in cam_ports.keys()}
 
         # 추적기
-        self.tracker = SortTracker(max_age=10, min_hits=3, iou_threshold=0.15) 
+        self.tracker = SortTracker(max_age=10, min_hits=3, iou_threshold=0.01)
         self._log_interval = 1.0
         self._next_log_ts = 0.0
 
@@ -822,8 +823,8 @@ class RealtimeFusionServer:
             for det in fused:
                 det_rows.append([
                     0,
-                    -det["cx"],
-                    -det["cy"],
+                    det["cx"],
+                    det["cy"],
                     (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
                     det["yaw"],
@@ -1116,7 +1117,7 @@ def main():
     ap.add_argument("--local-lut-dir", default="outputs",
                     help="카메라별 LUT(npz)를 탐색할 디렉토리(패턴: cam_<id>_*.npz)")
     ap.add_argument("--fps", type=float, default=30.0)
-    ap.add_argument("--iou-thr", type=float, default=0.25)
+    ap.add_argument("--iou-thr", type=float, default=0.01)
     ap.add_argument("--roll-secs", type=int, default=60)
     ap.add_argument("--roll-max-rows", type=int, default=1000)
     ap.add_argument("--udp-port", type=int, default=50050) # main에서 받을 때
@@ -1125,10 +1126,10 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="pointcloud/global_fused_small.ply")
+    ap.add_argument("--global-ply", default="real_global_ply.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
-    ap.add_argument("--web-port", type=int, default=18090)
+    ap.add_argument("--web-port", type=int, default=18092)
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--tracker-fixed-length", type=float, default=None)
     ap.add_argument("--tracker-fixed-width", type=float, default=None)
