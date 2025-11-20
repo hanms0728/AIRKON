@@ -1041,6 +1041,8 @@ def main():
                     help="Override the width value in UDP payloads when set")
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
+    ap.add_argument("--no-gui", action="store_true",
+                    help="Disable OpenCV visualization windows")
     ap.add_argument("--save-undist-dir", type=str, default=None,
                     help="Set to save undistorted per-camera frames into this directory")
     ap.add_argument("--save-overlay-dir", type=str, default=None,
@@ -1080,6 +1082,8 @@ def main():
         except Exception:
             return False
     USE_GUI = gui_available()
+    if args.no_gui:
+        USE_GUI = False
 
     # 웹
     viz_cfg = VizSizeConfig(
@@ -1227,7 +1231,7 @@ def main():
                     vis = np.zeros((H, W, 3), dtype=np.uint8)
 
                 with gui_timer.span("gui.show"):
-                    #cv2.imshow(f"cam{cid}", vis)
+                    cv2.imshow(f"cam{cid}", vis)
                     e2e_ms = (time.time() - ts_capture) * 1000.0
                     #print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
                     if not ticker.tick():
