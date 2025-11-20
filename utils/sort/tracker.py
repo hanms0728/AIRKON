@@ -22,6 +22,8 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
 # 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
 # 최소 이동량(미터 단위 추정). 이보다 작으면 정지로 간주해 yaw 보정 생략
 FORWARD_HEADING_MIN_DIST = 0.1
+# SORT 보정: 감지 yaw가 추정 yaw과 너무 반대면 180° 뒤집어서 사용
+YAW_SORT_CORRECTION_THRESHOLD = 150.0  # deg
 
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
@@ -172,7 +174,9 @@ class Track:
 
         self.kf_pos.update(measurement[1:3].reshape((2, 1)))
 
-        yaw_meas = nearest_equivalent_deg(measurement[5], self.kf_yaw.x[0, 0])
+        yaw_det = float(measurement[5])
+        yaw_det = self._align_measurement_yaw(yaw_det)
+        yaw_meas = nearest_equivalent_deg(yaw_det, self.kf_yaw.x[0, 0])
         self.kf_yaw.update(np.array([[yaw_meas]]))
         self.car_yaw = wrap_deg(self.kf_yaw.x[0, 0])
         self.kf_yaw.x[0, 0] = self.car_yaw
@@ -200,6 +204,16 @@ class Track:
         self.color_counts[normalized] += 1
         self.total_color_votes += 1
         self.current_color = self.color_counts.most_common(1)[0][0]
+
+    def _align_measurement_yaw(self, yaw_det: float) -> float:
+        """
+        SORT 보정: 검출 yaw가 추적 yaw과 거의 정반대면 180° 뒤집어 정/역방향 혼동 보정.
+        """
+        ref_yaw = float(self.car_yaw)
+        diff = wrap_deg(yaw_det - ref_yaw)
+        if abs(diff) > YAW_SORT_CORRECTION_THRESHOLD:
+            yaw_det = wrap_deg(yaw_det - math.copysign(180.0, diff))
+        return yaw_det
 
     def get_color(self) -> Optional[str]:
         return self.current_color
