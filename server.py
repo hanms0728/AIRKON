@@ -444,7 +444,7 @@ class RealtimeFusionServer:
         single_port: int = 50050,
         tx_host: Optional[str] = None, tx_port: int = 60050, tx_protocol: str = "udp",
         carla_host: Optional[str] = None, carla_port: int = 61000,
-        global_ply: str = "pointcloud/global_fused_small.ply",
+        global_ply: str = "real_global_ply.ply",
         vehicle_glb: str = "pointcloud/car.glb",
         web_host: str = "0.0.0.0",
         web_port: int = 18090,
@@ -463,7 +463,8 @@ class RealtimeFusionServer:
         self.active_cams = set()
         self.color_bias_strength = 0.3
         self.color_bias_min_votes = 2
-        delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.08)
+        # delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.08)
+        delta = 1
         self.color_cluster_bonus = delta
         self.color_cluster_penalty = delta
 
@@ -862,7 +863,7 @@ def main():
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051")
     ap.add_argument("--cam-positions-json", default="camera_position.json")
     ap.add_argument("--fps", type=float, default=30.0)
-    ap.add_argument("--iou-thr", type=float, default=0.25)
+    ap.add_argument("--iou-thr", type=float, default=0.01)
     ap.add_argument("--roll-secs", type=int, default=60)
     ap.add_argument("--roll-max-rows", type=int, default=1000)
     ap.add_argument("--udp-port", type=int, default=50050) # main에서 받을 때
@@ -871,10 +872,10 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="pointcloud/global_fused_small.ply")
+    ap.add_argument("--global-ply", default="real_global_ply.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
-    ap.add_argument("--web-port", type=int, default=18090)
+    ap.add_argument("--web-port", type=int, default=18091)
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--tracker-fixed-length", type=float, default=None)
     ap.add_argument("--tracker-fixed-width", type=float, default=None)
@@ -887,7 +888,7 @@ def main():
                     help="size-mode=mesh 일 때 GLB에 곱할 유니폼 스케일")
     ap.add_argument("--mesh-height", type=float, default=0.0,
                     help="size-mode=mesh 일 때 지면 높이 계산용 높이(0이면 mesh-scale 사용)")
-    ap.add_argument("--z-offset", type=float, default=0.0,
+    ap.add_argument("--z-offset", type=float, default=3.0,
                     help="모든 박스에 추가할 z 오프셋")
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")

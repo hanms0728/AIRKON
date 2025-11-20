@@ -168,7 +168,7 @@ def run_multi_cameras():
 
     cams = [
         {"cam_name": "cam1", "ip": "192.168.0.32", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam1"},
-        #{"cam_name": "cam2", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2"},
+        {"cam_name": "cam2", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2"},
         {"cam_name": "cam3", "ip": "192.168.0.29", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam3"},
         {"cam_name": "cam4", "ip": "192.168.0.27", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam4"},
         {"cam_name": "cam5", "ip": "192.168.0.36", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam5"},
