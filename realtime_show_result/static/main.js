@@ -1085,25 +1085,46 @@ function updateViewLockAnimation() {
     camera.up.set(0, 0, 1);
     camera.lookAt(tmpViewTarget);
     if (progress >= 1) {
+        const onComplete = anim.onComplete;
         state.viewLockAnimation = null;
+        if (typeof onComplete === "function") {
+            onComplete();
+        }
     }
 }
 
-function releaseViewLock() {
+function releaseViewLock(options = {}) {
+    const animate = Boolean(options.animate);
+    const backup = state.viewLockBackup;
     state.viewLockAnimation = null;
-    if (!state.viewLockBackup) {
+    if (!backup) {
         return;
     }
-    const backup = state.viewLockBackup;
-    controls.enabled = backup.controlsEnabled;
-    controls.enableRotate = backup.enableRotate;
-    controls.enableZoom = backup.enableZoom;
-    controls.enablePan = backup.enablePan;
-    camera.position.copy(backup.cameraPos);
-    controls.target.copy(backup.target);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(backup.target);
-    state.viewLockBackup = null;
+    const restoreView = () => {
+        controls.enabled = backup.controlsEnabled;
+        controls.enableRotate = backup.enableRotate;
+        controls.enableZoom = backup.enableZoom;
+        controls.enablePan = backup.enablePan;
+        camera.position.copy(backup.cameraPos);
+        controls.target.copy(backup.target);
+        camera.up.set(0, 0, 1);
+        camera.lookAt(backup.target);
+        state.viewLockBackup = null;
+    };
+    const duration = Math.max(0, Number(state.config?.markerViewDurationMs ?? 800));
+    if (!animate || duration === 0) {
+        restoreView();
+        return;
+    }
+    state.viewLockAnimation = {
+        start: performance.now(),
+        duration,
+        fromPos: camera.position.clone(),
+        fromTarget: controls.target.clone(),
+        toPos: backup.cameraPos.clone(),
+        toTarget: backup.target.clone(),
+        onComplete: restoreView,
+    };
 }
 
 function buildGlobalColorLookup(geometry) {
@@ -1381,7 +1402,8 @@ function setLocalCloudVisibility(activeKey) {
     }
 }
 
-function resetToGlobalView() {
+function resetToGlobalView(options = {}) {
+    const animate = Boolean(options.animate);
     state.activeMarkerKey = null;
     state.localLoadToken += 1;
     updateMarkerHighlight(null);
@@ -1389,7 +1411,7 @@ function resetToGlobalView() {
     if (state.globalCloud) {
         state.globalCloud.visible = true;
     }
-    releaseViewLock();
+    releaseViewLock({ animate });
 }
 
 function updateMarkerHighlight(activeKey) {
@@ -1460,7 +1482,8 @@ function performMarkerHitTest(clientX, clientY) {
 
 function handleGlobalKeydown(evt) {
     if (evt.key === "Escape") {
-        resetToGlobalView();
+        const animate = Boolean(state.viewLockBackup);
+        resetToGlobalView({ animate });
     }
 }
 
