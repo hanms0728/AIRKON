@@ -19,6 +19,7 @@ const nextBtn = document.getElementById("next-btn");
 const cameraSelectEl = document.getElementById("camera-select");
 const statusEl = document.getElementById("status");
 const overlayImgEl = document.getElementById("overlay-img");
+const overlayPlaceholderEl = document.getElementById("overlay-placeholder");
 
 const state = {
     mode,
@@ -54,7 +55,30 @@ const state = {
     globalColorLookup: null,
     viewLockBackup: null,
     viewLockAnimation: null,
+    liveCameraSwitchToken: 0,
+    layoutMode: "global",
 };
+
+setLayoutMode("global");
+
+function setLayoutMode(mode) {
+    if (!(isLive || isFusion)) {
+        return;
+    }
+    const body = document.body;
+    if (!body) {
+        return;
+    }
+    const nextMode = mode === "local" ? "local" : "global";
+    if (state.layoutMode === nextMode) {
+        return;
+    }
+    state.layoutMode = nextMode;
+    const isLocal = nextMode === "local";
+    body.classList.toggle("local-mode", isLocal);
+    body.classList.toggle("global-mode", !isLocal);
+    handleResize();
+}
 
 // const COLOR_PALETTE = {
 //     red: "#ff4d4f",
@@ -221,23 +245,28 @@ async function initLiveMode() {
     }
 
     try {
-        state.cameras = await fetchJson("/api/cameras");
+        const cameraPayload = await fetchJson("/api/cameras");
+        state.cameras = Array.isArray(cameraPayload) ? cameraPayload : [];
     } catch (err) {
         console.error(err);
         alert("Failed to load camera list. Edge bridge running?");
         return;
     }
 
-    populateCameraSelect();
+    const hasCameras = state.cameras.length > 0;
+    enterLiveGlobalView({
+        placeholder: hasCameras ? "Click a camera marker to view" : "No camera available",
+        status: hasCameras ? "Global view" : "No camera available",
+    });
 
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
     setupCameraMarkers(state.site?.camera_positions || []);
 
-    if (state.cameraId != null) {
-        await loadVisibleCloudForCamera(state.cameraId);
-        startLivePolling();
-    } else if (statusEl) {
-        statusEl.textContent = "No camera available";
+    if (!state.cameraMarkers.length && hasCameras) {
+        const firstId = Number(state.cameras[0].camera_id);
+        if (Number.isFinite(firstId)) {
+            await selectLiveCamera(firstId, { loadingMessage: `cam${firstId} loading... (no markers)` });
+        }
     }
 }
 
@@ -798,13 +827,10 @@ function setupFusionCameraSelect() {
     const cameras = Array.isArray(state.cameras) ? state.cameras : [];
     stopFusionOverlayPolling();
     if (!cameraSelectEl) {
-        const first = cameras.length ? cameras[0].camera_id : null;
-        state.cameraId = Number.isFinite(first) ? first : null;
-        if (state.cameraId != null) {
-            startFusionOverlayPolling();
-        } else if (overlayImgEl) {
-            overlayImgEl.removeAttribute("src");
-        }
+        const hasCameras = cameras.length > 0;
+        enterFusionGlobalView({
+            placeholder: hasCameras ? "Click a camera marker to view" : "No camera available",
+        });
         return;
     }
     cameraSelectEl.innerHTML = "";
@@ -814,9 +840,7 @@ function setupFusionCameraSelect() {
         cameraSelectEl.appendChild(opt);
         cameraSelectEl.disabled = true;
         state.cameraId = null;
-        if (overlayImgEl) {
-            overlayImgEl.removeAttribute("src");
-        }
+        enterFusionGlobalView({ placeholder: "No camera available" });
         return;
     }
     cameras.forEach((cam, idx) => {
@@ -830,12 +854,47 @@ function setupFusionCameraSelect() {
     });
     cameraSelectEl.disabled = false;
     const initial = Number(cameraSelectEl.value);
-    state.cameraId = Number.isFinite(initial) ? initial : null;
+    const initialId = Number.isFinite(initial) ? initial : null;
     cameraSelectEl.onchange = () => {
         const next = Number(cameraSelectEl.value);
-        state.cameraId = Number.isFinite(next) ? next : null;
-        startFusionOverlayPolling();
+        if (Number.isFinite(next)) {
+            selectFusionCamera(next);
+        } else {
+            enterFusionGlobalView();
+        }
     };
+    if (initialId == null) {
+        enterFusionGlobalView();
+    } else {
+        selectFusionCamera(initialId);
+    }
+}
+
+function enterFusionGlobalView(options = {}) {
+    if (!isFusion) {
+        return;
+    }
+    setLayoutMode("global");
+    state.cameraId = null;
+    stopFusionOverlayPolling();
+    const hasCameras = Array.isArray(state.cameras) && state.cameras.length > 0;
+    const placeholder = options.placeholder || (hasCameras ? "Click a camera marker to view" : "No camera available");
+    showOverlayPlaceholder(placeholder);
+}
+
+function selectFusionCamera(camId) {
+    if (!isFusion) {
+        return;
+    }
+    const numericId = Number(camId);
+    if (!Number.isFinite(numericId)) {
+        return;
+    }
+    if (state.cameraId === numericId && state.overlayPollingHandle) {
+        return;
+    }
+    state.cameraId = numericId;
+    showOverlayPlaceholder(`cam${numericId} loading...`);
     startFusionOverlayPolling();
 }
 
@@ -843,16 +902,16 @@ function startFusionOverlayPolling() {
     if (!isFusion) {
         return;
     }
+    setLayoutMode("local");
     stopFusionOverlayPolling();
     if (state.cameraId == null || !overlayImgEl) {
+        enterFusionGlobalView();
         return;
     }
     const overlayConfigured = typeof state.config?.overlayBaseUrl === "string"
         && state.config.overlayBaseUrl.trim().length > 0;
     if (!overlayConfigured) {
-        if (overlayImgEl) {
-            overlayImgEl.removeAttribute("src");
-        }
+        showOverlayPlaceholder("Camera overlay unavailable", { skipToken: true });
         return;
     }
     const tick = () => {
@@ -869,37 +928,101 @@ function stopFusionOverlayPolling() {
     }
 }
 
-function populateCameraSelect() {
-    if (!cameraSelectEl) {
-        state.cameraId = state.cameras.length ? state.cameras[0].camera_id : null;
+function enterLiveGlobalView(options = {}) {
+    if (!isLive) {
         return;
     }
-    cameraSelectEl.innerHTML = "";
-    if (!state.cameras.length) {
-        const opt = document.createElement("option");
-        opt.textContent = "No cameras";
-        cameraSelectEl.appendChild(opt);
-        cameraSelectEl.disabled = true;
-        state.cameraId = null;
+    setLayoutMode("global");
+    state.liveCameraSwitchToken += 1;
+    stopLivePolling();
+    state.cameraId = null;
+    setVisibleMeshesVisibility(false, null);
+    if (state.globalCloud) {
+        state.globalCloud.visible = true;
+    }
+    renderDetections([]);
+    const hasCameras = Array.isArray(state.cameras) && state.cameras.length > 0;
+    const placeholderText = options.placeholder || (hasCameras ? "Click a camera marker to view" : "No camera available");
+    if (statusEl) {
+        statusEl.textContent = options.status || (hasCameras ? "Global view" : "No camera available");
+    }
+    showOverlayPlaceholder(placeholderText);
+}
+
+async function selectLiveCamera(camId, options = {}) {
+    if (!isLive) {
         return;
     }
-    state.cameras.forEach((cam, idx) => {
-        const opt = document.createElement("option");
-        opt.value = cam.camera_id;
-        opt.textContent = `${cam.camera_id} — ${cam.name || "camera"}`;
-        if (idx === 0) {
-            opt.selected = true;
-        }
-        cameraSelectEl.appendChild(opt);
-    });
-    cameraSelectEl.disabled = false;
-    state.cameraId = Number(cameraSelectEl.value);
-    cameraSelectEl.addEventListener("change", async () => {
-        state.cameraId = Number(cameraSelectEl.value);
-        stopLivePolling();
-        await loadVisibleCloudForCamera(state.cameraId);
-        startLivePolling();
-    });
+    const numericId = Number(camId);
+    if (!Number.isFinite(numericId)) {
+        return;
+    }
+    if (state.cameraId === numericId && state.pollingHandle) {
+        return;
+    }
+    stopLivePolling();
+    setLayoutMode("local");
+    state.cameraId = numericId;
+    state.liveCameraSwitchToken += 1;
+    const token = state.liveCameraSwitchToken;
+    setVisibleMeshesVisibility(false, null);
+    if (state.globalCloud) {
+        state.globalCloud.visible = true;
+    }
+    renderDetections([]);
+    const loadingMessage = options.loadingMessage || `cam${numericId} loading...`;
+    showOverlayPlaceholder(loadingMessage);
+    if (statusEl) {
+        statusEl.textContent = `cam${numericId} | loading...`;
+    }
+    try {
+        await loadVisibleCloudForCamera(numericId);
+    } catch (err) {
+        console.warn(`visible cloud load failed for cam${numericId}`, err);
+    }
+    if (token !== state.liveCameraSwitchToken) {
+        return;
+    }
+    startLivePolling();
+    updateOverlayImage(numericId);
+}
+
+function clearOverlayImage() {
+    if (state.overlayUrl) {
+        URL.revokeObjectURL(state.overlayUrl);
+        state.overlayUrl = null;
+    }
+    if (overlayImgEl) {
+        overlayImgEl.removeAttribute("src");
+    }
+}
+
+function showOverlayPlaceholder(message = "No camera selected", options = {}) {
+    if (!overlayImgEl) {
+        return;
+    }
+    const { skipToken = false } = options;
+    if (!skipToken) {
+        state.overlayToken += 1;
+    }
+    clearOverlayImage();
+    overlayImgEl.style.display = "none";
+    if (overlayPlaceholderEl) {
+        overlayPlaceholderEl.textContent = message;
+        overlayPlaceholderEl.style.display = "flex";
+    } else {
+        overlayImgEl.alt = message;
+    }
+}
+
+function showOverlayImage() {
+    if (!overlayImgEl) {
+        return;
+    }
+    overlayImgEl.style.display = "block";
+    if (overlayPlaceholderEl) {
+        overlayPlaceholderEl.style.display = "none";
+    }
 }
 
 function startLivePolling() {
@@ -992,11 +1115,18 @@ function buildOverlayRequestUrl(camId) {
 }
 
 function updateOverlayImage(camId = state.cameraId) {
-    if (!overlayImgEl || camId == null) return;
+    if (!overlayImgEl) {
+        return;
+    }
+    if (camId == null) {
+        clearOverlayImage();
+        return;
+    }
     state.overlayToken += 1;
     const token = state.overlayToken;
     const requestUrl = buildOverlayRequestUrl(camId);
     if (!requestUrl) {
+        showOverlayPlaceholder("Camera overlay unavailable", { skipToken: true });
         return;
     }
     fetch(requestUrl, { cache: "no-store" })
@@ -1015,6 +1145,7 @@ function updateOverlayImage(camId = state.cameraId) {
             }
             state.overlayUrl = URL.createObjectURL(blob);
             overlayImgEl.src = state.overlayUrl;
+            showOverlayImage();
         })
         .catch(() => {
             /* ignore */ 
@@ -1507,12 +1638,29 @@ function handleMarkerClick(marker) {
     if (!marker) {
         return;
     }
+    const markerCamId = marker.camera_id ?? marker.id ?? marker.cameraId;
+    const numericCamId = Number(markerCamId);
     if (state.activeMarkerKey === marker.key) {
         resetToGlobalView();
+        if (isLive) {
+            enterLiveGlobalView();
+        } else if (isFusion) {
+            enterFusionGlobalView();
+        }
         return;
     }
     state.activeMarkerKey = marker.key;
     updateMarkerHighlight(marker.key);
+    if (isLive || isFusion) {
+        setLayoutMode("local");
+    }
+    if (Number.isFinite(numericCamId)) {
+        if (isLive) {
+            selectLiveCamera(numericCamId);
+        } else if (isFusion) {
+            selectFusionCamera(numericCamId);
+        }
+    }
     if (!marker.local_ply_url && !marker.local_visible_url) {
         lockViewToMarker(marker);
         if (statusEl) statusEl.textContent = `${marker.name || marker.key} | local cloud unavailable`;
@@ -1561,6 +1709,11 @@ async function showLocalCloudForMarker(marker) {
         console.warn("local cloud load failed", err);
         if (statusEl) statusEl.textContent = `Local cloud error: ${err?.message || err}`;
         resetToGlobalView();
+        if (isLive) {
+            enterLiveGlobalView();
+        } else if (isFusion) {
+            enterFusionGlobalView();
+        }
     }
 }
 
@@ -1575,6 +1728,9 @@ function setLocalCloudVisibility(activeKey) {
 
 function resetToGlobalView(options = {}) {
     const animate = Boolean(options.animate);
+    if (isLive || isFusion) {
+        setLayoutMode("global");
+    }
     state.activeMarkerKey = null;
     state.localLoadToken += 1;
     updateMarkerHighlight(null);
@@ -1655,6 +1811,11 @@ function handleGlobalKeydown(evt) {
     if (evt.key === "Escape") {
         const animate = Boolean(state.viewLockBackup);
         resetToGlobalView({ animate });
+        if (isLive) {
+            enterLiveGlobalView();
+        } else if (isFusion) {
+            enterFusionGlobalView();
+        }
     }
 }
 
