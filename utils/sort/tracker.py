@@ -9,7 +9,7 @@ import pandas as pd
 from filterpy.kalman import KalmanFilter
 from scipy.optimize import linear_sum_assignment
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
 VALID_COLORS = {color: color for color in COLOR_LABELS}
 
 
@@ -21,9 +21,14 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
 
 # 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
 # 최소 이동량(미터 단위 추정). 이보다 작으면 정지로 간주해 yaw 보정 생략
-FORWARD_HEADING_MIN_DIST = 0.1
+FORWARD_HEADING_MIN_DIST = 0.3
 # SORT 보정: 감지 yaw가 추정 yaw과 너무 반대면 180° 뒤집어서 사용
 YAW_SORT_CORRECTION_THRESHOLD = 150.0  # deg
+# 검출 yaw를 180° 주기로만 신뢰(앞/뒤 동일)하고, 이동 방향으로 부호를 고정하기 위한 파라미터
+HEADING_LOCK_ANGLE_THR = 45.0
+HEADING_UNLOCK_ANGLE_THR = 140.0
+HEADING_LOCK_FRAMES = 2
+HEADING_ALIGN_MIN_DIST = 0.3
 
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
@@ -143,6 +148,11 @@ class Track:
         self.total_color_votes = 0
         self._update_color(color)
 
+        # 이동 방향 기반 yaw 부호 고정용 상태
+        self.heading_locked: bool = False
+        self.heading_lock_score: int = 0
+        self.locked_heading: Optional[float] = None
+
     def _init_2d_kf(self, initial_value: float, Q_scale: float = 0.1, R_scale: float = 1.0) -> KalmanFilter:
         kf = KalmanFilter(dim_x=2, dim_z=1)
         kf.F = np.array([[1, 1], [0, 1]])
@@ -175,8 +185,8 @@ class Track:
         self.kf_pos.update(measurement[1:3].reshape((2, 1)))
 
         yaw_det = float(measurement[5])
-        yaw_det = self._align_measurement_yaw(yaw_det)
-        yaw_meas = nearest_equivalent_deg(yaw_det, self.kf_yaw.x[0, 0])
+        yaw_det = self._align_measurement_yaw(yaw_det, measurement[1:3])
+        yaw_meas = nearest_equivalent_deg(yaw_det, self.kf_yaw.x[0, 0], period=180.0)
         self.kf_yaw.update(np.array([[yaw_meas]]))
         self.car_yaw = wrap_deg(self.kf_yaw.x[0, 0])
         self.kf_yaw.x[0, 0] = self.car_yaw
@@ -205,15 +215,60 @@ class Track:
         self.total_color_votes += 1
         self.current_color = self.color_counts.most_common(1)[0][0]
 
-    def _align_measurement_yaw(self, yaw_det: float) -> float:
+    def _compute_heading_from_motion(self, meas_xy: np.ndarray) -> Optional[float]:
         """
-        SORT 보정: 검출 yaw가 추적 yaw과 거의 정반대면 180° 뒤집어 정/역방향 혼동 보정.
+        이동 벡터로부터 heading(rad) → deg 반환. 이동량이 충분치 않으면 None.
         """
-        ref_yaw = float(self.car_yaw)
-        diff = wrap_deg(yaw_det - ref_yaw)
-        if abs(diff) > YAW_SORT_CORRECTION_THRESHOLD:
-            yaw_det = wrap_deg(yaw_det - math.copysign(180.0, diff))
-        return yaw_det
+        if self.last_pos is None:
+            return None
+        dx = float(meas_xy[0] - self.last_pos[0])
+        dy = float(meas_xy[1] - self.last_pos[1])
+        dist = math.hypot(dx, dy)
+        if dist < HEADING_ALIGN_MIN_DIST:
+            return None
+        return wrap_deg(math.degrees(math.atan2(dy, dx)))
+
+    def _align_measurement_yaw(self, yaw_det: float, meas_xy: np.ndarray) -> float:
+        """
+        검출 yaw는 앞/뒤가 뒤바뀌기 쉬우므로 180° 주기로만 신뢰하고,
+        이동 방향(heading)과 가장 가까운 부호로 고정한다.
+        """
+        yaw_det = wrap_deg(yaw_det)
+        # 1) 기존 상태와 180° 주기 기준으로 가깝게 정규화(앞/뒤 동일하게 취급)
+        yaw_det = nearest_equivalent_deg(yaw_det, self.car_yaw, period=180.0)
+
+        heading = self._compute_heading_from_motion(meas_xy)
+        if heading is None:
+            # 이동이 거의 없으면 잠정적으로 상태 근처로만 클램프
+            if self.heading_locked and self.locked_heading is not None:
+                return nearest_equivalent_deg(yaw_det, self.locked_heading, period=180.0)
+            return yaw_det
+
+        # 2) 이동 방향과 가장 가까운 부호 선택(180° 주기)
+        yaw_heading = nearest_equivalent_deg(yaw_det, heading, period=180.0)
+        diff = abs(wrap_deg(yaw_heading - heading))
+
+        # 3) heading 일관성 점수로 잠금/해제 판단
+        if diff <= HEADING_LOCK_ANGLE_THR:
+            self.heading_lock_score = min(self.heading_lock_score + 1, HEADING_LOCK_FRAMES)
+        else:
+            self.heading_lock_score = max(self.heading_lock_score - 1, 0)
+
+        if not self.heading_locked and self.heading_lock_score >= HEADING_LOCK_FRAMES:
+            self.heading_locked = True
+            self.locked_heading = heading
+        elif self.heading_locked:
+            if diff > HEADING_UNLOCK_ANGLE_THR:
+                self.heading_locked = False
+                self.heading_lock_score = 0
+                self.locked_heading = None
+            else:
+                # 잠금 상태에서는 heading을 따라가되 180° 주기로만 조정
+                self.locked_heading = heading
+
+        if self.heading_locked and self.locked_heading is not None:
+            return nearest_equivalent_deg(yaw_heading, self.locked_heading, period=180.0)
+        return yaw_heading
 
     def get_color(self) -> Optional[str]:
         return self.current_color
@@ -234,6 +289,10 @@ class Track:
         ], dtype=float)
 
     def _enforce_forward_heading(self, current_xy): # 이동방향과 yaw 맞추기
+        if self.heading_locked:
+            # 방향이 잠겨 있으면 좌표만 기록하고 별도의 뒤집기 생략
+            self.last_pos = np.array(current_xy, dtype=float)
+            return
         if self.last_pos is None:
             self.last_pos = np.array(current_xy, dtype=float)
             return

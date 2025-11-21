@@ -11,6 +11,7 @@ COLOR_HEX_MAP = {
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
     "purple": "#781de7",
+    "black": "#000000",
 }
 
 DEFAULT_COLOR_LABEL = "white"

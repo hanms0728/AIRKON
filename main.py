@@ -40,7 +40,7 @@ class CameraAssets:
     visible_source: Optional[str]
     raw_config: Dict
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
 _COLOR_HUE_BANDS = (
     ("red", 0.0, 40.0),
@@ -79,8 +79,11 @@ def _classify_hex_color(hex_color: Optional[str]):
         return None, 0.0, None
     h, s, v = colorsys.rgb_to_hsv(*rgb)
     h_deg = (h * 360.0) % 360.0
-    if v < 0.2:
-        return None, 0.0, None
+    if v < 0.18:  # very dark -> black
+        confidence = float(max(0.0, min(1.0, (0.18 - v) / 0.18)))
+        embedding = [0.0] * len(COLOR_LABELS)
+        embedding[_COLOR_LABEL_TO_INDEX["black"]] = confidence
+        return "black", confidence, embedding
 
     if v >= 0.65 and s <= 0.25:
         sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))
@@ -1233,7 +1236,7 @@ def main():
                 with gui_timer.span("gui.show"):
                     cv2.imshow(f"cam{cid}", vis)
                     e2e_ms = (time.time() - ts_capture) * 1000.0
-                    #print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
+                    print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
                     if not ticker.tick():
                         break
             gui_timer.bump()

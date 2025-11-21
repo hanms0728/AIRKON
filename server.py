@@ -21,7 +21,7 @@ from utils.merge.merge_dist_wbf import (
 from utils.sort.tracker import SortTracker
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
 VALID_COLORS = {color: color for color in COLOR_LABELS}
 COLOR_HEX_MAP = {
     "red": "#f52629",
@@ -30,6 +30,7 @@ COLOR_HEX_MAP = {
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
     "purple": "#781de7",
+    "black": "#000000",
 }
 
 
@@ -872,10 +873,10 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="real_global_ply.ply")
+    ap.add_argument("--global-ply", default="pointcloud/global_fused_small.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
-    ap.add_argument("--web-port", type=int, default=18091)
+    ap.add_argument("--web-port", type=int, default=18092)
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--tracker-fixed-length", type=float, default=None)
     ap.add_argument("--tracker-fixed-width", type=float, default=None)
@@ -888,7 +889,7 @@ def main():
                     help="size-mode=mesh 일 때 GLB에 곱할 유니폼 스케일")
     ap.add_argument("--mesh-height", type=float, default=0.0,
                     help="size-mode=mesh 일 때 지면 높이 계산용 높이(0이면 mesh-scale 사용)")
-    ap.add_argument("--z-offset", type=float, default=3.0,
+    ap.add_argument("--z-offset", type=float, default=4.0,
                     help="모든 박스에 추가할 z 오프셋")
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")
