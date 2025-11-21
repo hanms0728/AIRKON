@@ -21,7 +21,7 @@ from utils.merge.merge_dist_wbf import (
 from utils.sort.tracker import SortTracker
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 VALID_COLORS = {color: color for color in COLOR_LABELS}
 COLOR_HEX_MAP = {
     "red": "#f52629",
@@ -29,8 +29,7 @@ COLOR_HEX_MAP = {
     "green": "#48ad0d",
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
-    "purple": "#781de7",
-    "black": "#000000",
+    "purple": "#781de7"
 }
 
 

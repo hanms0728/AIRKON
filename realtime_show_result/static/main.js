@@ -1006,6 +1006,16 @@ function formatDetectionListEntry(det, idx) {
     if (det.score != null) {
         tags.push(`score ${(Number(det.score) || 0).toFixed(2)}`);
     }
+    const colorLabel = typeof det.color === "string" ? det.color.trim() : "";
+    const colorHex = typeof det.color_hex === "string"
+        ? det.color_hex.trim()
+        : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
+    if (colorLabel || colorHex) {
+        const colorText = colorLabel && colorHex
+            ? `${colorLabel} (${colorHex})`
+            : (colorLabel || colorHex);
+        tags.push(`color ${colorText}`);
+    }
     const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
     return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
