@@ -152,6 +152,9 @@ class Track:
         self.heading_locked: bool = False
         self.heading_lock_score: int = 0
         self.locked_heading: Optional[float] = None
+        # 초기 자동 yaw 정렬 후에는 수동 명령으로만 변경
+        self.auto_yaw_active: bool = True
+        self.fixed_yaw: Optional[float] = None
 
     def _init_2d_kf(self, initial_value: float, Q_scale: float = 0.1, R_scale: float = 1.0) -> KalmanFilter:
         kf = KalmanFilter(dim_x=2, dim_z=1)
@@ -233,6 +236,8 @@ class Track:
         검출 yaw는 앞/뒤가 뒤바뀌기 쉬우므로 180° 주기로만 신뢰하고,
         이동 방향(heading)과 가장 가까운 부호로 고정한다.
         """
+        if not self.auto_yaw_active and self.fixed_yaw is not None:
+            return self.fixed_yaw
         yaw_det = wrap_deg(yaw_det)
         # 1) 기존 상태와 180° 주기 기준으로 가깝게 정규화(앞/뒤 동일하게 취급)
         yaw_det = nearest_equivalent_deg(yaw_det, self.car_yaw, period=180.0)
@@ -247,6 +252,13 @@ class Track:
         # 2) 이동 방향과 가장 가까운 부호 선택(180° 주기)
         yaw_heading = nearest_equivalent_deg(yaw_det, heading, period=180.0)
         diff = abs(wrap_deg(yaw_heading - heading))
+        if self.auto_yaw_active:
+            self.fixed_yaw = wrap_deg(yaw_heading)
+            self.auto_yaw_active = False
+            self.heading_locked = False
+            self.heading_lock_score = 0
+            self.locked_heading = None
+            return self.fixed_yaw
 
         # 3) heading 일관성 점수로 잠금/해제 판단
         if diff <= HEADING_LOCK_ANGLE_THR:
@@ -289,6 +301,9 @@ class Track:
         ], dtype=float)
 
     def _enforce_forward_heading(self, current_xy): # 이동방향과 yaw 맞추기
+        if not self.auto_yaw_active:
+            self.last_pos = np.array(current_xy, dtype=float)
+            return
         if self.heading_locked:
             # 방향이 잠겨 있으면 좌표만 기록하고 별도의 뒤집기 생략
             self.last_pos = np.array(current_xy, dtype=float)
@@ -306,6 +321,18 @@ class Track:
                 self.car_yaw = wrap_deg(self.car_yaw - 180.0)
                 self.kf_yaw.x[0, 0] = self.car_yaw
         self.last_pos = np.array(current_xy, dtype=float)
+
+    def force_flip_yaw(self, offset_deg: float = 180.0) -> None:
+        """
+        외부 명령으로 yaw를 강제 뒤집을 때 사용. heading 잠금은 해제한다.
+        """
+        self.car_yaw = wrap_deg(self.car_yaw + offset_deg)
+        self.kf_yaw.x[0, 0] = self.car_yaw
+        self.heading_locked = False
+        self.heading_lock_score = 0
+        self.locked_heading = None
+        self.auto_yaw_active = False
+        self.fixed_yaw = self.car_yaw
 
 
     def get_state(self):
@@ -436,6 +463,16 @@ class SortTracker:
                     "color_confidence": track.get_color_confidence(),
                 }
         return attrs
+
+    def force_flip_yaw(self, track_id: int, offset_deg: float = 180.0) -> bool:
+        """
+        지정한 track id의 yaw를 강제로 뒤집는다.
+        """
+        for track in self.tracks:
+            if track.id == track_id and track.state != TrackState.DELETED:
+                track.force_flip_yaw(offset_deg)
+                return True
+        return False
 
 
 def load_detections_from_file(filepath: str) -> np.ndarray:
