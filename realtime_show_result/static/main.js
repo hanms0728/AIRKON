@@ -1348,10 +1348,6 @@ function lockViewToMarker(marker, options = {}) {
             enablePan: controls.enablePan,
         };
     }
-    controls.enabled = false;
-    controls.enableRotate = false;
-    controls.enableZoom = false;
-    controls.enablePan = false;
     const duration = Math.max(0, Number(state.config?.markerViewDurationMs ?? 800));
     const instant = Boolean(options.instant) || duration === 0;
     if (instant) {
