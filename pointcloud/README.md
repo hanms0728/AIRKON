@@ -45,6 +45,9 @@ python pointcloud/make_pointcloud/img_to_ply_with_global_ply.py \
   --fov 89 \
   --interactive --intrinsic-npz realtime/disto/cam_calibration_results.npz
 ```
+[real_coshow_map.ply 다운로드 (Google Drive)](https://drive.google.com/file/d/1JYoWLNQP9AhZCOWcNHmrPDm1qRe8a_Nh/view?usp=sharing)
+
+
 
 - `--pos`는 카메라 위치(x,y,z), `--rot`는 yaw,pitch,roll (deg) 입니다.
 - `--save-frame carla|cv`로 결과 좌표계를 선택할 수 있습니다.
