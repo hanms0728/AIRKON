@@ -2,9 +2,9 @@ import numpy as np
 import cv2
 import glob
 
-CHECKERBOARD_SIZE = (10, 7)
-SQUARE_SIZE = 15.0
-CALIB_IMAGES_PATH = "cam2imgs/*.jpg"
+CHECKERBOARD_SIZE = (13, 9)
+SQUARE_SIZE = 40.0
+CALIB_IMAGES_PATH = "cam_28/*.jpg"
 images = glob.glob(CALIB_IMAGES_PATH)
 if not images:
     print(f"오류: {CALIB_IMAGES_PATH} 경로에 이미지가 없습니다.")
@@ -51,7 +51,7 @@ print("dist=\n", dist.ravel())
 
 # 저장은 dist 중심 + 기준 해상도도 함께 저장(스케일링용)
 np.savez(
-    "cam2_calibration_results.npz",
+    "cam28_calibration_results.npz",
     dist=dist,
     K=K,                 # 옵션: scaled-k 모드에서만 사용
     calib_w=w_calib,
