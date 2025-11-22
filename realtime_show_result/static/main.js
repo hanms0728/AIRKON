@@ -177,6 +177,9 @@ state.markerGroup = markerGroup;
 
 setupMarkerPointerHandlers();
 window.addEventListener("keydown", handleGlobalKeydown);
+window.addEventListener("touchend", handleGlobalTouchEnd, { passive: true });
+
+let lastTouchEndTs = 0;
 
 window.addEventListener("resize", handleResize);
 handleResize();
@@ -2162,15 +2165,31 @@ function performMarkerHitTest(clientX, clientY) {
 
 function handleGlobalKeydown(evt) {
     if (evt.key === "Escape") {
-        clearDetectionFollow();
-        resetToGlobalView({ initialView: true });
-        if (isLive) {
-            enterLiveGlobalView();
-        } else if (isFusion) {
-            enterFusionGlobalView();
-        }
+        triggerEscapeAction();
     }
 }
+
+function handleGlobalTouchEnd(evt) {
+    const now = Date.now();
+    if (now - lastTouchEndTs <= 300) {
+        triggerEscapeAction();
+        lastTouchEndTs = 0;
+        return;
+    }
+    lastTouchEndTs = now;
+}
+
+function triggerEscapeAction() {
+    clearDetectionFollow();
+    resetToGlobalView({ initialView: true });
+    if (isLive) {
+        enterLiveGlobalView();
+    } else if (isFusion) {
+        enterFusionGlobalView();
+    }
+}
+
+
 
 function loadPointCloudFromPly(url, options = {}) {
     const { flipX = false, flipY = false } = options;
