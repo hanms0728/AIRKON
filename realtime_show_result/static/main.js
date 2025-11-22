@@ -57,6 +57,8 @@ const state = {
     viewLockAnimation: null,
     liveCameraSwitchToken: 0,
     layoutMode: "global",
+    followTarget: null,
+    followPanBackup: null,
 };
 
 setLayoutMode("global");
@@ -273,6 +275,7 @@ async function initLiveMode() {
 function animate() {
     requestAnimationFrame(animate);
     updateViewLockAnimation();
+    updateFollowOffset();
     controls.update();
     renderer.render(scene, camera);
 }
@@ -722,10 +725,18 @@ function renderDetections(detections) {
         detectionListEl.innerHTML = "";
         detections.forEach((det, idx) => {
             const li = document.createElement("li");
-            li.textContent = formatDetectionListEntry(det, idx);
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.textContent = formatDetectionListEntry(det, idx);
+            btn.addEventListener("click", () => {
+                startDetectionFollow(det, idx);
+            });
+            li.appendChild(btn);
             detectionListEl.appendChild(li);
         });
     }
+
+    updateDetectionFollowPose(detections);
 }
 
 async function fetchJson(url) {
@@ -1728,6 +1739,7 @@ function resetToGlobalView(options = {}) {
         setLayoutMode("global");
     }
     state.activeMarkerKey = null;
+    clearDetectionFollow();
     state.localLoadToken += 1;
     updateMarkerHighlight(null);
     setLocalCloudVisibility(null);
@@ -1806,6 +1818,7 @@ function performMarkerHitTest(clientX, clientY) {
 function handleGlobalKeydown(evt) {
     if (evt.key === "Escape") {
         const animate = Boolean(state.viewLockBackup);
+        clearDetectionFollow();
         resetToGlobalView({ animate });
         if (isLive) {
             enterLiveGlobalView();
@@ -1910,27 +1923,135 @@ async function loadVisiblePointsFromBinary(url, stride = 3, options = {}) {
     return mesh;
 }
 
-function formatDetectionListEntry(det, idx) {
+function getDetectionColorText(det) {
+    const rawLabel = typeof det?.color === "string"
+        ? det.color.trim()
+        : (typeof det?.color_label === "string"
+            ? det.color_label.trim()
+            : (typeof det?.colorLabel === "string" ? det.colorLabel.trim() : ""));
+    if (rawLabel) {
+        return rawLabel;
+    }
+    const rawHex = typeof det?.color_hex === "string"
+        ? det.color_hex.trim()
+        : (typeof det?.colorHex === "string" ? det.colorHex.trim() : "");
+    if (rawHex) {
+        return rawHex.startsWith("#") ? rawHex : `#${rawHex}`;
+    }
+    return "-";
+}
+
+function getDetectionCenter(det) {
+    const centerArr = Array.isArray(det?.center) && det.center.length === 3 ? det.center : [0, 0, 0];
+    return {
+        x: Number(centerArr[0]) || 0,
+        y: Number(centerArr[1]) || 0,
+        z: Number(centerArr[2]) || 0,
+    };
+}
+
+function getDetectionSpan(det) {
+    if (Array.isArray(det?.scale) && det.scale.length === 3) {
+        return Math.max(Number(det.scale[0]) || 0, Number(det.scale[1]) || 0, Number(det.scale[2]) || 0, 1) * 2;
+    }
+    const dims = [
+        Number(det?.length) || 0,
+        Number(det?.width) || 0,
+        Number(det?.height) || 0,
+    ];
+    const span = Math.max(...dims, 6);
+    return Number.isFinite(span) ? span : 12;
+}
+
+function formatDetectionListEntry(det, idx) { // 여기서 라벨에 띄우고 싶은 거 수정
     const center = Array.isArray(det.center) && det.center.length === 3
         ? det.center
         : [0, 0, 0];
-    const yaw = det.yaw_deg ?? det.yaw ?? 0;
-    const tags = [];
-    if (det.track_id != null) {
-        tags.push(`track ${det.track_id}`);
-    } else if (det.cam) {
-        tags.push(`cam ${det.cam}`);
-    } else if (det.class_id != null) {
-        tags.push(`class ${det.class_id}`);
+    const trackText = det.track_id != null
+        ? `track ${det.track_id}`
+        : (det.cam != null ? `cam ${det.cam}` : `class ${det.class_id ?? "-"}`);
+    const colorText = getDetectionColorText(det);
+    return `#${idx + 1} | ${trackText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | color ${colorText}`;
+}
+
+function findFollowDetection(detections, target) {
+    if (!Array.isArray(detections) || !detections.length || !target) {
+        return null;
     }
-    if (Array.isArray(det.sources) && det.sources.length) {
-        tags.push(`src ${det.sources.join(",")}`);
+    if (target.trackId != null) {
+        const byTrack = detections.find((d) => d && d.track_id === target.trackId);
+        if (byTrack) return byTrack;
     }
-    if (det.score != null) {
-        tags.push(`score ${(Number(det.score) || 0).toFixed(2)}`);
+    if (target.cam != null) {
+        const byCam = detections.find((d) => d && d.cam === target.cam);
+        if (byCam) return byCam;
     }
-    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
-    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
+    if (typeof target.index === "number" && detections[target.index]) {
+        return detections[target.index];
+    }
+    return null;
+}
+
+function startDetectionFollow(det, index = null) {
+    if (!det) {
+        return;
+    }
+    const center = getDetectionCenter(det);
+    const baseOffset = camera.position.clone().sub(controls.target);
+    const defaultSpan = getDetectionSpan(det);
+    if (baseOffset.length() < 1) {
+        baseOffset.set(defaultSpan, -defaultSpan, defaultSpan * 0.6);
+    }
+    if (state.followPanBackup === null) {
+        state.followPanBackup = controls.enablePan;
+    }
+    controls.enablePan = false;
+    state.followTarget = {
+        trackId: det.track_id ?? null,
+        cam: det.cam ?? null,
+        index,
+        offset: baseOffset.clone(),
+        lastCenter: center,
+    };
+    controls.target.set(center.x, center.y, center.z);
+    camera.position.copy(new THREE.Vector3(center.x, center.y, center.z).add(baseOffset));
+    camera.up.set(0, 0, 1);
+    camera.lookAt(controls.target);
+}
+
+function clearDetectionFollow() {
+    state.followTarget = null;
+    if (state.followPanBackup !== null) {
+        controls.enablePan = state.followPanBackup;
+        state.followPanBackup = null;
+    }
+}
+
+function updateFollowOffset() {
+    const follow = state.followTarget;
+    if (!follow) {
+        return;
+    }
+    follow.offset = camera.position.clone().sub(controls.target);
+}
+
+function updateDetectionFollowPose(detections) {
+    const follow = state.followTarget;
+    if (!follow) {
+        return;
+    }
+    const match = findFollowDetection(detections, follow);
+    if (!match) {
+        clearDetectionFollow();
+        return;
+    }
+    const center = getDetectionCenter(match);
+    const offset = follow.offset || camera.position.clone().sub(controls.target);
+    controls.target.set(center.x, center.y, center.z);
+    camera.position.set(center.x + offset.x, center.y + offset.y, center.z + offset.z);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(controls.target);
+    follow.lastCenter = center;
 }
 
 init().catch((err) => console.error("Initialization error:", err));
