@@ -382,6 +382,8 @@ class GlobalWebServer:
         self.client_config.setdefault("flipMarkerX", False)
         self.client_config.setdefault("flipMarkerY", False)
         self.client_config["vizConfig"] = self.viz_cfg.as_client_dict()
+        self.client_config["initialViewTarget"] = [0,-50,50]
+        self.client_config["initialViewOffset"] = [0, -50, 60]
 
         self.camera_marker_payload: List[dict] = []
         self.marker_local_map: Dict[str, str] = {}

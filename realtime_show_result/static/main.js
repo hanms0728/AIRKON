@@ -59,6 +59,7 @@ const state = {
     layoutMode: "global",
     followTarget: null,
     followPanBackup: null,
+    initialViewApplied: false,
 };
 
 setLayoutMode("global");
@@ -324,14 +325,15 @@ async function loadPointCloud() {
                     geometry.boundingBox.getSize(size);
                     const maxDim = Math.max(size.x, size.y, size.z, 1.0);
                     const distance = maxDim * 1.6;
-                    camera.position.set(
-                        center.x + distance,
-                        center.y - distance,
-                        center.z + distance * 0.6
-                    );
-                }
-                resolve();
-            },
+                camera.position.set(
+                    center.x + distance,
+                    center.y - distance,
+                    center.z + distance * 0.6
+                );
+                applyInitialViewOverride();
+            }
+            resolve();
+        },
             undefined,
             (error) => {
                 console.error("Failed to load PLY:", error);
@@ -1282,6 +1284,41 @@ function focusOnPosition(position, span = 12) {
     );
 }
 
+function parseViewVector(vec) {
+    if (Array.isArray(vec) && vec.length === 3) {
+        const [x, y, z] = vec.map((v) => Number(v));
+        if ([x, y, z].every((v) => Number.isFinite(v))) {
+            return { x, y, z };
+        }
+    } else if (vec && typeof vec === "object") {
+        const x = Number(vec.x);
+        const y = Number(vec.y);
+        const z = Number(vec.z);
+        if ([x, y, z].every((v) => Number.isFinite(v))) {
+            return { x, y, z };
+        }
+    }
+    return null;
+}
+
+function applyInitialViewOverride(force = false) {
+    if (state.initialViewApplied && !force) {
+        return;
+    }
+    const target = parseViewVector(state.config?.initialViewTarget);
+    const offset = parseViewVector(state.config?.initialViewOffset);
+    if (!target && !offset) {
+        return;
+    }
+    const tgt = target || { x: controls.target.x, y: controls.target.y, z: controls.target.z };
+    const off = offset || { x: 18, y: -18, z: 12 };
+    controls.target.set(tgt.x, tgt.y, tgt.z);
+    camera.position.set(tgt.x + off.x, tgt.y + off.y, tgt.z + off.z);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(tgt.x, tgt.y, tgt.z);
+    state.initialViewApplied = true;
+}
+
 function shouldFlipMarkerX() {
     return Boolean(state.config?.flipMarkerX);
 }
@@ -1735,6 +1772,8 @@ function setLocalCloudVisibility(activeKey) {
 
 function resetToGlobalView(options = {}) {
     const animate = Boolean(options.animate);
+    const initialView = Boolean(options.initialView);
+    const animateRelease = initialView ? false : animate;
     if (isLive || isFusion) {
         setLayoutMode("global");
     }
@@ -1746,7 +1785,10 @@ function resetToGlobalView(options = {}) {
     if (state.globalCloud) {
         state.globalCloud.visible = true;
     }
-    releaseViewLock({ animate });
+    releaseViewLock({ animate: animateRelease });
+    if (initialView) {
+        applyInitialViewOverride(true);
+    }
 }
 
 function updateMarkerHighlight(activeKey) {
@@ -1817,9 +1859,8 @@ function performMarkerHitTest(clientX, clientY) {
 
 function handleGlobalKeydown(evt) {
     if (evt.key === "Escape") {
-        const animate = Boolean(state.viewLockBackup);
         clearDetectionFollow();
-        resetToGlobalView({ animate });
+        resetToGlobalView({ initialView: true });
         if (isLive) {
             enterLiveGlobalView();
         } else if (isFusion) {
