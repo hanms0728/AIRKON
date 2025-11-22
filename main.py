@@ -40,7 +40,7 @@ class CameraAssets:
     visible_source: Optional[str]
     raw_config: Dict
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
 _COLOR_HUE_BANDS = (
     ("red", 0.0, 40.0),
@@ -79,11 +79,6 @@ def _classify_hex_color(hex_color: Optional[str]):
         return None, 0.0, None
     h, s, v = colorsys.rgb_to_hsv(*rgb)
     h_deg = (h * 360.0) % 360.0
-    if v < 0.18:  # very dark -> black
-        confidence = float(max(0.0, min(1.0, (0.18 - v) / 0.18)))
-        embedding = [0.0] * len(COLOR_LABELS)
-        embedding[_COLOR_LABEL_TO_INDEX["black"]] = confidence
-        return "black", confidence, embedding
 
     if v >= 0.65 and s <= 0.25:
         sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))

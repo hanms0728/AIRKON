@@ -152,7 +152,6 @@ class Track:
         self.heading_locked: bool = False
         self.heading_lock_score: int = 0
         self.locked_heading: Optional[float] = None
-
     def _init_2d_kf(self, initial_value: float, Q_scale: float = 0.1, R_scale: float = 1.0) -> KalmanFilter:
         kf = KalmanFilter(dim_x=2, dim_z=1)
         kf.F = np.array([[1, 1], [0, 1]])
@@ -307,6 +306,16 @@ class Track:
                 self.kf_yaw.x[0, 0] = self.car_yaw
         self.last_pos = np.array(current_xy, dtype=float)
 
+    def force_flip_yaw(self, offset_deg: float = 180.0) -> None:
+        """
+        외부 명령으로 yaw를 강제 뒤집을 때 사용. heading 잠금은 해제한다.
+        """
+        self.car_yaw = wrap_deg(self.car_yaw + offset_deg)
+        self.kf_yaw.x[0, 0] = self.car_yaw
+        self.heading_locked = False
+        self.heading_lock_score = 0
+        self.locked_heading = None
+
 
     def get_state(self):
         # 현재 추적된 상태와 저장된 OBB 정보를 결합하여 CARLA 형식으로 반환
@@ -436,6 +445,16 @@ class SortTracker:
                     "color_confidence": track.get_color_confidence(),
                 }
         return attrs
+
+    def force_flip_yaw(self, track_id: int, offset_deg: float = 180.0) -> bool:
+        """
+        지정한 track id의 yaw를 강제로 뒤집는다.
+        """
+        for track in self.tracks:
+            if track.id == track_id and track.state != TrackState.DELETED:
+                track.force_flip_yaw(offset_deg)
+                return True
+        return False
 
 
 def load_detections_from_file(filepath: str) -> np.ndarray:

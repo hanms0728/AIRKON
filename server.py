@@ -21,7 +21,7 @@ from utils.merge.merge_dist_wbf import (
 from utils.sort.tracker import SortTracker
 from realtime_show_result.viz_utils import VizSizeConfig, prepare_visual_item
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple", "black")
+COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 VALID_COLORS = {color: color for color in COLOR_LABELS}
 COLOR_HEX_MAP = {
     "red": "#f52629",
@@ -29,8 +29,7 @@ COLOR_HEX_MAP = {
     "green": "#48ad0d",
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
-    "purple": "#781de7",
-    "black": "#000000",
+    "purple": "#781de7"
 }
 
 
@@ -178,6 +177,101 @@ class TrackBroadcaster:
                 self.sock.sendall(data + b"\n")
         except Exception as e:
             print(f"[TrackBroadcaster] send error: {e}")
+
+
+class CommandServer:
+    """
+    간단한 TCP 명령 서버. 각 연결은 JSON 한 줄을 보내고 응답을 받는다.
+    """
+    def __init__(self, host: str, port: int, command_queue: "queue.Queue[dict]", response_timeout: float = 2.0):
+        self.host = host
+        self.port = int(port)
+        self.q = command_queue
+        self.response_timeout = response_timeout
+        self._thread: Optional[threading.Thread] = None
+        self._sock: Optional[socket.socket] = None
+        self._running = False
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._serve_forever, daemon=True)
+        self._thread.start()
+        print(f"[CommandServer] listening on {self.host}:{self.port}")
+
+    def stop(self):
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+
+    def _serve_forever(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind((self.host, self.port))
+                srv.listen()
+                self._sock = srv
+                while self._running:
+                    try:
+                        conn, addr = srv.accept()
+                    except OSError:
+                        break
+                    threading.Thread(target=self._handle_client, args=(conn, addr), daemon=True).start()
+        except Exception as exc:
+            print(f"[CommandServer] server error: {exc}")
+
+    def _handle_client(self, conn: socket.socket, addr):
+        with conn:
+            try:
+                data = self._recv_all(conn)
+                if not data:
+                    return
+                response = self._process_payload(data)
+            except Exception as exc:
+                response = {"status": "error", "message": str(exc)}
+            try:
+                payload = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+                conn.sendall(payload)
+            except Exception:
+                pass
+
+    def _recv_all(self, conn: socket.socket) -> str:
+        buf = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if b"\n" in chunk:
+                break
+        return buf.decode("utf-8").strip()
+
+    def _process_payload(self, data: str) -> dict:
+        if not data:
+            return {"status": "error", "message": "empty payload"}
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            return {"status": "error", "message": "invalid json"}
+        if not isinstance(payload, dict):
+            return {"status": "error", "message": "payload must be object"}
+        cmd = payload.get("cmd")
+        if not cmd:
+            return {"status": "error", "message": "cmd required"}
+        response_q: queue.Queue = queue.Queue(maxsize=1)
+        item = {"cmd": cmd, "payload": payload, "response": response_q}
+        try:
+            self.q.put_nowait(item)
+        except queue.Full:
+            return {"status": "error", "message": "server busy"}
+        try:
+            return response_q.get(timeout=self.response_timeout)
+        except queue.Empty:
+            return {"status": "error", "message": "command timeout"}
 
 class GlobalWebServer:
     """
@@ -454,6 +548,8 @@ class RealtimeFusionServer:
         client_config: Optional[dict] = None,
         tracker_fixed_length: Optional[float] = None,
         tracker_fixed_width: Optional[float] = None,
+        command_host: Optional[str] = None,
+        command_port: Optional[int] = None,
     ):
         self.fps = fps
         self.dt = 1.0 / max(1e-3, fps)
@@ -497,9 +593,14 @@ class RealtimeFusionServer:
         self.buffer: Dict[str, deque] = {cam: deque(maxlen=1) for cam in cam_ports.keys()}
 
         # 추적기
-        self.tracker = SortTracker(max_age=10, min_hits=3, iou_threshold=0.15) 
+        self.tracker = SortTracker(max_age=20, min_hits=3, iou_threshold=0.15) 
         self._log_interval = 1.0
         self._next_log_ts = 0.0
+        self.command_queue: Optional[queue.Queue] = None
+        self.command_server: Optional[CommandServer] = None
+        if command_host and command_port:
+            self.command_queue = queue.Queue()
+            self.command_server = CommandServer(command_host, command_port, self.command_queue)
 
     def _register_cam_if_needed(self, cam_name: str): # 수신 시 신규카메라 등록 
         if cam_name not in self.buffer:
@@ -536,12 +637,15 @@ class RealtimeFusionServer:
 
     def start(self):
         self.receiver.start()
+        if self.command_server:
+            self.command_server.start()
         self._main_loop()
 
     def _main_loop(self):
         last = time.time()
         while True:
             timings: Dict[str, float] = {}
+            self._process_command_queue()
             try:
                 while True:
                     item = self.receiver.q.get_nowait()
@@ -625,6 +729,45 @@ class RealtimeFusionServer:
                 det_copy["ts"] = ts
                 detections.append(det_copy)
         return detections
+
+    def _process_command_queue(self):
+        if not self.command_queue:
+            return
+        while True:
+            try:
+                item = self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+            response = self._handle_command_item(item)
+            resp_q = item.get("response")
+            if resp_q:
+                try:
+                    resp_q.put_nowait(response)
+                except queue.Full:
+                    pass
+
+    def _handle_command_item(self, item: dict) -> dict:
+        cmd = str(item.get("cmd") or "").strip().lower()
+        payload = item.get("payload") or {}
+        if cmd == "flip_yaw":
+            track_id = payload.get("track_id")
+            if track_id is None:
+                return {"status": "error", "message": "track_id required"}
+            try:
+                tid = int(track_id)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "track_id must be int"}
+            delta = payload.get("delta", 180.0)
+            try:
+                delta = float(delta)
+            except (TypeError, ValueError):
+                delta = 180.0
+            flipped = self.tracker.force_flip_yaw(tid, offset_deg=delta)
+            if flipped:
+                print(f"[Command] flipped track {tid} yaw by {delta:.1f}°")
+                return {"status": "ok", "track_id": tid, "delta": delta}
+            return {"status": "error", "message": f"track {tid} not found"}
+        return {"status": "error", "message": f"unknown command '{cmd}'"}
 
     # merge_dist_wbf 의 클러스터링/가중통합 로직을 그대로 사용
     def _fuse_boxes(self, raw_detections: List[dict]) -> List[dict]:
@@ -909,6 +1052,8 @@ def main():
     ap.add_argument("--no-flip-ply-y", dest="flip_ply_y", action="store_false",
                     help="global ply Y축 반전하지 않음")
     ap.set_defaults(flip_ply_y=False)
+    ap.add_argument("--cmd-host", default="0.0.0.0", help="yaw 명령 서버 바인드 호스트 (미지정 시 비활성화)")
+    ap.add_argument("--cmd-port", type=int, default=18100, help="yaw 명령 서버 포트")
 
     args = ap.parse_args()
 
@@ -949,6 +1094,8 @@ def main():
         client_config=client_config,
         tracker_fixed_length=args.tracker_fixed_length,
         tracker_fixed_width=args.tracker_fixed_width,
+        command_host=args.cmd_host,
+        command_port=args.cmd_port,
     )
     try:
         server.start()
