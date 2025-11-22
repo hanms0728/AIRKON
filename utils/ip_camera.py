@@ -10,7 +10,7 @@ from collections import deque
 import ffmpeg
 import numpy as np
 '''
-python utils/ip_camera.py --capture-mode sequence --sequence-fps 5 --sequence-dir utils/color/black
+python utils/ip_camera.py --capture-mode sequence --sequence-fps 1 --sequence-dir utils/color/black
 
 '''
 
@@ -60,47 +60,47 @@ class IPCameraStreamer:
     ):
         # 6개 카메라 구성
         self.camera_configs = [
-            # {'ip': '192.168.0.51', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.51', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.35', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 2, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.35', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 2, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.25', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.25', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.30', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.30', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
-            # {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 2, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 8, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.31', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.31', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 9, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.29', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.29', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 10, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.37', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.37', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 11, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            # {'ip': '192.168.0.27', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.27', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 12, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
 
-            # {'ip': '192.168.0.26', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-            #  'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            {'ip': '192.168.0.26', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 13, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
             {'ip': '192.168.0.28', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
+             'camera_id': 14, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
 
 
@@ -271,7 +271,7 @@ class IPCameraStreamer:
                 cam_id = cfg['camera_id']
                 if self.latest[cam_id]:
                     frame = self.latest[cam_id][-1]
-                    small = cv2.resize(frame, (0, 0), fx=1, fy=1)
+                    small = cv2.resize(frame, (0, 0), fx=0.4, fy=0.4)
                     cv2.imshow(f"Camera {cam_id}", small)
 
             key = cv2.waitKey(1) & 0xFF
