@@ -20,7 +20,6 @@ import queue
 from typing import Optional, Dict, List, Tuple
 import socket, json
 import os
-import colorsys
 from contextlib import contextmanager
 import open3d as o3d
 from fastapi import FastAPI, HTTPException
@@ -42,14 +41,16 @@ class CameraAssets:
 
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
-_COLOR_HUE_BANDS = (
-    ("red", 0.0, 40.0),
-    ("yellow", 60.0, 35.0),
-    ("green", 130.0, 45.0),
-    ("purple", 280.0, 80.0),  # covers purple/blue-ish tones
-    ("pink", 335.0, 30.0),
-)
-
+_COLOR_RGB_RULES = {
+    "green": {
+        "min": (0.0863, 0.3647, 0.2784),
+        "max": (0.1725, 0.5882, 0.4196),
+    },
+    "red": {
+        "min": (0.2118, 0.0863, 0.0627),
+        "max": (0.5804, 0.4588, 0.4627),
+    },
+}
 
 def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
     if not hex_color:
@@ -66,39 +67,40 @@ def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, f
     return r / 255.0, g / 255.0, b / 255.0
 
 
-def _hue_score(hue_deg: float, center: float, window: float) -> float:
-    diff = abs(hue_deg - center) % 360.0
-    if diff > 180.0:
-        diff = 360.0 - diff
-    return max(0.0, 1.0 - diff / max(window, 1e-6))
+def _channel_score(value: float, low: float, high: float) -> float:
+    if value < low or value > high:
+        return 0.0
+    span = max(high - low, 1e-3)
+    mid = (low + high) * 0.5
+    return max(0.0, 1.0 - abs(value - mid) / (0.5 * span))
 
 
 def _classify_hex_color(hex_color: Optional[str]):
     rgb = _hex_to_rgb_unit(hex_color)
     if rgb is None:
         return None, 0.0, None
-    h, s, v = colorsys.rgb_to_hsv(*rgb)
-    h_deg = (h * 360.0) % 360.0
-    if v < 0.2:
-        return None, 0.0, None
 
-    if v >= 0.65 and s <= 0.25:
-        sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))
-        val_term = max(0.0, min(1.0, (v - 0.65) / max(1e-6, 0.35)))
-        confidence = float(0.5 * sat_term + 0.5 * val_term)
+    # White: 모든 채널이 밝고 균일한 경우 우선 처리
+    max_rgb = max(rgb)
+    min_rgb = min(rgb)
+    if min_rgb >= 0.7 and (max_rgb - min_rgb) <= 0.2:
+        brightness = max(0.0, min(1.0, (sum(rgb) / 3.0 - 0.7) / 0.3))
+        flatness = max(0.0, min(1.0, 1.0 - (max_rgb - min_rgb) / 0.2))
+        confidence = float(0.5 * brightness + 0.5 * flatness)
         embedding = [0.0] * len(COLOR_LABELS)
         embedding[_COLOR_LABEL_TO_INDEX["white"]] = confidence
         return "white", confidence, embedding
 
+    # RGB 범위 기반 색상 분류
     best_label = None
     best_score = 0.0
-    sat_term = max(0.0, min(1.0, (s - 0.2) / 0.8))
-    val_term = max(0.0, min(1.0, (v - 0.3) / 0.7))
-    for label, center, window in _COLOR_HUE_BANDS:
-        hue_component = _hue_score(h_deg, center, window)
-        if hue_component <= 0.0:
-            continue
-        score = float(hue_component * 0.6 + sat_term * 0.25 + val_term * 0.15)
+    intensity = max(0.0, min(1.0, (sum(rgb) / 3.0 - 0.15) / 0.85))
+    for label, rule in _COLOR_RGB_RULES.items():
+        mins = rule["min"]
+        maxs = rule["max"]
+        channel_scores = [_channel_score(v, lo, hi) for v, lo, hi in zip(rgb, mins, maxs)]
+        base_score = sum(channel_scores) / 3.0
+        score = float(base_score * 0.7 + intensity * 0.3)
         if score > best_score:
             best_score = score
             best_label = label
@@ -107,6 +109,39 @@ def _classify_hex_color(hex_color: Optional[str]):
     embedding = [0.0] * len(COLOR_LABELS)
     embedding[_COLOR_LABEL_TO_INDEX[best_label]] = best_score
     return best_label, float(best_score), embedding
+
+
+def _classify_hex_color_strict(hex_color: Optional[str]):
+    """
+    RGB 범위 박스에 정확히 들어갈 때만 라벨을 반환한다.
+    - 겹치거나 한 개도 매칭되지 않으면 (None, 0.0, None)
+    - 기존 _classify_hex_color와 동일한 반환 형태를 유지한다.
+    """
+    rgb = _hex_to_rgb_unit(hex_color)
+    if rgb is None:
+        return None, 0.0, None
+
+    max_rgb = max(rgb)
+    min_rgb = min(rgb)
+    candidates = []
+
+    # 화이트는 밝고 편차가 작은 경우만 허용
+    if min_rgb >= 0.7 and (max_rgb - min_rgb) <= 0.2:
+        candidates.append("white")
+
+    for label, rule in _COLOR_RGB_RULES.items():
+        mins = rule["min"]
+        maxs = rule["max"]
+        if all(lo <= v <= hi for v, lo, hi in zip(rgb, mins, maxs)):
+            candidates.append(label)
+
+    if len(candidates) != 1:
+        return None, 0.0, None
+
+    label = candidates[0]
+    embedding = [0.0] * len(COLOR_LABELS)
+    embedding[_COLOR_LABEL_TO_INDEX[label]] = 1.0
+    return label, 1.0, embedding
 
 def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
     if lut is None:
@@ -347,7 +382,7 @@ class InferWorker(threading.Thread):
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
                  bev_scale=1.0, providers=None,
                  gui_queue=None, udp_sender=None, web_publisher=None,
-                 save_undist_dir=None, save_overlay_dir=None):
+                 save_image_root=None):
         super().__init__(daemon=True)
         self.streamer = streamer
         self.camera_assets = camera_assets
@@ -364,11 +399,13 @@ class InferWorker(threading.Thread):
         self.stop_evt = threading.Event()
         self.bev_scale = float(bev_scale)
         self.LUT_cache: Dict[int, Optional[dict]] = {cid: camera_assets[cid].lut for cid in self.cam_ids}
-        self.save_undist_dir = Path(save_undist_dir).expanduser().resolve() if save_undist_dir else None
-        self.save_overlay_dir = Path(save_overlay_dir).expanduser().resolve() if save_overlay_dir else None
-        for root in (self.save_undist_dir, self.save_overlay_dir):
-            if root is not None:
-                root.mkdir(parents=True, exist_ok=True)
+        self.save_dirs: Dict[str, Path] = {}
+        if save_image_root:
+            root = Path(save_image_root).expanduser().resolve()
+            for tag in ("raw", "undist", "overlay"):
+                tag_root = root / f"_{tag}"
+                tag_root.mkdir(parents=True, exist_ok=True)
+                self.save_dirs[tag] = tag_root
 
         if providers is None:
             providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
@@ -472,7 +509,7 @@ class InferWorker(threading.Thread):
             if idx < len(color_list):
                 color_hex = color_list[idx]
                 entry["color_hex"] = color_hex
-                label, confidence, embedding = _classify_hex_color(color_hex)
+                label, confidence, embedding = _classify_hex_color_strict(color_hex) # _classify_hex_color로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
                 if label:
                     entry["color"] = label
                     entry["color_confidence"] = confidence
@@ -499,6 +536,7 @@ class InferWorker(threading.Thread):
                         break
                     with wrk.span("preproc"):
                         fr, ts_capture = fr
+                        self._save_image(fr, self.save_dirs.get("raw"), cid, ts_capture, "raw")
                         chw, bgr, orig_hw = self._preprocess(cid, fr)
                     imgs_chw[cid] = chw
                     frame_meta[cid] = {
@@ -535,7 +573,7 @@ class InferWorker(threading.Thread):
                 frame_bgr = meta.get("bgr")
                 orig_hw = meta.get("orig_hw", (self.H, self.W))
                 orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
-                self._save_image(frame_bgr, self.save_undist_dir, cid, capture_ts, "undist")
+                self._save_image(frame_bgr, self.save_dirs.get("undist"), cid, capture_ts, "undist")
                 with wrk.span("decode"):
                     dets = self._decode(outs)
 
@@ -585,7 +623,7 @@ class InferWorker(threading.Thread):
                         overlay_frame = pseudo3d
                 if overlay_frame is None:
                     overlay_frame = draw_detections(frame_bgr, dets)
-                self._save_image(overlay_frame, self.save_overlay_dir, cid, capture_ts, "overlay")
+                self._save_image(overlay_frame, self.save_dirs.get("overlay"), cid, capture_ts, "overlay")
 
                 if self.web_publisher is not None:
                     with wrk.span("web"):
@@ -1046,10 +1084,8 @@ def main():
     ap.add_argument("--target-fps", default=30, type=int)
     ap.add_argument("--no-gui", action="store_true",
                     help="Disable OpenCV visualization windows")
-    ap.add_argument("--save-undist-dir", type=str, default=None,
-                    help="Set to save undistorted per-camera frames into this directory")
-    ap.add_argument("--save-overlay-dir", type=str, default=None,
-                    help="Set to save overlay (prediction) frames into this directory")
+    ap.add_argument("--save-image-root", type=str, default=None,
+                    help="Set root dir to save frames; creates _raw/_undist/_overlay subfolders")
     # visualization scaling (shared across web/3d)
     ap.add_argument("--size-mode", choices=["bbox","fixed","mesh"], default="mesh")
     ap.add_argument("--fixed-length", type=float, default=4.4)
@@ -1184,8 +1220,7 @@ def main():
         gui_queue=gui_queue,
         udp_sender=udp_sender,
         web_publisher=web_bridge,
-        save_undist_dir=args.save_undist_dir,
-        save_overlay_dir=args.save_overlay_dir,
+        save_image_root=args.save_image_root,
     )
     worker.start()
     if USE_GUI:
@@ -1236,7 +1271,7 @@ def main():
                 with gui_timer.span("gui.show"):
                     cv2.imshow(f"cam{cid}", vis)
                     e2e_ms = (time.time() - ts_capture) * 1000.0
-                    #print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
+                    print(f"+++++++++++++프레임받아서시각화까지: {e2e_ms}")
                     if not ticker.tick():
                         break
             gui_timer.bump()

@@ -126,6 +126,8 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(viewerEl.clientWidth, viewerEl.clientHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.9;
 viewerEl.appendChild(renderer.domElement);
 
 const raycaster = new THREE.Raycaster();
@@ -138,13 +140,16 @@ controls.dampingFactor = 0.08;
 controls.screenSpacePanning = true;
 controls.target.set(0, 0, 0);
 
-const ambient = new THREE.AmbientLight(0xffffff, 0.45);
+const ambient = new THREE.AmbientLight(0xffffff, 0.85);
 scene.add(ambient);
 
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
 dirLight.position.set(15, -20, 25);
 dirLight.castShadow = false;
 scene.add(dirLight);
+
+const hemiLight = new THREE.HemisphereLight(0xeef7ff, 0x252525, 1.0);
+scene.add(hemiLight);
 
 const grid = new THREE.GridHelper(100, 50, 0x333333, 0x222222);
 grid.rotation.x = Math.PI / 2; // Align grid with XY plane (Z up)
@@ -162,6 +167,10 @@ const tmpEuler = new THREE.Euler(0, 0, 0, "ZYX");
 const tmpViewPos = new THREE.Vector3();
 const tmpViewTarget = new THREE.Vector3();
 const tmpColor = new THREE.Color();
+const paletteColor = new THREE.Color();
+const gradientLowColor = new THREE.Color(0x55607b);
+const gradientHighColor = new THREE.Color(0xffffff);
+const gradientMixColor = new THREE.Color();
 const defaultVehicleColor = new THREE.Color(0xffffff);
 const debugMarker = new THREE.Mesh(
     new THREE.SphereGeometry(0.4, 12, 12),
@@ -420,17 +429,39 @@ async function loadVehiclePrototype() {
                 state.vehicleTemplates = [];
                 unitGroup.traverse((obj) => {
                     if (obj.isMesh) {
-                        const srcMaterial = obj.material;
+                        const srcMaterial = Array.isArray(obj.material)
+                            ? (obj.material[0] || {})
+                            : (obj.material || {});
                         const templateMaterial = new THREE.MeshBasicMaterial({
                             color: 0xffffff,
-                            transparent: Boolean(srcMaterial?.transparent),
-                            opacity: srcMaterial?.opacity !== undefined ? srcMaterial.opacity : 1.0,
-                            side: srcMaterial?.side ?? THREE.FrontSide,
-                            depthWrite: srcMaterial?.depthWrite !== undefined ? srcMaterial.depthWrite : true,
-                            depthTest: srcMaterial?.depthTest !== undefined ? srcMaterial.depthTest : true,
+                            transparent: Boolean(srcMaterial.transparent),
+                            opacity: srcMaterial.opacity !== undefined ? srcMaterial.opacity : 1.0,
+                            side: srcMaterial.side ?? THREE.FrontSide,
+                            depthWrite: srcMaterial.depthWrite !== undefined ? srcMaterial.depthWrite : true,
+                            depthTest: srcMaterial.depthTest !== undefined ? srcMaterial.depthTest : true,
                         });
-                        const vertexCount = obj.geometry.attributes.position.count;
-                        const colorAttr = new Float32Array(vertexCount * 3).fill(1);
+                        if (srcMaterial.map) templateMaterial.map = srcMaterial.map;
+                        const positions = obj.geometry.getAttribute("position");
+                        const vertexCount = positions.count;
+                        const colorAttr = new Float32Array(vertexCount * 3);
+                        obj.geometry.computeBoundingBox();
+                        const bbox = obj.geometry.boundingBox;
+                        const minZ = bbox ? bbox.min.z : -0.5;
+                        const maxZ = bbox ? bbox.max.z : 0.5;
+                        const heightRange = Math.max(maxZ - minZ, 1e-6);
+                        const stride = positions.itemSize || 3;
+                        const posArray = positions.array;
+                        for (let i = 0; i < vertexCount; i += 1) {
+                            const base = i * stride;
+                            const zVal = posArray[base + 2] ?? 0;
+                            const tRaw = (zVal - minZ) / heightRange;
+                            const t = Math.min(Math.max(tRaw, 0), 1);
+                            const smooth = Math.pow(t, 0.7);
+                            gradientMixColor.copy(gradientLowColor).lerp(gradientHighColor, smooth);
+                            colorAttr[i * 3 + 0] = gradientMixColor.r;
+                            colorAttr[i * 3 + 1] = gradientMixColor.g;
+                            colorAttr[i * 3 + 2] = gradientMixColor.b;
+                        }
                         obj.geometry.setAttribute("color", new THREE.BufferAttribute(colorAttr, 3));
                         templateMaterial.vertexColors = true;
                         templateMaterial.needsUpdate = true;
@@ -663,6 +694,43 @@ function getDetectionColor(det) {
     }
 }
 
+function hashString(value) {
+    if (value == null) {
+        return 0;
+    }
+    const str = String(value);
+    let hash = 0;
+    for (let i = 0; i < str.length; i += 1) {
+        hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return hash;
+}
+
+function getFallbackVehicleColor(det, idx) {
+    const candidates = [
+        det?.track_id,
+        det?.id,
+        det?.cam,
+        det?.class_id,
+        det?.camera_id,
+    ];
+    let seed = idx * 131;
+    for (let i = 0; i < candidates.length; i += 1) {
+        const val = candidates[i];
+        if (Number.isFinite(val)) {
+            seed = Number(val);
+            break;
+        }
+        if (typeof val === "string" && val.length) {
+            seed = hashString(val);
+            break;
+        }
+    }
+    const hue = ((seed % 360) + 360) % 360 / 360;
+    paletteColor.setHSL(hue, 0.55, 0.55);
+    return paletteColor;
+}
+
 function renderDetections(detections) {
     detections = filterDetectionsForLocalView(detections);
     const count = Array.isArray(detections) ? detections.length : 0;
@@ -715,7 +783,7 @@ function renderDetections(detections) {
                     tmpMatrix2.multiplyMatrices(tmpMatrix, correction);
                     tmpMatrix2.multiply(tpl.localMatrix);
                     inst.setMatrixAt(i, tmpMatrix2);
-                    const colorToApply = detColor || tpl.baseColor || defaultVehicleColor;
+                    const colorToApply = detColor || getFallbackVehicleColor(det, i) || tpl.baseColor || defaultVehicleColor;
                     if (inst.setColorAt) {
                         inst.setColorAt(i, colorToApply);
                     }
@@ -2419,6 +2487,18 @@ function updateDetectionFollowPose(detections) {
     camera.up.set(0, 0, 1);
     camera.lookAt(controls.target);
     follow.lastCenter = center;
+    const colorLabel = typeof det.color === "string" ? det.color.trim() : "";
+    const colorHex = typeof det.color_hex === "string"
+        ? det.color_hex.trim()
+        : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
+    if (colorLabel || colorHex) {
+        const colorText = colorLabel && colorHex
+            ? `${colorLabel} (${colorHex})`
+            : (colorLabel || colorHex);
+        tags.push(`color ${colorText}`);
+    }
+    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
+    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
 
 init().catch((err) => console.error("Initialization error:", err));
