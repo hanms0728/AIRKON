@@ -3,3 +3,8 @@
 __pycache__
 tmp
 .vscode
+runs
+
+utils/color/green
+utils/color/red
+utils/color/purple
