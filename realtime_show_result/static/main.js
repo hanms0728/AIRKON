@@ -1997,10 +1997,14 @@ function startDetectionFollow(det, index = null) {
         return;
     }
     const center = getDetectionCenter(det);
-    const baseOffset = camera.position.clone().sub(controls.target);
-    const defaultSpan = getDetectionSpan(det);
-    if (baseOffset.length() < 1) {
-        baseOffset.set(defaultSpan, -defaultSpan, defaultSpan * 0.6);
+    const span = getDetectionSpan(det);
+    let baseOffset = camera.position.clone().sub(controls.target);
+    const desiredLen = Math.max(span * 1.2, 3);
+    if (!Number.isFinite(baseOffset.length()) || baseOffset.length() < 0.5 || baseOffset.length() > desiredLen * 2.5) {
+        baseOffset = new THREE.Vector3(span * 0.8, -span * 0.8, span * 0.6);
+    } else {
+        baseOffset.normalize().multiplyScalar(desiredLen);
+        baseOffset.z = Math.max(baseOffset.z, span * 0.5);
     }
     if (state.followPanBackup === null) {
         state.followPanBackup = controls.enablePan;
