@@ -30,6 +30,19 @@ HEADING_UNLOCK_ANGLE_THR = 140.0
 HEADING_LOCK_FRAMES = 2
 HEADING_ALIGN_MIN_DIST = 0.3
 
+# Kalman noise/variance tuning for smoother yet responsive tracks
+POS_INIT_COV_SCALE = 250.0
+POS_PROCESS_NOISE_SCALE = 1.0
+POS_MEAS_NOISE_SCALE = 2.0
+YAW_PROCESS_NOISE_SCALE = 0.05
+YAW_MEAS_NOISE_SCALE = 0.5
+SIZE_PROCESS_NOISE_SCALE = 0.01
+SIZE_MEAS_NOISE_SCALE = 0.5
+
+# History-based smoothing parameters
+STATE_HISTORY_SIZE = 8
+DEFAULT_SMOOTH_WINDOW = 3
+
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
     a = (angle + 180.0) % 360.0
@@ -128,13 +141,25 @@ class Track:
         self.last_pos = np.array(bbox_init[1:3], dtype=float)
         
         # 💡 파라미터 조정
-        self.kf_pos.P *= 1000.
-        self.kf_pos.Q *= 0.1
-        self.kf_pos.R *= 10.0
+        self.kf_pos.P *= POS_INIT_COV_SCALE
+        self.kf_pos.Q *= POS_PROCESS_NOISE_SCALE
+        self.kf_pos.R *= POS_MEAS_NOISE_SCALE
 
-        self.kf_yaw = self._init_2d_kf(initial_value=self.car_yaw, Q_scale=0.01, R_scale=1.0)
-        self.kf_length = self._init_2d_kf(initial_value=self.car_length, Q_scale=0.001, R_scale=1.0)
-        self.kf_width = self._init_2d_kf(initial_value=self.car_width, Q_scale=0.001, R_scale=1.0)
+        self.kf_yaw = self._init_2d_kf(
+            initial_value=self.car_yaw,
+            Q_scale=YAW_PROCESS_NOISE_SCALE,
+            R_scale=YAW_MEAS_NOISE_SCALE,
+        )
+        self.kf_length = self._init_2d_kf(
+            initial_value=self.car_length,
+            Q_scale=SIZE_PROCESS_NOISE_SCALE,
+            R_scale=SIZE_MEAS_NOISE_SCALE,
+        )
+        self.kf_width = self._init_2d_kf(
+            initial_value=self.car_width,
+            Q_scale=SIZE_PROCESS_NOISE_SCALE,
+            R_scale=SIZE_MEAS_NOISE_SCALE,
+        )
 
         self.time_since_update = 0
         self.hits = 1
@@ -147,6 +172,8 @@ class Track:
         self.current_color: Optional[str] = None
         self.total_color_votes = 0
         self._update_color(color)
+
+        self._append_history_entry()
 
         # 이동 방향 기반 yaw 부호 고정용 상태
         self.heading_locked: bool = False
@@ -205,6 +232,7 @@ class Track:
             self.state = TrackState.CONFIRMED
 
         self._update_color(color)
+        self._append_history_entry()
 
     def _update_color(self, color: Optional[str]) -> None:
         normalized = normalize_color_label(color)
@@ -213,6 +241,13 @@ class Track:
         self.color_counts[normalized] += 1
         self.total_color_votes += 1
         self.current_color = self.color_counts.most_common(1)[0][0]
+
+    def _append_history_entry(self, state: Optional[np.ndarray] = None) -> None:
+        if state is None:
+            state = self._assemble_state()
+        self.history.append(state)
+        if len(self.history) > STATE_HISTORY_SIZE:
+            self.history.pop(0)
 
     def _compute_heading_from_motion(self, meas_xy: np.ndarray) -> Optional[float]:
         """
@@ -277,7 +312,7 @@ class Track:
             return 0.0
         return self.color_counts[self.current_color] / float(self.total_color_votes)
 
-    def get_state(self) -> np.ndarray:
+    def _assemble_state(self) -> np.ndarray:
         return np.array([
             self.cls,
             self.kf_pos.x[0, 0],
@@ -286,6 +321,34 @@ class Track:
             self.car_width,
             self.car_yaw,
         ], dtype=float)
+
+    def get_state(self, smooth_window: int = 1) -> np.ndarray:
+        base_state = self._assemble_state()
+        if smooth_window <= 1:
+            return base_state
+
+        samples: List[np.ndarray] = list(self.history[-smooth_window:])
+        if self.time_since_update > 0 or not samples:
+            samples.append(base_state)
+        samples = samples[-smooth_window:]
+        if not samples:
+            return base_state
+
+        stacked = np.vstack(samples)
+        pos_size = np.mean(stacked[:, 1:5], axis=0)
+        yaw_vals = stacked[:, 5]
+        yaw_rad = np.deg2rad(yaw_vals)
+        yaw_mean = wrap_deg(math.degrees(math.atan2(np.mean(np.sin(yaw_rad)), np.mean(np.cos(yaw_rad)))))
+
+        smoothed_state = np.array([
+            self.cls,
+            pos_size[0],
+            pos_size[1],
+            max(0.0, pos_size[2]),
+            max(0.0, pos_size[3]),
+            yaw_mean,
+        ], dtype=float)
+        return smoothed_state
 
     def _enforce_forward_heading(self, current_xy): # 이동방향과 yaw 맞추기
         if self.heading_locked:
@@ -317,26 +380,22 @@ class Track:
         self.locked_heading = None
 
 
-    def get_state(self):
-        # 현재 추적된 상태와 저장된 OBB 정보를 결합하여 CARLA 형식으로 반환
-        # 1. 칼만 필터에서 예측/보정된 중심 좌표
-        x_c, y_c = self.kf_pos.x[:2].flatten()
-        
-        # 2. 칼만 필터에서 예측/보정된 길이, 너비, 방향
-        length = self.car_length # self.kf_length.x[0, 0]
-        width = self.car_width # self.kf_width.x[0, 0]
-        yaw = self.car_yaw # self.kf_yaw.x[0, 0]
-        
-        # [class=0, x_c, y_c, l, w, angle] 형식으로 출력
-        return np.array([0, x_c, y_c, length, width, yaw])
 
 class SortTracker:
-    def __init__(self, max_age: int = 3, min_hits: int = 3, iou_threshold: float = 0.3, color_penalty: float = 0.3):
+    def __init__(
+        self,
+        max_age: int = 3,
+        min_hits: int = 3,
+        iou_threshold: float = 0.3,
+        color_penalty: float = 0.3,
+        smooth_window: int = DEFAULT_SMOOTH_WINDOW,
+    ):
         self.tracks: List[Track] = []
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
         self.color_penalty = color_penalty
+        self.smooth_window = max(1, smooth_window)
         self.last_matches: List[Tuple[int, int]] = []
 
     def update(
@@ -385,7 +444,6 @@ class SortTracker:
             track = active_tracks[track_idx]
             color = det_colors[det_idx] if det_colors else None
             track.update(detections_carla[det_idx], color=color)
-            track.history.append(track.get_state().copy())
             self.last_matches.append((track.id, det_idx))
 
         for track_idx in unmatched_tracks:
@@ -408,7 +466,7 @@ class SortTracker:
         output_results = []
         for track in self.tracks:
             if track.state in (TrackState.CONFIRMED, TrackState.LOST):
-                state = track.get_state()
+                state = track.get_state(smooth_window=self.smooth_window)
                 output_results.append(np.array([track.id, *state], dtype=float))
 
         return np.array(output_results) if output_results else np.array([])

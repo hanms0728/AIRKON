@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-every",
         type=int,
-        default=200,
+        default=400,
         help="폴더 처리 중 N장의 이미지마다 진행 로그 출력",
     )
     return parser.parse_args()
