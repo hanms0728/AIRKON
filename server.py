@@ -33,7 +33,6 @@ COLOR_HEX_MAP = {
     "purple": "#781de7",
 }
 
-
 def normalize_color_label(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None

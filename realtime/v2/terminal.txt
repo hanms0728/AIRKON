@@ -6,4 +6,4 @@ python main.py --weights onnx/yolo11m_2_5d_real_coshow_v2.onnx --camera-config c
 python server.py \
   --udp-port 50050 --no-invert-bev-y\
   --tx-host 192.168.0.200 --tx-port 60100 \
-  --carla-host 127.0.0.1 --carla-port 60200 --mesh-scale 4 --overlay-base-url http://0.0.0.0:10000
+  --carla-host 127.0.0.1 --carla-port 60200 --mesh-scale 4 --overlay-base-url http://0.0.0.0:10000 --flip-marker-y

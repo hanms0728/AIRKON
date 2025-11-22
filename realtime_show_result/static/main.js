@@ -1589,6 +1589,7 @@ function setupCameraMarkers(markers) {
         state.markerObjects.push(sprite);
         state.markerLookup.set(marker.key, marker);
     });
+    updateMarkerVisibility(null);
 }
 
 function clearCameraMarkers() {
@@ -1695,6 +1696,7 @@ function handleMarkerClick(marker) {
     }
     state.activeMarkerKey = marker.key;
     updateMarkerHighlight(marker.key);
+    updateMarkerVisibility(marker.key);
     if (isLive || isFusion) {
         setLayoutMode("local");
     }
@@ -1781,6 +1783,7 @@ function resetToGlobalView(options = {}) {
     clearDetectionFollow();
     state.localLoadToken += 1;
     updateMarkerHighlight(null);
+    updateMarkerVisibility(null);
     setLocalCloudVisibility(null);
     if (state.globalCloud) {
         state.globalCloud.visible = true;
@@ -1807,6 +1810,17 @@ function updateMarkerHighlight(activeKey) {
         if (scale) {
             sprite.scale.set(scale, scale, 1);
         }
+    });
+}
+
+function updateMarkerVisibility(activeKey) {
+    const hasActive = Boolean(activeKey);
+    state.markerLookup.forEach((marker) => {
+        const sprite = marker.sprite;
+        if (!sprite) {
+            return;
+        }
+        sprite.visible = !hasActive || marker.key === activeKey;
     });
 }
 
