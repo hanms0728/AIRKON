@@ -49,6 +49,9 @@ const state = {
     markerLookup: new Map(),
     markerObjects: [],
     markerGroup: null,
+    markerModel: null,
+    markerModelPromise: null,
+    globalHeightLookup: null,
     activeMarkerKey: null,
     localClouds: new Map(),
     localLoadToken: 0,
@@ -100,6 +103,17 @@ const fusionEndpointMap = {
 
 const defaultLocalColor = new THREE.Color(0xf7b801);
 const defaultLocalColorArray = [defaultLocalColor.r, defaultLocalColor.g, defaultLocalColor.b];
+const markerModelUrl = "/static/assets/street_lamp_hanging.glb";
+const markerTargetHeight = 3.2;          // 가로등 높이 목표 (GLB 스케일링용)
+const markerActiveScaleMult = 1.06;      // 선택 시 약간만 확대
+const markerDefaultScale = 3;          // 기본 가로등 스케일 (전체 그룹)
+const markerLabelBaseScale = 0.75;       // 라벨 기본 크기
+const markerLabelActiveScale = 0.9;      // 라벨 활성 크기
+const markerLabelOffset = 2.0;           // 라벨을 올려놓을 기본 높이(마커 z 기준)
+const markerLabelBaseColor = "#ff9f1c";
+const markerLabelHighlightColor = "#2ec4b6";
+const markerBulbOffsetLocal = { x: 0.85, y: 0.0 }; // streetLightMaker 기준 전구 중심 오프셋(+X 방향이 전면)
+const markerBackOffset = 5.0;               // 로컬 시점에서 가로등을 뒤로 살짝 빼는 거리
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0b0b);
@@ -207,7 +221,7 @@ async function initPlaybackMode() {
     updateFrameIndicator();
 
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
-    setupCameraMarkers(state.site?.camera_positions || []);
+    await setupCameraMarkers(state.site?.camera_positions || []);
 
     if (state.totalFrames > 0) {
         await goToFrame(0);
@@ -230,7 +244,7 @@ async function initFusionMode() {
     }
     state.cameras = deriveCamerasFromSite(state.site);
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
-    setupCameraMarkers(state.site?.camera_positions || []);
+    await setupCameraMarkers(state.site?.camera_positions || []);
     setupFusionCameraSelect();
     startFusionPolling();
 }
@@ -263,7 +277,7 @@ async function initLiveMode() {
     });
 
     await Promise.all([loadPointCloud(), loadVehiclePrototype()]);
-    setupCameraMarkers(state.site?.camera_positions || []);
+    await setupCameraMarkers(state.site?.camera_positions || []);
 
     if (!state.cameraMarkers.length && hasCameras) {
         const firstId = Number(state.cameras[0].camera_id);
@@ -315,6 +329,7 @@ async function loadPointCloud() {
                 scene.add(points);
                 state.globalCloud = points;
                 buildGlobalColorLookup(geometry);
+                buildGlobalHeightLookup(geometry);
 
                 if (geometry.boundingBox) {
                     const center = new THREE.Vector3();
@@ -1312,8 +1327,17 @@ function applyInitialViewOverride(force = false) {
     }
     const tgt = target || { x: controls.target.x, y: controls.target.y, z: controls.target.z };
     const off = offset || { x: 18, y: -18, z: 12 };
+    const eye = {
+        x: tgt.x + off.x,
+        y: tgt.y + off.y,
+        z: tgt.z + off.z,
+    };
+    const minAboveTarget = Math.max(1.0, Math.abs(off.z) * 0.5, 3.0);
+    if (eye.z <= tgt.z + 0.1) {
+        eye.z = tgt.z + minAboveTarget;
+    }
     controls.target.set(tgt.x, tgt.y, tgt.z);
-    camera.position.set(tgt.x + off.x, tgt.y + off.y, tgt.z + off.z);
+    camera.position.set(eye.x, eye.y, eye.z);
     camera.up.set(0, 0, 1);
     camera.lookAt(tgt.x, tgt.y, tgt.z);
     state.initialViewApplied = true;
@@ -1325,6 +1349,32 @@ function shouldFlipMarkerX() {
 
 function shouldFlipMarkerY() {
     return Boolean(state.config?.flipMarkerY);
+}
+
+function computeMarkerYawRad(marker) {
+    const rot = marker?.rotation || {};
+    let yaw = THREE.MathUtils.degToRad(rot.yaw || 0);
+    let dirX = Math.cos(yaw);
+    let dirY = Math.sin(yaw);
+    if (shouldFlipMarkerX()) {
+        dirX *= -1;
+    }
+    if (shouldFlipMarkerY()) {
+        dirY *= -1;
+    }
+    if (!Number.isFinite(dirX) || !Number.isFinite(dirY) || (dirX === 0 && dirY === 0)) {
+        return 0;
+    }
+    return Math.atan2(dirY, dirX);
+}
+
+function rotateOffset(offset, yawRad) {
+    const c = Math.cos(yawRad);
+    const s = Math.sin(yawRad);
+    return {
+        x: offset.x * c - offset.y * s,
+        y: offset.x * s + offset.y * c,
+    };
 }
 
 function buildMarkerDisplayPosition(rawPosition) {
@@ -1341,7 +1391,7 @@ function buildMarkerDisplayPosition(rawPosition) {
     if (shouldFlipMarkerY()) {
         y = -y;
     }
-    return { x, y, z };
+    return { x, y, z};
 }
 
 function getMarkerFocusPosition(marker) {
@@ -1371,6 +1421,7 @@ function computeMarkerViewPose(marker) {
     if (shouldFlipMarkerY()) {
         dir.y *= -1;
     }
+    const yawFromDir = Math.atan2(dir.y, dir.x);
     if (dir.lengthSq() < 1e-6) {
         dir.set(0, 1, 0);
     } else {
@@ -1378,13 +1429,16 @@ function computeMarkerViewPose(marker) {
     }
     const viewDistance = Math.max(5, Number(marker.view_distance || state.config?.markerViewDistance || 20));
     const target = eye.clone().addScaledVector(dir, Math.max(5, viewDistance * 0.5));
-    return { position: eye, target };
+    return { position: eye, target, yawRad: yawFromDir };
 }
 
 function lockViewToMarker(marker, options = {}) {
     const pose = computeMarkerViewPose(marker);
     if (!pose) {
         return;
+    }
+    if (pose.yawRad != null && marker && marker.object) {
+        marker.object.rotation.set(0, 0, pose.yawRad);
     }
     if (!state.viewLockBackup) {
         state.viewLockBackup = {
@@ -1540,6 +1594,57 @@ function lookupGlobalColor(x, y, z) {
     ];
 }
 
+function buildGlobalHeightLookup(geometry) {
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr) {
+        state.globalHeightLookup = null;
+        return;
+    }
+    const scale = Number(state.config?.markerHeightVoxelScale) || Number(state.config?.markerColorVoxelScale) || 10;
+    const map = new Map();
+    const posArray = posAttr.array;
+    const count = posAttr.count;
+    for (let i = 0; i < count; i += 1) {
+        const base = i * 3;
+        const px = posArray[base + 0];
+        const py = posArray[base + 1];
+        const pz = posArray[base + 2];
+        const key = `${Math.round(px * scale)}|${Math.round(py * scale)}`;
+        const existing = map.get(key);
+        if (existing === undefined || pz < existing) {
+            map.set(key, pz);
+        }
+    }
+    state.globalHeightLookup = {
+        map,
+        scale,
+        neighborOffsets: [-2, -1, 0, 1, 2],
+    };
+}
+
+function lookupGlobalHeight(x, y) {
+    const lookup = state.globalHeightLookup;
+    if (!lookup) {
+        return null;
+    }
+    const qx = Math.round(x * lookup.scale);
+    const qy = Math.round(y * lookup.scale);
+    const offsets = lookup.neighborOffsets || [0];
+    let bestZ = null;
+    for (let ix = 0; ix < offsets.length; ix += 1) {
+        for (let iy = 0; iy < offsets.length; iy += 1) {
+            const key = `${qx + offsets[ix]}|${qy + offsets[iy]}`;
+            if (lookup.map.has(key)) {
+                const z = lookup.map.get(key);
+                if (bestZ === null || z < bestZ) {
+                    bestZ = z;
+                }
+            }
+        }
+    }
+    return bestZ;
+}
+
 function createColorArrayForPositions(positionArray) {
     const count = positionArray.length / 3;
     const colors = new Float32Array(count * 3);
@@ -1566,7 +1671,143 @@ function applyGlobalColorsToGeometry(geometry) {
     return true;
 }
 
-function setupCameraMarkers(markers) {
+async function ensureMarkerModel() {
+    if (state.markerModel) {
+        return state.markerModel;
+    }
+    if (state.markerModelPromise) {
+        return state.markerModelPromise;
+    }
+    const loader = new GLTFLoader();
+    state.markerModelPromise = new Promise((resolve) => {
+        loader.load(
+            markerModelUrl,
+            (gltf) => {
+                const content = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+                if (!content) {
+                    console.warn("Marker model missing content");
+                    state.markerModel = null;
+                    resolve(null);
+                    return;
+                }
+                const model = content.clone(true);
+                const bbox = new THREE.Box3().setFromObject(model);
+                const size = new THREE.Vector3();
+                bbox.getSize(size);
+                const center = new THREE.Vector3();
+                bbox.getCenter(center);
+    const brightMaterial = new THREE.MeshStandardMaterial({
+        color: 0xffe6a3,
+        emissive: 0x2d240f,
+        roughness: 0.5,
+        metalness: 0.1,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.95,
+    });
+    model.traverse((obj) => {
+        if (obj.isMesh) {
+            obj.material = brightMaterial.clone();
+            if ("frustumCulled" in obj) {
+                obj.frustumCulled = false;
+            }
+            obj.castShadow = false;
+            obj.receiveShadow = false;
+        }
+    });
+                model.position.sub(new THREE.Vector3(center.x, center.y, bbox.min.z));
+                const height = Math.max(size.z, 1e-3);
+                const targetHeight = markerTargetHeight;
+                const scale = targetHeight / height;
+                const holder = new THREE.Group();
+                holder.name = "MarkerModelTemplate";
+                holder.add(model);
+                holder.scale.setScalar(scale);
+                holder.updateMatrixWorld(true);
+                state.markerModelScale = scale;
+                state.markerModel = holder;
+                resolve(holder);
+            },
+            undefined,
+            (err) => {
+                console.warn("Marker model load failed", err);
+                state.markerModel = null;
+                resolve(null);
+            }
+        );
+    });
+    return state.markerModelPromise;
+}
+
+function cloneMarkerModel() {
+    if (!state.markerModel) {
+        return null;
+    }
+    const clone = state.markerModel.clone(true);
+    clone.traverse((obj) => {
+        if (obj.isMesh && obj.material && obj.material.clone) {
+            obj.material = obj.material.clone();
+        }
+    });
+    return clone;
+}
+
+function createMarkerLabelSprite(textures, marker) {
+    const material = new THREE.SpriteMaterial({
+        map: textures.base,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        sizeAttenuation: true,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.userData.baseTexture = textures.base;
+    sprite.userData.highlightTexture = textures.highlight;
+    sprite.userData.baseScale = markerLabelBaseScale;
+    sprite.userData.activeScale = markerLabelActiveScale;
+    sprite.scale.set(markerLabelBaseScale, markerLabelBaseScale, 1);
+    const offsetRaw = marker?.label_offset ?? marker?.labelHeight ?? marker?.label_height;
+    const offset = Number(offsetRaw);
+    const finalOffset = Number.isFinite(offset) ? offset : markerLabelOffset;
+    sprite.position.set(0, 0, finalOffset);
+    sprite.renderOrder = 2;
+    return sprite;
+}
+
+async function createMarkerSprite(marker) {
+    const label = (marker.name || marker.key || (marker.camera_id != null ? `cam${marker.camera_id}` : "?")).toString();
+    const textures = createMarkerTextures(label);
+    const labelSprite = createMarkerLabelSprite(textures, marker);
+    let modelGroup = null;
+    try {
+        await ensureMarkerModel();
+        modelGroup = cloneMarkerModel();
+    } catch (err) {
+        console.warn("Marker model clone failed", err);
+    }
+    const group = new THREE.Group();
+    group.name = `Marker-${label}`;
+    if (modelGroup) {
+        group.add(modelGroup);
+    }
+    group.add(labelSprite);
+    const configScale = Number(state.config?.markerModelScale);
+    const baseScale = Number.isFinite(configScale) ? configScale : markerDefaultScale;
+    const activeScale = baseScale * markerActiveScaleMult;
+    group.scale.setScalar(baseScale);
+    marker.baseScale = baseScale;
+    marker.activeScale = activeScale;
+    marker.labelSprite = labelSprite;
+    marker.baseTexture = textures.base;
+    marker.highlightTexture = textures.highlight;
+    marker.sprite = labelSprite;
+    marker.object = group;
+    labelSprite.userData.marker = marker;
+    group.userData.marker = marker;
+    return group;
+}
+
+async function setupCameraMarkers(markers) {
     clearCameraMarkers();
     resetToGlobalView();
     if (!Array.isArray(markers) || !markers.length || !state.markerGroup) {
@@ -1575,20 +1816,35 @@ function setupCameraMarkers(markers) {
     }
     state.cameraMarkers = markers.map((marker) => {
         const key = marker.key || marker.name || (marker.camera_id != null ? `cam${marker.camera_id}` : `marker-${Date.now()}`);
-        const displayPosition = buildMarkerDisplayPosition(marker.position);
+        const displayPosition = buildMarkerDisplayPosition(marker.position); // 이게 시점 절대 고치지 말기
         return { ...marker, key, displayPosition };
     });
     state.markerLookup = new Map();
     state.markerObjects = [];
-    state.cameraMarkers.forEach((marker) => {
-        const sprite = createMarkerSprite(marker);
-        if (!sprite) {
-            return;
+    for (const marker of state.cameraMarkers) {
+        const obj = await createMarkerSprite(marker);
+        if (!obj) {
+            continue;
         }
-        state.markerGroup.add(sprite);
-        state.markerObjects.push(sprite);
+        const yawRad = computeMarkerYawRad(marker);
+        const templateScale = Number(state.markerModelScale) || 1;
+        const groupScale = Number(marker.baseScale) || 1;
+        const offsetWorld = rotateOffset({
+            x: markerBulbOffsetLocal.x * templateScale * groupScale,
+            y: markerBulbOffsetLocal.y * templateScale * groupScale,
+        }, yawRad);
+        const backWorld = rotateOffset({ x: -markerBackOffset, y: 0 }, yawRad);
+        const groundZ = lookupGlobalHeight(marker.displayPosition.x, marker.displayPosition.y);
+        const baseZ = Number.isFinite(groundZ) ? groundZ : marker.displayPosition.z;
+        const posX = marker.displayPosition.x + offsetWorld.x + backWorld.x;
+        const posY = marker.displayPosition.y + offsetWorld.y + backWorld.y;
+        obj.position.set(posX, posY, baseZ);
+        obj.rotation.set(0, 0, yawRad);
+        marker.yawRad = yawRad;
+        state.markerGroup.add(obj);
+        state.markerObjects.push(obj);
         state.markerLookup.set(marker.key, marker);
-    });
+    }
     updateMarkerVisibility(null);
 }
 
@@ -1616,41 +1872,10 @@ function clearCameraMarkers() {
     state.cameraMarkers = [];
 }
 
-function createMarkerSprite(marker) {
-    if (!state.markerGroup) {
-        return null;
-    }
-    const label = (marker.name || marker.key || (marker.camera_id != null ? `cam${marker.camera_id}` : "?")).toString();
-    const textures = createMarkerTextures(label);
-    const material = new THREE.SpriteMaterial({
-        map: textures.base,
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-    });
-    const sprite = new THREE.Sprite(material);
-    const baseScale = 3.0;
-    const activeScale = 3.8;
-    sprite.scale.set(baseScale, baseScale, 1);
-    const pos = marker.displayPosition || marker.position || {};
-    const x = Number(pos.x ?? pos[0]) || 0;
-    const y = Number(pos.y ?? pos[1]) || 0;
-    const z = Number(pos.z ?? pos[2]) || 0;
-    sprite.position.set(x, y, z + 2.5);
-    sprite.renderOrder = 2;
-    sprite.userData.marker = marker;
-    sprite.userData.baseTexture = textures.base;
-    sprite.userData.highlightTexture = textures.highlight;
-    sprite.userData.baseScale = baseScale;
-    sprite.userData.activeScale = activeScale;
-    marker.sprite = sprite;
-    return sprite;
-}
-
 function createMarkerTextures(label) {
     return {
-        base: drawMarkerTexture(label, "#ff9f1c"),
-        highlight: drawMarkerTexture(label, "#2ec4b6"),
+        base: drawMarkerTexture(label, markerLabelBaseColor),
+        highlight: drawMarkerTexture(label, markerLabelHighlightColor),
     };
 }
 
@@ -1660,20 +1885,27 @@ function drawMarkerTexture(label, color) {
     canvas.height = 256;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.beginPath();
-    ctx.arc(128, 128, 110, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.lineWidth = 8;
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
-    ctx.stroke();
-    ctx.fillStyle = "#ffffff";
     const len = label.length;
-    const fontSize = len <= 3 ? 110 : len <= 6 ? 80 : 60;
+    const fontSize = len <= 3 ? 120 : len <= 6 ? 90 : 70;
     ctx.font = `bold ${fontSize}px 'Segoe UI', Arial, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(label, 128, 138);
+    const metrics = ctx.measureText(label);
+    const padding = 12;
+    const textWidth = metrics.width;
+    const textHeight = fontSize;
+    const boxWidth = textWidth + padding * 2;
+    const boxHeight = textHeight + padding * 1.4;
+    const boxX = 128 - boxWidth / 2;
+    const boxY = 128 - boxHeight / 2;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+    ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 14);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "rgba(0,0,0,0.65)";
+    ctx.lineWidth = 6;
+    ctx.strokeText(label, 128, 132);
+    ctx.fillText(label, 128, 132);
     const texture = new THREE.CanvasTexture(canvas);
     texture.needsUpdate = true;
     return texture;
@@ -1796,19 +2028,22 @@ function resetToGlobalView(options = {}) {
 
 function updateMarkerHighlight(activeKey) {
     state.markerLookup.forEach((marker) => {
-        const sprite = marker.sprite;
-        if (!sprite) {
-            return;
-        }
+        const labelSprite = marker.labelSprite || marker.sprite;
         const isActive = marker.key === activeKey;
-        const targetTexture = isActive ? sprite.userData.highlightTexture : sprite.userData.baseTexture;
-        if (targetTexture && sprite.material.map !== targetTexture) {
-            sprite.material.map = targetTexture;
-            sprite.material.needsUpdate = true;
+        const targetTexture = isActive
+            ? (marker.highlightTexture || labelSprite?.userData?.highlightTexture)
+            : (marker.baseTexture || labelSprite?.userData?.baseTexture);
+        if (labelSprite && targetTexture && labelSprite.material.map !== targetTexture) {
+            labelSprite.material.map = targetTexture;
+            labelSprite.material.needsUpdate = true;
         }
-        const scale = isActive ? sprite.userData.activeScale : sprite.userData.baseScale;
-        if (scale) {
-            sprite.scale.set(scale, scale, 1);
+        const labelScale = isActive ? (labelSprite?.userData?.activeScale || markerLabelActiveScale) : (labelSprite?.userData?.baseScale || markerLabelBaseScale);
+        if (labelSprite && labelScale) {
+            labelSprite.scale.set(labelScale, labelScale, 1);
+        }
+        const targetScale = isActive ? marker.activeScale : marker.baseScale;
+        if (marker.object && targetScale) {
+            marker.object.scale.setScalar(targetScale);
         }
     });
 }
@@ -1816,11 +2051,12 @@ function updateMarkerHighlight(activeKey) {
 function updateMarkerVisibility(activeKey) {
     const hasActive = Boolean(activeKey);
     state.markerLookup.forEach((marker) => {
-        const sprite = marker.sprite;
-        if (!sprite) {
-            return;
+        const targetVisible = !hasActive || marker.key === activeKey;
+        if (marker.object) {
+            marker.object.visible = targetVisible;
+        } else if (marker.sprite) {
+            marker.sprite.visible = targetVisible;
         }
-        sprite.visible = !hasActive || marker.key === activeKey;
     });
 }
 
@@ -1860,12 +2096,17 @@ function performMarkerHitTest(clientX, clientY) {
     pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects(state.markerObjects, false);
+    const hits = raycaster.intersectObjects(state.markerObjects, true);
     if (!hits.length) {
         return;
     }
     const hit = hits[0];
-    const marker = hit.object?.userData?.marker;
+    let obj = hit.object;
+    let marker = obj?.userData?.marker;
+    while (!marker && obj && obj.parent) {
+        obj = obj.parent;
+        marker = obj.userData?.marker;
+    }
     if (marker) {
         handleMarkerClick(marker);
     }
