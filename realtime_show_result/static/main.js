@@ -661,6 +661,7 @@ function getDetectionColor(det) {
 }
 
 function renderDetections(detections) {
+    detections = filterDetectionsForLocalView(detections);
     const count = Array.isArray(detections) ? detections.length : 0;
     ensureInstancedCapacity(count);
 
@@ -754,6 +755,53 @@ function renderDetections(detections) {
     }
 
     updateDetectionFollowPose(detections);
+}
+
+function parseDetectionCamId(det) {
+    if (!det) return null;
+    if (det.camera_id != null && Number.isFinite(Number(det.camera_id))) {
+        return Number(det.camera_id);
+    }
+    if (det.cam != null) {
+        const text = `${det.cam}`;
+        const m = text.match(/\d+/);
+        if (m) {
+            const n = Number(m[0]);
+            if (Number.isFinite(n)) return n;
+        }
+    }
+    const sources = det.source_cams || det.sources;
+    if (Array.isArray(sources) && sources.length) {
+        for (const s of sources) {
+            const m = `${s}`.match(/\d+/);
+            if (m) {
+                const n = Number(m[0]);
+                if (Number.isFinite(n)) return n;
+            }
+        }
+    }
+    return null;
+}
+
+function filterDetectionsForLocalView(detections) {
+    if (!state.activeMarkerKey || state.layoutMode !== "local") {
+        return detections;
+    }
+    const marker = state.markerLookup.get(state.activeMarkerKey);
+    if (!marker) {
+        return detections;
+    }
+    const markerCamId = marker.camera_id ?? marker.id;
+    if (!Number.isFinite(markerCamId)) {
+        return detections;
+    }
+    if (!Array.isArray(detections)) {
+        return [];
+    }
+    return detections.filter((det) => {
+        const camId = parseDetectionCamId(det);
+        return camId === markerCamId;
+    });
 }
 
 async function fetchJson(url) {
