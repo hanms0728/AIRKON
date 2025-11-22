@@ -466,10 +466,10 @@ class GlobalWebServer:
     def _register_routes(self):
         @self.app.get("/")
         def _root():
-            page = self.page_map.get("raw")
+            page = self.page_map.get("tracks")
             if page and page.exists():
                 return FileResponse(str(page))
-            return {"status": "ok", "message": "fusion_raw.html missing"}
+            return {"status": "ok", "message": "fusion_tracks.html missing"}
 
         @self.app.get("/fusion/raw")
         def _view_raw():
