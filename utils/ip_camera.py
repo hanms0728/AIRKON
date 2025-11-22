@@ -14,26 +14,9 @@ class IPCameraStreamer:
     def __init__(self):
         # 6개 카메라 구성
         self.camera_configs = [
-            {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.26', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 2, 'transport': 'tcp', 'width': 1536, 'height': 864},
-
-            {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
-
-            {'ip': '192.168.0.31', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
-
-            {'ip': '192.168.0.37', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
-
-            {'ip': '192.168.0.29', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
-
-            {'ip': '192.168.0.27', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
         ]
 
         # 프레임 저장 버퍼(최신 1장)
@@ -46,6 +29,8 @@ class IPCameraStreamer:
         self.connected = {cfg['camera_id']: False for cfg in self.camera_configs}
         self.save_dir = "first_frames"
         os.makedirs(self.save_dir, exist_ok=True)
+        self.snapshot_dir = "cam_26"
+        os.makedirs(self.snapshot_dir, exist_ok=True)
 
         # 카메라 스레드 시작
         self.threads = []
@@ -183,13 +168,40 @@ class IPCameraStreamer:
                 cam_id = cfg['camera_id']
                 if self.latest[cam_id]:
                     frame = self.latest[cam_id][-1]
-                    small = cv2.resize(frame, (0, 0), fx=0.4, fy=0.4)
+                    small = cv2.resize(frame, (0, 0), fx=1, fy=1)
                     cv2.imshow(f"Camera {cam_id}", small)
 
-            cv2.waitKey(1)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (10, 13):
+                self.save_snapshot()
             time.sleep(0.01)
 
+
     # --------------------------------------------------------------------
+    # Enter 키로 스냅샷 저장
+    # --------------------------------------------------------------------
+    def save_snapshot(self):
+        timestamp = time.strftime("%H%M%S")
+        # target_dir = os.path.join(self.snapshot_dir, timestamp)
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+
+        saved = 0
+        for cam_id, frames in self.latest.items():
+            if not frames:
+                continue
+            frame = frames[-1].copy()
+            filename = os.path.join(self.snapshot_dir, f"{self.snapshot_dir}_{timestamp}.jpg")
+            try:
+                cv2.imwrite(filename, frame)
+                saved += 1
+            except Exception as e:
+                print(f"[ERROR] Failed to save Enter snapshot for camera {cam_id}:", e)
+
+        if saved:
+            print(f"[SAVE] Enter snapshot saved ({saved} cameras) → {self.snapshot_dir}")
+        else:
+            print("[WARN] Enter pressed but no frames were available to save.")
+
     def stop(self):
         self.running = False
         for t in self.threads:
