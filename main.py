@@ -20,7 +20,6 @@ import queue
 from typing import Optional, Dict, List, Tuple
 import socket, json
 import os
-import colorsys
 from contextlib import contextmanager
 import open3d as o3d
 from fastapi import FastAPI, HTTPException
@@ -42,13 +41,14 @@ class CameraAssets:
 
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
-_COLOR_HUE_BANDS = (
-    ("red", 0.0, 40.0),
-    ("yellow", 60.0, 35.0),
-    ("green", 130.0, 45.0),
-    ("purple", 280.0, 80.0),  # covers purple/blue-ish tones
-    ("pink", 335.0, 30.0),
-)
+_COLOR_RGB_RULES = {
+    # (min R,G,B), (max R,G,B) in 0~1 range
+    "red":    {"min": (0.55, 0.00, 0.00), "max": (1.00, 0.40, 0.40)},
+    "pink":   {"min": (0.70, 0.30, 0.45), "max": (1.00, 0.65, 0.80)},
+    "green":  {"min": (0.00, 0.55, 0.00), "max": (0.45, 1.00, 0.45)},
+    "yellow": {"min": (0.65, 0.55, 0.00), "max": (1.00, 1.00, 0.38)},
+    "purple": {"min": (0.45, 0.00, 0.45), "max": (0.85, 0.45, 1.00)},
+}
 
 
 def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
@@ -66,37 +66,40 @@ def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, f
     return r / 255.0, g / 255.0, b / 255.0
 
 
-def _hue_score(hue_deg: float, center: float, window: float) -> float:
-    diff = abs(hue_deg - center) % 360.0
-    if diff > 180.0:
-        diff = 360.0 - diff
-    return max(0.0, 1.0 - diff / max(window, 1e-6))
+def _channel_score(value: float, low: float, high: float) -> float:
+    if value < low or value > high:
+        return 0.0
+    span = max(high - low, 1e-3)
+    mid = (low + high) * 0.5
+    return max(0.0, 1.0 - abs(value - mid) / (0.5 * span))
 
 
 def _classify_hex_color(hex_color: Optional[str]):
     rgb = _hex_to_rgb_unit(hex_color)
     if rgb is None:
         return None, 0.0, None
-    h, s, v = colorsys.rgb_to_hsv(*rgb)
-    h_deg = (h * 360.0) % 360.0
 
-    if v >= 0.65 and s <= 0.25:
-        sat_term = max(0.0, min(1.0, 1.0 - (s / 0.25)))
-        val_term = max(0.0, min(1.0, (v - 0.65) / max(1e-6, 0.35)))
-        confidence = float(0.5 * sat_term + 0.5 * val_term)
+    # White: 모든 채널이 밝고 균일한 경우 우선 처리
+    max_rgb = max(rgb)
+    min_rgb = min(rgb)
+    if min_rgb >= 0.7 and (max_rgb - min_rgb) <= 0.2:
+        brightness = max(0.0, min(1.0, (sum(rgb) / 3.0 - 0.7) / 0.3))
+        flatness = max(0.0, min(1.0, 1.0 - (max_rgb - min_rgb) / 0.2))
+        confidence = float(0.5 * brightness + 0.5 * flatness)
         embedding = [0.0] * len(COLOR_LABELS)
         embedding[_COLOR_LABEL_TO_INDEX["white"]] = confidence
         return "white", confidence, embedding
 
+    # RGB 범위 기반 색상 분류
     best_label = None
     best_score = 0.0
-    sat_term = max(0.0, min(1.0, (s - 0.2) / 0.8))
-    val_term = max(0.0, min(1.0, (v - 0.3) / 0.7))
-    for label, center, window in _COLOR_HUE_BANDS:
-        hue_component = _hue_score(h_deg, center, window)
-        if hue_component <= 0.0:
-            continue
-        score = float(hue_component * 0.6 + sat_term * 0.25 + val_term * 0.15)
+    intensity = max(0.0, min(1.0, (sum(rgb) / 3.0 - 0.15) / 0.85))
+    for label, rule in _COLOR_RGB_RULES.items():
+        mins = rule["min"]
+        maxs = rule["max"]
+        channel_scores = [_channel_score(v, lo, hi) for v, lo, hi in zip(rgb, mins, maxs)]
+        base_score = sum(channel_scores) / 3.0
+        score = float(base_score * 0.7 + intensity * 0.3)
         if score > best_score:
             best_score = score
             best_label = label
