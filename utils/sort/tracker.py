@@ -21,14 +21,14 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
 
 # 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
 # 최소 이동량(미터 단위 추정). 이보다 작으면 정지로 간주해 yaw 보정 생략
-FORWARD_HEADING_MIN_DIST = 0.3
+FORWARD_HEADING_MIN_DIST = 0.001
 # SORT 보정: 감지 yaw가 추정 yaw과 너무 반대면 180° 뒤집어서 사용
 YAW_SORT_CORRECTION_THRESHOLD = 150.0  # deg
 # 검출 yaw를 180° 주기로만 신뢰(앞/뒤 동일)하고, 이동 방향으로 부호를 고정하기 위한 파라미터
 HEADING_LOCK_ANGLE_THR = 45.0
 HEADING_UNLOCK_ANGLE_THR = 140.0
 HEADING_LOCK_FRAMES = 2
-HEADING_ALIGN_MIN_DIST = 0.3
+HEADING_ALIGN_MIN_DIST = 0.001
 
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
