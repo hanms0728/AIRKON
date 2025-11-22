@@ -42,14 +42,15 @@ class CameraAssets:
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
 _COLOR_RGB_RULES = {
-    # (min R,G,B), (max R,G,B) in 0~1 range
-    "red":    {"min": (0.55, 0.00, 0.00), "max": (1.00, 0.40, 0.40)},
-    "pink":   {"min": (0.70, 0.30, 0.45), "max": (1.00, 0.65, 0.80)},
-    "green":  {"min": (0.00, 0.55, 0.00), "max": (0.45, 1.00, 0.45)},
-    "yellow": {"min": (0.65, 0.55, 0.00), "max": (1.00, 1.00, 0.38)},
-    "purple": {"min": (0.45, 0.00, 0.45), "max": (0.85, 0.45, 1.00)},
+    "green": {
+        "min": (0.0863, 0.3647, 0.2784),
+        "max": (0.1725, 0.5882, 0.4196),
+    },
+    "red": {
+        "min": (0.2118, 0.0863, 0.0627),
+        "max": (0.5804, 0.4588, 0.4627),
+    },
 }
-
 
 def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
     if not hex_color:
@@ -108,6 +109,39 @@ def _classify_hex_color(hex_color: Optional[str]):
     embedding = [0.0] * len(COLOR_LABELS)
     embedding[_COLOR_LABEL_TO_INDEX[best_label]] = best_score
     return best_label, float(best_score), embedding
+
+
+def _classify_hex_color_strict(hex_color: Optional[str]):
+    """
+    RGB 범위 박스에 정확히 들어갈 때만 라벨을 반환한다.
+    - 겹치거나 한 개도 매칭되지 않으면 (None, 0.0, None)
+    - 기존 _classify_hex_color와 동일한 반환 형태를 유지한다.
+    """
+    rgb = _hex_to_rgb_unit(hex_color)
+    if rgb is None:
+        return None, 0.0, None
+
+    max_rgb = max(rgb)
+    min_rgb = min(rgb)
+    candidates = []
+
+    # 화이트는 밝고 편차가 작은 경우만 허용
+    if min_rgb >= 0.7 and (max_rgb - min_rgb) <= 0.2:
+        candidates.append("white")
+
+    for label, rule in _COLOR_RGB_RULES.items():
+        mins = rule["min"]
+        maxs = rule["max"]
+        if all(lo <= v <= hi for v, lo, hi in zip(rgb, mins, maxs)):
+            candidates.append(label)
+
+    if len(candidates) != 1:
+        return None, 0.0, None
+
+    label = candidates[0]
+    embedding = [0.0] * len(COLOR_LABELS)
+    embedding[_COLOR_LABEL_TO_INDEX[label]] = 1.0
+    return label, 1.0, embedding
 
 def _lut_mask(lut: Optional[dict]) -> Optional[np.ndarray]:
     if lut is None:
@@ -475,7 +509,7 @@ class InferWorker(threading.Thread):
             if idx < len(color_list):
                 color_hex = color_list[idx]
                 entry["color_hex"] = color_hex
-                label, confidence, embedding = _classify_hex_color(color_hex)
+                label, confidence, embedding = _classify_hex_color_strict(color_hex) # _classify_hex_color로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
                 if label:
                     entry["color"] = label
                     entry["color_confidence"] = confidence
