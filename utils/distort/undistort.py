@@ -55,7 +55,7 @@ def main():
 
     map1, map2 = cv2.initUndistortRectifyMap(K_use, dist, None, newK, (w, h), cv2.CV_16SC2)
     und = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
-    cv2.imwrite("real_image/undist_img/cam_3_36.jpg", und)
+    cv2.imwrite("real_image/undist_img/cam_.jpg", und)
     # Save next to original calib npz, same name + "_params"
     calib_path = args.calib
     calib_base = calib_path.rsplit(".", 1)[0]
