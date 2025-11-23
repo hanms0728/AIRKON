@@ -1251,6 +1251,22 @@ function stopLivePolling() {
     }
 }
 
+function formatLocalTimestamp(ts) {
+    if (typeof ts !== "number" || Number.isNaN(ts)) {
+        return "";
+    }
+    try {
+        const date = new Date(ts * 1000);
+        const datePart = date.toLocaleDateString();
+        const timePart = date.toLocaleTimeString(undefined, { hour12: false });
+        const ms = date.getMilliseconds().toString().padStart(3, "0");
+        return `${datePart} ${timePart}.${ms}`;
+    } catch (err) {
+        console.warn("formatLocalTimestamp failed", err);
+        return "";
+    }
+}
+
 async function fetchLiveDetections() {
     const camId = state.cameraId;
     if (camId == null) {
@@ -1261,8 +1277,10 @@ async function fetchLiveDetections() {
     if (statusEl) {
         const detCount = data?.detections?.length ?? 0;
         const ts = data?.capture_ts;
-        const tsText = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
-        statusEl.textContent = `cam${camId} | detections ${detCount} | ts ${tsText}`;
+        const tsRaw = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
+        const tsLocal = formatLocalTimestamp(typeof ts === "number" ? ts : Number(ts));
+        const localPart = tsLocal ? ` (${tsLocal})` : "";
+        statusEl.textContent = `cam${camId} | detections ${detCount} | ts ${tsRaw}${localPart}`;
     }
     updateOverlayImage(camId);
 }
@@ -1294,8 +1312,10 @@ async function fetchFusionDetections() {
     renderDetections(detections);
     if (statusEl) {
         const ts = data?.timestamp;
-        const tsText = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
-        statusEl.textContent = `${source.toUpperCase()} | count ${detections.length} | ts ${tsText}`;
+        const tsRaw = typeof ts === "number" ? ts.toFixed(3) : ts ?? "";
+        const tsLocal = formatLocalTimestamp(typeof ts === "number" ? ts : Number(ts));
+        const localPart = tsLocal ? ` (${tsLocal})` : "";
+        statusEl.textContent = `${source.toUpperCase()} | count ${detections.length} | ts ${tsRaw}${localPart}`;
     }
 }
 
@@ -1488,14 +1508,11 @@ function parseViewVector(vec) {
     return null;
 }
 
-function applyInitialViewOverride(force = false) {
-    if (state.initialViewApplied && !force) {
-        return;
-    }
+function computeInitialViewPose() {
     const target = parseViewVector(state.config?.initialViewTarget);
     const offset = parseViewVector(state.config?.initialViewOffset);
     if (!target && !offset) {
-        return;
+        return null;
     }
     const tgt = target || { x: controls.target.x, y: controls.target.y, z: controls.target.z };
     const off = offset || { x: 18, y: -18, z: 12 };
@@ -1508,11 +1525,43 @@ function applyInitialViewOverride(force = false) {
     if (eye.z <= tgt.z + 0.1) {
         eye.z = tgt.z + minAboveTarget;
     }
-    controls.target.set(tgt.x, tgt.y, tgt.z);
-    camera.position.set(eye.x, eye.y, eye.z);
-    camera.up.set(0, 0, 1);
-    camera.lookAt(tgt.x, tgt.y, tgt.z);
-    state.initialViewApplied = true;
+    return {
+        target: new THREE.Vector3(tgt.x, tgt.y, tgt.z),
+        eye: new THREE.Vector3(eye.x, eye.y, eye.z),
+    };
+}
+
+function applyInitialViewOverride(force = false, options = {}) {
+    if (state.initialViewApplied && !force) {
+        return;
+    }
+    const pose = computeInitialViewPose();
+    if (!pose) {
+        return;
+    }
+    const { target, eye } = pose;
+    const setPose = () => {
+        controls.target.copy(target);
+        camera.position.copy(eye);
+        camera.up.set(0, 0, 1);
+        camera.lookAt(target);
+        state.initialViewApplied = true;
+    };
+    const animate = Boolean(options.animate);
+    const duration = Math.max(0, Number(options.duration ?? state.config?.globalResetDurationMs ?? 900));
+    if (!animate || duration === 0) {
+        setPose();
+        return;
+    }
+    state.viewLockAnimation = {
+        start: performance.now(),
+        duration,
+        fromPos: camera.position.clone(),
+        fromTarget: controls.target.clone(),
+        toPos: eye.clone(),
+        toTarget: target.clone(),
+        onComplete: setPose,
+    };
 }
 
 function shouldFlipMarkerX() {
@@ -1667,22 +1716,29 @@ function updateViewLockAnimation() {
 
 function releaseViewLock(options = {}) {
     const animate = Boolean(options.animate);
+    const preservePose = Boolean(options.preservePose);
     const backup = state.viewLockBackup;
     state.viewLockAnimation = null;
     if (!backup) {
         return;
     }
-    const restoreView = () => {
+    const restoreView = (applyPose = true) => {
         controls.enabled = backup.controlsEnabled;
         controls.enableRotate = backup.enableRotate;
         controls.enableZoom = backup.enableZoom;
         controls.enablePan = backup.enablePan;
-        camera.position.copy(backup.cameraPos);
-        controls.target.copy(backup.target);
-        camera.up.set(0, 0, 1);
-        camera.lookAt(backup.target);
+        if (applyPose) {
+            camera.position.copy(backup.cameraPos);
+            controls.target.copy(backup.target);
+            camera.up.set(0, 0, 1);
+            camera.lookAt(backup.target);
+        }
         state.viewLockBackup = null;
     };
+    if (preservePose) {
+        restoreView(false);
+        return;
+    }
     const duration = Math.max(0, Number(state.config?.markerViewDurationMs ?? 800));
     if (!animate || duration === 0) {
         restoreView();
@@ -2104,7 +2160,7 @@ function handleMarkerClick(marker) {
     const markerCamId = marker.camera_id ?? marker.id ?? marker.cameraId;
     const numericCamId = Number(markerCamId);
     if (state.activeMarkerKey === marker.key) {
-        resetToGlobalView();
+        resetToGlobalView({ initialView: true, animate: true });
         if (isLive) {
             enterLiveGlobalView();
         } else if (isFusion) {
@@ -2220,6 +2276,7 @@ function setLocalCloudVisibility(activeKey) {
 function resetToGlobalView(options = {}) {
     const animate = Boolean(options.animate);
     const initialView = Boolean(options.initialView);
+    const animateToInitial = initialView && animate;
     const animateRelease = initialView ? false : animate;
     if (isLive || isFusion) {
         setLayoutMode("global");
@@ -2233,9 +2290,14 @@ function resetToGlobalView(options = {}) {
     if (state.globalCloud) {
         state.globalCloud.visible = true;
     }
-    releaseViewLock({ animate: animateRelease });
+    if (animateToInitial) {
+        releaseViewLock({ preservePose: true });
+    } else {
+        releaseViewLock({ animate: animateRelease });
+    }
     if (initialView) {
-        applyInitialViewOverride(true);
+        const durationOverride = options.duration ?? options.durationMs;
+        applyInitialViewOverride(true, { animate: animateToInitial, duration: durationOverride });
     }
 }
 
@@ -2380,7 +2442,7 @@ function handleGlobalTouchEnd(evt) {
 
 function triggerEscapeAction() {
     clearDetectionFollow();
-    resetToGlobalView({ initialView: true });
+    resetToGlobalView({ initialView: true, animate: true });
     if (isLive) {
         enterLiveGlobalView();
     } else if (isFusion) {
