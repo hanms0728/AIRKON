@@ -606,6 +606,7 @@ class GlobalWebServer:
             "raw": self.static_root / "fusion_raw.html",
             "fused": self.static_root / "fusion_fused.html",
             "tracks": self.static_root / "fusion_tracks.html",
+            "admin": self.static_root / "fusion_admin.html",
         }
         self.viz_cfg = viz_config
         self.client_config = dict(client_config or {})
@@ -736,6 +737,13 @@ class GlobalWebServer:
             if page and page.exists():
                 return FileResponse(str(page))
             raise HTTPException(status_code=404, detail="fusion_tracks.html missing")
+
+        @self.app.get("/fusion/admin")
+        def _view_admin():
+            page = self.page_map.get("admin")
+            if page and page.exists():
+                return FileResponse(str(page))
+            raise HTTPException(status_code=404, detail="fusion_admin.html missing")
 
         @self.app.get("/healthz")
         def _health():

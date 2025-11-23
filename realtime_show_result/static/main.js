@@ -8,6 +8,13 @@ const isLive = mode === "live";
 const isPlayback = mode === "playback";
 const isFusion = mode.startsWith("fusion");
 const fusionSource = isFusion ? mode.replace("fusion_", "") : null;
+const adminModeEnabled = (() => {
+    if (typeof window.ADMIN_MODE === "boolean") {
+        return Boolean(window.ADMIN_MODE);
+    }
+    return mode === "fusion_admin";
+})();
+const adminAutoOpen = Boolean(window.ADMIN_AUTO_OPEN);
 
 const viewerEl = document.getElementById("viewer");
 const detectionListEl = document.getElementById("detection-list");
@@ -24,7 +31,7 @@ const overlayPlaceholderEl = document.getElementById("overlay-placeholder");
 const ADMIN_COLORS = ["red", "pink", "green", "white", "yellow", "purple", "none"];
 const ADMIN_HOTKEY = { key: "a", ctrl: true, shift: true };
 const adminState = {
-    enabled: isFusion,
+    enabled: adminModeEnabled,
     initialized: false,
     open: false,
     refreshHandle: null,
@@ -3178,6 +3185,9 @@ function refreshFusionViewAfterAdmin() {
 
 if (adminState.enabled) {
     setupAdminPanel();
+    if (adminAutoOpen) {
+        toggleAdminPanel(true);
+    }
 }
 
 init().catch((err) => console.error("Initialization error:", err));
