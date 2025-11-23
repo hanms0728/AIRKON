@@ -2607,29 +2607,10 @@ function injectAdminStyles() {
     }
     const style = document.createElement("style");
     style.textContent = `
-#admin-toggle {
-  position: fixed;
-  left: 16px;
-  top: 16px;
-  z-index: 40;
-  background: linear-gradient(120deg, #1f6feb, #58a6ff);
-  color: #f8fbff;
-  border: 1px solid rgba(88,166,255,0.4);
-  padding: 8px 12px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-}
-#admin-toggle.active {
-  background: linear-gradient(120deg, #7c3aed, #c084fc);
-  border-color: rgba(192,132,252,0.5);
-}
 #admin-panel {
   position: fixed;
   left: 16px;
-  top: 60px;
+  top: 16px;
   width: min(400px, 90vw);
   max-height: 80vh;
   overflow: hidden;
@@ -2733,14 +2714,6 @@ function setupAdminPanel() {
     }
     adminState.initialized = true;
     injectAdminStyles();
-    const toggleBtn = document.createElement("button");
-    toggleBtn.id = "admin-toggle";
-    toggleBtn.type = "button";
-    toggleBtn.textContent = "Admin";
-    toggleBtn.title = "Ctrl+Shift+A";
-    toggleBtn.addEventListener("click", () => toggleAdminPanel());
-    adminState.elements.toggle = toggleBtn;
-    document.body.appendChild(toggleBtn);
 
     const panel = document.createElement("div");
     panel.id = "admin-panel";
@@ -2981,6 +2954,7 @@ async function applyAdminColor() {
         await adminSetColor(trackId, color);
         setAdminStatus(`Track ${trackId} color -> ${color ?? "cleared"}`);
         refreshAdminTracks(true);
+        refreshFusionViewAfterAdmin();
     } catch (err) {
         setAdminStatus(err?.message || "Color update failed", true);
     }
@@ -3002,6 +2976,7 @@ async function applyAdminYaw() {
         await adminSetYaw(trackId, yawVal);
         setAdminStatus(`Track ${trackId} yaw -> ${yawVal.toFixed(1)}°`);
         refreshAdminTracks(true);
+        refreshFusionViewAfterAdmin();
     } catch (err) {
         setAdminStatus(err?.message || "Yaw update failed", true);
     }
@@ -3017,6 +2992,7 @@ async function applyAdminFlip(delta = 180.0) {
         await adminFlipYaw(trackId, delta);
         setAdminStatus(`Track ${trackId} flipped by ${delta.toFixed(1)}°`);
         refreshAdminTracks(true);
+        refreshFusionViewAfterAdmin();
     } catch (err) {
         setAdminStatus(err?.message || "Flip failed", true);
     }
@@ -3065,6 +3041,15 @@ function renderAdminTracks(tracks) {
             prefillAdminFromTrack(t);
         });
         listEl.appendChild(btn);
+    });
+}
+
+function refreshFusionViewAfterAdmin() {
+    if (!isFusion || state.fusionSource !== "tracks") {
+        return;
+    }
+    fetchFusionDetections().catch((err) => {
+        console.warn("fusion refresh failed", err);
     });
 }
 

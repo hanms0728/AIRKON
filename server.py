@@ -1340,6 +1340,10 @@ class RealtimeFusionServer:
                 hex_color = color_label_to_hex(color)
                 if hex_color:
                     meta["color_hex"] = hex_color
+            else:
+                meta.pop("color", None)
+                meta.pop("color_hex", None)
+            meta["color_locked"] = bool(attrs.get("color_locked"))
             if "color_confidence" in attrs:
                 meta["color_confidence"] = attrs["color_confidence"]
         for tid, det_idx in matches:
@@ -1354,12 +1358,13 @@ class RealtimeFusionServer:
                 "score": float(det.get("score", 0.0)),
                 "source_cams": list(det.get("source_cams", [])),
             })
-            color = normalize_color_label(det.get("color"))
-            if color:
-                meta["color"] = color
-                hex_color = color_label_to_hex(color)
-                if hex_color:
-                    meta["color_hex"] = hex_color
+            if not meta.get("color_locked"):
+                color = normalize_color_label(det.get("color"))
+                if color:
+                    meta["color"] = color
+                    hex_color = color_label_to_hex(color)
+                    if hex_color:
+                        meta["color_hex"] = hex_color
             votes = det.get("color_votes")
             if votes:
                 meta["color_votes"] = dict(votes)

@@ -562,6 +562,7 @@ class SortTracker:
                 attrs[track.id] = {
                     "color": track.get_color(),
                     "color_confidence": track.get_color_confidence(),
+                    "color_locked": bool(track.color_lock),
                 }
         return attrs
 
