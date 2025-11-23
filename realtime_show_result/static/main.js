@@ -81,6 +81,7 @@ const state = {
     followTarget: null,
     followPanBackup: null,
     initialViewApplied: false,
+    markerPulseStart: performance.now(),
 };
 
 setLayoutMode("global");
@@ -132,6 +133,10 @@ const markerLabelBaseColor = "#ff9f1c";
 const markerLabelHighlightColor = "#2ec4b6";
 const markerBulbOffsetLocal = { x: 0.85, y: 0.0 }; // streetLightMaker 기준 전구 중심 오프셋(+X 방향이 전면)
 const markerBackOffset = 5.0;               // 로컬 시점에서 가로등을 뒤로 살짝 빼는 거리
+const markerRingBaseRadius = 1.5;
+const markerRingColor = 0xffffff;
+const markerRingBaseOpacity = 0.32;
+const markerRingZOffset = 0.05;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0b0b);
@@ -321,6 +326,7 @@ function animate() {
     requestAnimationFrame(animate);
     updateViewLockAnimation();
     updateFollowOffset();
+    updateMarkerGlow();
     controls.update();
     renderer.render(scene, camera);
 }
@@ -1915,12 +1921,14 @@ function createMarkerLabelSprite(textures, marker) {
         depthTest: false,
         depthWrite: false,
         sizeAttenuation: true,
+        opacity: 0.85,
     });
     const sprite = new THREE.Sprite(material);
     sprite.userData.baseTexture = textures.base;
     sprite.userData.highlightTexture = textures.highlight;
     sprite.userData.baseScale = markerLabelBaseScale;
     sprite.userData.activeScale = markerLabelActiveScale;
+    sprite.userData.baseOpacity = material.opacity;
     sprite.scale.set(markerLabelBaseScale, markerLabelBaseScale, 1);
     const offsetRaw = marker?.label_offset ?? marker?.labelHeight ?? marker?.label_height;
     const offset = Number(offsetRaw);
@@ -1928,6 +1936,25 @@ function createMarkerLabelSprite(textures, marker) {
     sprite.position.set(0, 0, finalOffset);
     sprite.renderOrder = 2;
     return sprite;
+}
+
+function createMarkerFloorRing() {
+    const inner = Math.max(0.1, markerRingBaseRadius * 0.65);
+    const geometry = new THREE.RingGeometry(inner, markerRingBaseRadius, 48);
+    const material = new THREE.MeshBasicMaterial({
+        color: markerRingColor,
+        transparent: true,
+        opacity: markerRingBaseOpacity,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.rotation.x = 0; // keep the ring flat on the ground plane
+    mesh.position.set(0, 0, markerRingZOffset);
+    mesh.renderOrder = 1;
+    mesh.userData.baseOpacity = markerRingBaseOpacity;
+    mesh.userData.baseScale = 1;
+    return mesh;
 }
 
 async function createMarkerSprite(marker) {
@@ -1946,6 +1973,8 @@ async function createMarkerSprite(marker) {
     if (modelGroup) {
         group.add(modelGroup);
     }
+    const ring = createMarkerFloorRing();
+    group.add(ring);
     group.add(labelSprite);
     const configScale = Number(state.config?.markerModelScale);
     const baseScale = Number.isFinite(configScale) ? configScale : markerDefaultScale;
@@ -1957,6 +1986,7 @@ async function createMarkerSprite(marker) {
     marker.baseTexture = textures.base;
     marker.highlightTexture = textures.highlight;
     marker.sprite = labelSprite;
+    marker.ringMesh = ring;
     marker.object = group;
     labelSprite.userData.marker = marker;
     group.userData.marker = marker;
@@ -2228,6 +2258,10 @@ function updateMarkerHighlight(activeKey) {
         if (marker.object && targetScale) {
             marker.object.scale.setScalar(targetScale);
         }
+        const ring = marker.ringMesh;
+        if (ring) {
+            ring.visible = !isActive;
+        }
     });
 }
 
@@ -2239,6 +2273,33 @@ function updateMarkerVisibility(activeKey) {
             marker.object.visible = targetVisible;
         } else if (marker.sprite) {
             marker.sprite.visible = targetVisible;
+        }
+    });
+}
+
+function updateMarkerGlow() {
+    if (!state.markerObjects.length) {
+        return;
+    }
+    const t = (performance.now() - state.markerPulseStart) * 0.001;
+    state.markerObjects.forEach((obj) => {
+        const marker = obj.userData?.marker;
+        const sprite = marker?.labelSprite || marker?.sprite;
+        if (sprite && sprite.material) {
+            const baseOpacity = sprite.userData?.baseOpacity ?? 0.9;
+            const flicker = 0.05 * Math.sin(t * 3.1);
+            sprite.material.opacity = Math.min(1, Math.max(0.2, baseOpacity + flicker));
+            sprite.material.needsUpdate = true;
+        }
+        const ring = marker?.ringMesh;
+        if (ring && ring.material) {
+            const baseOpacity = ring.userData?.baseOpacity ?? markerRingBaseOpacity;
+            const baseScale = ring.userData?.baseScale ?? 1;
+            const scalePulse = 1.0 + 0.14 * Math.sin(t * 2.6 + 0.4);
+            const opacityPulse = baseOpacity + 0.18 * Math.sin(t * 2.2 + 0.2);
+            ring.scale.setScalar(baseScale * scalePulse);
+            ring.material.opacity = Math.min(1, Math.max(0, opacityPulse));
+            ring.material.needsUpdate = true;
         }
     });
 }
