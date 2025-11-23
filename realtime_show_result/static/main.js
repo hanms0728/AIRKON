@@ -826,31 +826,30 @@ function renderDetections(detections) {
                 startDetectionFollow(det, idx);
             });
             li.appendChild(btn);
-            li.textContent = formatDetectionListEntry(det, idx);
-            // 충돌코드?
-            // const colorInfo = getDetectionColorInfo(det);
-            // if (colorInfo) {
-            //     const wrapper = document.createElement("span");
-            //     wrapper.style.display = "inline-flex";
-            //     wrapper.style.alignItems = "center";
-            //     wrapper.style.gap = "4px";
-            //     wrapper.style.marginLeft = "6px";
-            //     const swatch = document.createElement("span");
-            //     swatch.style.display = "inline-block";
-            //     swatch.style.width = "12px";
-            //     swatch.style.height = "12px";
-            //     swatch.style.borderRadius = "2px";
-            //     swatch.style.border = "1px solid rgba(255,255,255,0.4)";
-            //     swatch.style.backgroundColor = colorInfo.hex || "#000000";
-            //     swatch.title = colorInfo.hex || colorInfo.label;
-            //     wrapper.appendChild(swatch);
-            //     const labelSpan = document.createElement("span");
-            //     labelSpan.textContent = colorInfo.label || colorInfo.hex;
-            //     wrapper.appendChild(labelSpan);
-            //     li.appendChild(wrapper);
-            // }
 
-            // detectionListEl.appendChild(li);
+            const colorInfo = getDetectionColorInfo(det);
+            if (colorInfo) {
+                const wrapper = document.createElement("span");
+                wrapper.style.display = "inline-flex";
+                wrapper.style.alignItems = "center";
+                wrapper.style.gap = "4px";
+                wrapper.style.marginLeft = "6px";
+                const swatch = document.createElement("span");
+                swatch.style.display = "inline-block";
+                swatch.style.width = "12px";
+                swatch.style.height = "12px";
+                swatch.style.borderRadius = "2px";
+                swatch.style.border = "1px solid rgba(255,255,255,0.4)";
+                swatch.style.backgroundColor = colorInfo.hex || "#000000";
+                swatch.title = colorInfo.hex || colorInfo.label;
+                wrapper.appendChild(swatch);
+                const labelSpan = document.createElement("span");
+                labelSpan.textContent = colorInfo.label || colorInfo.hex;
+                wrapper.appendChild(labelSpan);
+                li.appendChild(wrapper);
+            }
+
+            detectionListEl.appendChild(li);
         });
     }
 
@@ -2101,16 +2100,24 @@ async function showLocalCloudForMarker(marker) {
         if (!mesh) {
             const flipX = shouldFlipMarkerX();
             const flipY = shouldFlipMarkerY();
-            if (marker.local_visible_url) {
-                const stride = Number(marker.local_visible_stride) || 3;
-                mesh = await loadVisiblePointsFromBinary(marker.local_visible_url, stride, { flipX, flipY });
+            const preferPly = Boolean(state.config?.preferPlyForColor);
+            if (preferPly) {
+                mesh = await loadLocalCloudWithColorFallback(marker, { flipX, flipY });
             } else {
-                mesh = await loadPointCloudFromPly(marker.local_ply_url, { flipX, flipY });
+                if (marker.local_visible_url) {
+                    const stride = Number(marker.local_visible_stride) || 3;
+                    const hasColor = Boolean(marker.local_visible_has_rgb);
+                    mesh = await loadVisiblePointsFromBinary(marker.local_visible_url, stride, { flipX, flipY, hasColor });
+                } else {
+                    mesh = await loadPointCloudFromPly(marker.local_ply_url, { flipX, flipY });
+                }
             }
-            mesh.name = `LocalCloud-${marker.key}`;
-            mesh.userData.markerKey = marker.key;
-            scene.add(mesh);
-            state.localClouds.set(marker.key, mesh);
+            if (mesh) {
+                mesh.name = `LocalCloud-${marker.key}`;
+                mesh.userData.markerKey = marker.key;
+                scene.add(mesh);
+                state.localClouds.set(marker.key, mesh);
+            }
         }
         if (token !== state.localLoadToken) {
             return;
@@ -2131,6 +2138,25 @@ async function showLocalCloudForMarker(marker) {
             enterFusionGlobalView();
         }
     }
+}
+
+async function loadLocalCloudWithColorFallback(marker, options = {}) {
+    const { flipX = false, flipY = false } = options;
+    const visibleHasRgb = Boolean(marker.local_visible_has_rgb);
+    const canUseVisible = Boolean(marker.local_visible_url);
+    const canUsePly = Boolean(marker.local_ply_url);
+    const preferPlyForColor = canUsePly && (!canUseVisible || !visibleHasRgb);
+    if (preferPlyForColor) {
+        return loadPointCloudFromPly(marker.local_ply_url, { flipX, flipY });
+    }
+    if (canUseVisible) {
+        const stride = Number(marker.local_visible_stride) || 3;
+        return loadVisiblePointsFromBinary(marker.local_visible_url, stride, { flipX, flipY, hasColor: visibleHasRgb });
+    }
+    if (canUsePly) {
+        return loadPointCloudFromPly(marker.local_ply_url, { flipX, flipY });
+    }
+    return null;
 }
 
 function setLocalCloudVisibility(activeKey) {
@@ -2319,7 +2345,7 @@ function loadPointCloudFromPly(url, options = {}) {
 }
 
 async function loadVisiblePointsFromBinary(url, stride = 3, options = {}) {
-    const { flipX = false, flipY = false } = options;
+    const { flipX = false, flipY = false, hasColor = false } = options;
     const response = await fetch(`${url}?cacheBust=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
@@ -2335,11 +2361,18 @@ async function loadVisiblePointsFromBinary(url, stride = 3, options = {}) {
         throw new Error("invalid visible stride");
     }
     const positions = new Float32Array(count * 3);
+    const useEmbeddedColor = Boolean(hasColor) && step >= 6;
+    const colors = useEmbeddedColor ? new Float32Array(count * 3) : null;
     for (let i = 0; i < count; i += 1) {
         const base = i * step;
         positions[i * 3 + 0] = data[base + 0] ?? 0;
         positions[i * 3 + 1] = data[base + 1] ?? 0;
         positions[i * 3 + 2] = data[base + 2] ?? 0;
+        if (colors) {
+            colors[i * 3 + 0] = data[base + 3] ?? 0.5;
+            colors[i * 3 + 1] = data[base + 4] ?? 0.5;
+            colors[i * 3 + 2] = data[base + 5] ?? 0.5;
+        }
     }
     if (flipX || flipY) {
         for (let i = 0; i < count; i += 1) {
@@ -2353,18 +2386,30 @@ async function loadVisiblePointsFromBinary(url, stride = 3, options = {}) {
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    let hasColor = false;
-    if (state.globalColorLookup) {
+    let hasColorAttr = false;
+    if (colors) {
+        let maxVal = 0;
+        for (let i = 0; i < colors.length; i += 1) {
+            if (colors[i] > maxVal) maxVal = colors[i];
+        }
+        if (maxVal > 1.01) {
+            for (let i = 0; i < colors.length; i += 1) {
+                colors[i] = colors[i] / 255;
+            }
+        }
+        geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        hasColorAttr = true;
+    } else if (state.globalColorLookup) {
         const colorArray = createColorArrayForPositions(positions);
         geometry.setAttribute("color", new THREE.BufferAttribute(colorArray, 3));
-        hasColor = true;
+        hasColorAttr = true;
     }
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     const material = new THREE.PointsMaterial({
         size: 0.05,
-        color: hasColor ? 0xffffff : 0xf7b801,
-        vertexColors: hasColor,
+        color: hasColorAttr ? 0xffffff : 0xf7b801,
+        vertexColors: hasColorAttr,
         transparent: true,
         opacity: 0.95,
     });
@@ -2507,18 +2552,18 @@ function updateDetectionFollowPose(detections) {
     camera.lookAt(controls.target);
     follow.lastCenter = center;
     // 충돌코드?
-    // const colorInfo = getDetectionColorInfo(det);
-    // if (colorInfo) {
-    //     const { label, hex } = colorInfo;
-    //     const colorText = label && hex
-    //         ? `${label} (${hex})`
-    //         : (label || hex);
-    //     if (colorText) {
-    //         tags.push(`color ${colorText}`);
-    //     }
-    // }
-    // const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
-    // return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
+    const colorInfo = getDetectionColorInfo(det);
+    if (colorInfo) {
+        const { label, hex } = colorInfo;
+        const colorText = label && hex
+            ? `${label} (${hex})`
+            : (label || hex);
+        if (colorText) {
+            tags.push(`color ${colorText}`);
+        }
+    }
+    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
+    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
 
 init().catch((err) => console.error("Initialization error:", err));

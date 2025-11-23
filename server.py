@@ -84,6 +84,13 @@ def _dedup_slug(base: str, used: set) -> str:
     used.add(slug)
     return slug
 
+def _filter_candidates_by_cam_id(candidates, cam_id: Optional[int]):
+    if cam_id is None:
+        return candidates
+    pattern = re.compile(rf"^cam_?{cam_id}(?!\d)", re.IGNORECASE)
+    filtered = [c for c in candidates if pattern.search(c.name)]
+    return filtered or candidates
+
 def _guess_local_ply(root: Path, cam_id: Optional[int], name: Optional[str]) -> Optional[Path]:
     if cam_id is None:
         return None
@@ -102,6 +109,7 @@ def _guess_local_ply(root: Path, cam_id: Optional[int], name: Optional[str]) -> 
             candidates.extend(root.rglob(pattern))
     if not candidates:
         return None
+    candidates = _filter_candidates_by_cam_id(candidates, cam_id)
     candidates.sort()
     return candidates[0].resolve()
 
@@ -123,6 +131,7 @@ def _guess_local_lut(root: Path, cam_id: Optional[int], name: Optional[str]) -> 
             candidates.extend(root.rglob(pattern))
     if not candidates:
         return None
+    candidates = _filter_candidates_by_cam_id(candidates, cam_id)
     candidates.sort()
     return candidates[0].resolve()
 
@@ -139,7 +148,7 @@ def _lut_mask_from_obj(obj: dict) -> Optional[np.ndarray]:
         return np.isfinite(X) & np.isfinite(Y) & np.isfinite(Z)
     return None
 
-def _load_visible_xyz_from_lut(path: Path) -> Optional[np.ndarray]:
+def _load_visible_xyz_from_lut(path: Path) -> Optional[Tuple[np.ndarray, bool]]:
     try:
         with np.load(str(path)) as data:
             if not {"X", "Y", "Z"}.issubset(set(data.files)):
@@ -153,12 +162,32 @@ def _load_visible_xyz_from_lut(path: Path) -> Optional[np.ndarray]:
             Y = np.asarray(data["Y"], dtype=np.float32)
             Z = np.asarray(data["Z"], dtype=np.float32)
             xyz = np.stack([X[mask], Y[mask], Z[mask]], axis=1).astype(np.float32)
+            colors = None
+            has_rgb = False
+            if {"R", "G", "B"}.issubset(set(data.files)):
+                R = np.asarray(data["R"], dtype=np.float32)
+                G = np.asarray(data["G"], dtype=np.float32)
+                B = np.asarray(data["B"], dtype=np.float32)
+                try:
+                    colors = np.stack([R[mask], G[mask], B[mask]], axis=1).astype(np.float32)
+                    # Normalize 0-255 to 0-1 if needed
+                    max_val = float(np.nanmax(colors)) if colors.size else 0.0
+                    if max_val > 1.01:
+                        colors /= 255.0
+                    has_rgb = True
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(f"[Fusion] LUT RGB load failed for {path}: {exc}")
+                    colors = None
+                    has_rgb = False
     except Exception as exc:
         print(f"[Fusion] failed to load LUT {path}: {exc}")
         return None
     if xyz.size == 0:
         return None
-    return xyz
+    if colors is not None and colors.shape[0] == xyz.shape[0]:
+        pts = np.concatenate([xyz, colors], axis=1)
+        return pts, True
+    return xyz, False
 
 def load_camera_markers(path: Optional[str], local_ply_root: Optional[str] = None,
                         local_lut_root: Optional[str] = None) -> List[dict]:
@@ -589,9 +618,12 @@ class GlobalWebServer:
                 marker_payload["has_local_ply"] = False
 
             visible_arr = None
+            visible_has_rgb = False
             local_lut = entry.get("local_lut")
             if local_lut and os.path.exists(local_lut):
-                visible_arr = _load_visible_xyz_from_lut(Path(local_lut))
+                loaded = _load_visible_xyz_from_lut(Path(local_lut))
+                if loaded is not None:
+                    visible_arr, visible_has_rgb = loaded
             if visible_arr is not None:
                 stride = int(visible_arr.shape[1])
                 self.marker_visible_arrays[key] = visible_arr
@@ -599,17 +631,20 @@ class GlobalWebServer:
                     "count": int(visible_arr.shape[0]),
                     "stride": stride,
                     "source": str(local_lut),
+                    "has_rgb": bool(visible_has_rgb),
                 }
                 self.marker_visible_meta[key] = meta
                 marker_payload["has_local_visible"] = True
                 marker_payload["local_visible_url"] = f"/assets/cameras/{key}/visible.bin"
                 marker_payload["local_visible_stride"] = stride
                 marker_payload["local_visible_count"] = meta["count"]
+                marker_payload["local_visible_has_rgb"] = bool(visible_has_rgb)
             else:
                 marker_payload["has_local_visible"] = False
                 marker_payload["local_visible_url"] = None
                 marker_payload["local_visible_stride"] = None
                 marker_payload["local_visible_count"] = 0
+                marker_payload["local_visible_has_rgb"] = False
             self.camera_marker_payload.append(marker_payload)
 
         self.app = FastAPI(title="AIRKON Fusion Server", version="0.1.0")
@@ -721,6 +756,7 @@ class GlobalWebServer:
             headers = {
                 "X-Point-Count": str(meta.get("count", arr.shape[0])),
                 "X-Stride": str(meta.get("stride", arr.shape[1] if arr.ndim == 2 else 3)),
+                "X-Has-RGB": "1" if meta.get("has_rgb") else "0",
             }
             return Response(content=arr.tobytes(), media_type="application/octet-stream", headers=headers)
 
@@ -1393,7 +1429,7 @@ def main():
     ap.add_argument("--global-ply", default="pointcloud/real_coshow_map_small.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
-    ap.add_argument("--web-port", type=int, default=18092)
+    ap.add_argument("--web-port", type=int, default=18000)
     ap.add_argument("--no-web", action="store_true")
     ap.add_argument("--overlay-base-url", type=str, default=None,
                     help="Base URL for camera overlay/video API (typically Edge bridge http://host:port)")
