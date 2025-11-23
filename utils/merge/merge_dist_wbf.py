@@ -50,6 +50,17 @@ def obb_to_corners(cx, cy, L, W, yaw_deg): # OBB → 꼭짓점 변환함
     R = np.array([[c, -s],[s,  c]], dtype=float)
     return corners @ R.T + np.array([cx, cy], dtype=float)
 
+def _sanitize_color_label(val: Optional[str]) -> Optional[str]:
+    """
+    Treat None/empty/"none" as missing so they don't affect color-based bonuses/penalties.
+    """
+    if val is None:
+        return None
+    c = str(val).strip().lower()
+    if not c or c == "none":
+        return None
+    return c
+
 # ---------------- 클러스터링 ----------------
 def cluster_by_aabb_iou(
     boxes: np.ndarray,
@@ -64,11 +75,14 @@ def cluster_by_aabb_iou(
     N = len(boxes)
     used = np.zeros(N, dtype=bool)
     clusters: List[List[int]] = []
+    normalized_colors: Optional[List[Optional[str]]] = None
     use_color = (
         color_labels is not None
         and len(color_labels) == N
         and (color_bonus > 0.0 or color_penalty > 0.0)
     )
+    if use_color:
+        normalized_colors = [_sanitize_color_label(c) for c in color_labels]
     for i in range(N):
         if used[i]:
             continue
@@ -82,8 +96,8 @@ def cluster_by_aabb_iou(
                     continue
                 thr = iou_cluster_thr
                 if use_color:
-                    c1 = color_labels[k]
-                    c2 = color_labels[j]
+                    c1 = normalized_colors[k] if normalized_colors else None
+                    c2 = normalized_colors[j] if normalized_colors else None
                     if c1 and c2:
                         if c1 == c2:
                             thr = max(iou_cluster_thr - color_bonus, 0.0)
