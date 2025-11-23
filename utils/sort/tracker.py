@@ -17,6 +17,8 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     color = str(value).strip().lower()
+    if not color or color == "none":
+        return None
     return VALID_COLORS.get(color)
 
 # 이럼 이제 맨 처음 정지되어있을때는 못잡을거임,, 랜덤임 음음음
@@ -241,6 +243,19 @@ class Track:
         self.color_counts[normalized] += 1
         self.total_color_votes += 1
         self.current_color = self.color_counts.most_common(1)[0][0]
+
+    def force_set_color(self, color: Optional[str]) -> None:
+        """
+        강제로 색상 라벨을 지정하거나 제거한다.
+        """
+        normalized = normalize_color_label(color)
+        self.color_counts.clear()
+        self.current_color = None
+        self.total_color_votes = 0
+        if normalized:
+            self.color_counts[normalized] = 1
+            self.total_color_votes = 1
+            self.current_color = normalized
 
     def _append_history_entry(self, state: Optional[np.ndarray] = None) -> None:
         if state is None:
@@ -504,6 +519,43 @@ class SortTracker:
                 }
         return attrs
 
+    @staticmethod
+    def _state_name(state_val: int) -> str:
+        if state_val == TrackState.TENTATIVE:
+            return "tentative"
+        if state_val == TrackState.CONFIRMED:
+            return "confirmed"
+        if state_val == TrackState.LOST:
+            return "lost"
+        if state_val == TrackState.DELETED:
+            return "deleted"
+        return "unknown"
+
+    def list_tracks(self) -> List[dict]:
+        """
+        현재 유지 중인 트랙의 기본 정보를 반환한다. (삭제된 트랙 제외)
+        """
+        items: List[dict] = []
+        for track in self.tracks:
+            if track.state == TrackState.DELETED:
+                continue
+            state_vec = track.get_state(smooth_window=self.smooth_window)
+            items.append({
+                "id": track.id,
+                "state": self._state_name(track.state),
+                "age": track.age,
+                "time_since_update": track.time_since_update,
+                "color": track.get_color(),
+                "color_confidence": track.get_color_confidence(),
+                "class": float(state_vec[0]),
+                "cx": float(state_vec[1]),
+                "cy": float(state_vec[2]),
+                "length": float(state_vec[3]),
+                "width": float(state_vec[4]),
+                "yaw": float(state_vec[5]),
+            })
+        return items
+
     def force_flip_yaw(self, track_id: int, offset_deg: float = 180.0) -> bool:
         """
         지정한 track id의 yaw를 강제로 뒤집는다.
@@ -511,6 +563,16 @@ class SortTracker:
         for track in self.tracks:
             if track.id == track_id and track.state != TrackState.DELETED:
                 track.force_flip_yaw(offset_deg)
+                return True
+        return False
+
+    def force_set_color(self, track_id: int, color: Optional[str]) -> bool:
+        """
+        지정한 track id의 색상 라벨을 강제로 설정하거나 제거한다.
+        """
+        for track in self.tracks:
+            if track.id == track_id and track.state != TrackState.DELETED:
+                track.force_set_color(color)
                 return True
         return False
 

@@ -29,7 +29,7 @@ COLOR_HEX_MAP = {
     "green": "#48ad0d",
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
-    "purple": "#781de7"
+    "purple": "#781de7",
 }
 
 
@@ -37,6 +37,8 @@ def normalize_color_label(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     color = str(value).strip().lower()
+    if not color or color == "none":
+        return None
     return VALID_COLORS.get(color)
 
 
@@ -767,6 +769,30 @@ class RealtimeFusionServer:
                 print(f"[Command] flipped track {tid} yaw by {delta:.1f}°")
                 return {"status": "ok", "track_id": tid, "delta": delta}
             return {"status": "error", "message": f"track {tid} not found"}
+        if cmd == "set_color":
+            track_id = payload.get("track_id")
+            if track_id is None:
+                return {"status": "error", "message": "track_id required"}
+            try:
+                tid = int(track_id)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "track_id must be int"}
+            raw_color = payload.get("color")
+            normalized_color = normalize_color_label(raw_color)
+            if raw_color is not None and normalized_color is None:
+                raw_str = str(raw_color).strip().lower()
+                if raw_str and raw_str != "none":
+                    return {"status": "error", "message": f"invalid color '{raw_color}'"}
+                # empty/none → clear color
+                normalized_color = None
+            updated = self.tracker.force_set_color(tid, normalized_color)
+            if updated:
+                print(f"[Command] set track {tid} color -> {normalized_color}")
+                return {"status": "ok", "track_id": tid, "color": normalized_color}
+            return {"status": "error", "message": f"track {tid} not found"}
+        if cmd == "list_tracks":
+            tracks = self.tracker.list_tracks()
+            return {"status": "ok", "tracks": tracks, "count": len(tracks)}
         return {"status": "error", "message": f"unknown command '{cmd}'"}
 
     # merge_dist_wbf 의 클러스터링/가중통합 로직을 그대로 사용
@@ -832,7 +858,8 @@ class RealtimeFusionServer:
         roll = np.mean([float(d.get("roll", 0.0)) for d in subset]) # 얘도
         cams = [d.get("cam", "?") for d in subset] # 캠 어디어디에서 따왓는지
         normalized_colors = [normalize_color_label(d.get("color")) for d in subset]
-        color_counts = Counter([c for c in normalized_colors if c])
+        valid_colors = [c for c in normalized_colors if c is not None]  # None/none 은 투표 제외
+        color_counts = Counter(valid_colors)
         color = color_counts.most_common(1)[0][0] if color_counts else None # 투표
         color_hex = color_label_to_hex(color) # 헥사코드 6중 1로 변환
         return {
