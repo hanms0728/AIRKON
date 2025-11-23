@@ -560,7 +560,7 @@ class RealtimeFusionServer:
         self.active_cams = set()
         self.color_bias_strength = 0.3
         self.color_bias_min_votes = 2
-        delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.08)
+        delta = min(max(self.color_bias_strength * 0.25, 0.0), 0.00)
         # delta = 1
         self.color_cluster_bonus = delta
         self.color_cluster_penalty = delta
@@ -593,7 +593,7 @@ class RealtimeFusionServer:
         self.buffer: Dict[str, deque] = {cam: deque(maxlen=1) for cam in cam_ports.keys()}
 
         # 추적기
-        self.tracker = SortTracker(max_age=20, min_hits=3, iou_threshold=0.15) 
+        self.tracker = SortTracker(max_age=20, min_hits=10, iou_threshold=0.15) 
         self._log_interval = 1.0
         self._next_log_ts = 0.0
         self.command_queue: Optional[queue.Queue] = None
