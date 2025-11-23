@@ -91,6 +91,8 @@ def _compute_length_width(length: float, width: float, cfg: VizSizeConfig) -> Tu
 def _compute_scale_and_height(width_use: float, cfg: VizSizeConfig) -> Tuple[float, Tuple[float, float, float]]:
     if cfg.size_mode == "mesh":
         height = float(cfg.mesh_height)
+        if height <= 0.0:
+            height = width_use * float(cfg.height_scale)
         scale_override = (
             float(cfg.mesh_scale),
             float(cfg.mesh_scale),

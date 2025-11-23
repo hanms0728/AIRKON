@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
+import open3d as o3d
+try:
+    from scipy.spatial import cKDTree  # type: ignore
+except Exception:
+    cKDTree = None
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -109,6 +114,70 @@ def load_camera_positions(path: Optional[str]) -> Dict[str, Tuple[float, float]]
     if not positions:
         print(f"[Fusion] camera position file {json_path} contained no usable entries")
     return positions
+
+class GroundHeightLookup:
+    """
+    간단한 지면 높이 질의용: global ply의 XY→Z 근접 값을 가져온다.
+    """
+    def __init__(self, ply_path: Optional[str], *, flip_y: bool = False, max_points: int = 500_000):
+        self.enabled = False
+        self.xy: Optional[np.ndarray] = None
+        self.z: Optional[np.ndarray] = None
+        self.tree = None
+
+        if not ply_path:
+            return
+        path = Path(ply_path)
+        if not path.exists():
+            print(f"[GroundZ] ply not found: {path}")
+            return
+        try:
+            cloud = o3d.io.read_point_cloud(str(path))
+            pts = np.asarray(cloud.points, dtype=np.float32)
+        except Exception as exc:
+            print(f"[GroundZ] failed to load ply {path}: {exc}")
+            return
+        if pts.size == 0:
+            print(f"[GroundZ] empty ply: {path}")
+            return
+        if flip_y:
+            pts[:, 1] *= -1.0
+        if max_points and len(pts) > max_points:
+            stride = max(1, int(len(pts) / max_points))
+            pts = pts[::stride]
+            print(f"[GroundZ] subsampled ply to {len(pts)} points (stride={stride})")
+        self.xy = pts[:, :2].astype(np.float32, copy=False)
+        self.z = pts[:, 2].astype(np.float32, copy=False)
+        if cKDTree is not None:
+            try:
+                self.tree = cKDTree(self.xy)
+            except Exception as exc:
+                print(f"[GroundZ] cKDTree build failed: {exc}")
+                self.tree = None
+        self.enabled = True
+        print(f"[GroundZ] loaded {len(self.z)} points from {path.name} (flip_y={flip_y}, kdtree={'yes' if self.tree else 'no'})")
+
+    def query(self, x: float, y: float, *, default: float = 0.0, k: int = 5) -> float:
+        if not self.enabled or self.xy is None or self.z is None:
+            return float(default)
+        try:
+            if self.tree is not None:
+                k_use = min(max(1, int(k)), len(self.z))
+                dists, idxs = self.tree.query([float(x), float(y)], k=k_use)
+                idx_arr = np.atleast_1d(idxs)
+                z_vals = self.z[idx_arr]
+                if k_use > 1:
+                    dist_arr = np.atleast_1d(dists)
+                    weights = 1.0 / np.maximum(dist_arr, 1e-3)
+                    return float(np.average(z_vals, weights=weights))
+                return float(z_vals[0])
+            # fallback: 최근접 점 하나
+            diff = self.xy - np.array([float(x), float(y)], dtype=np.float32)
+            d2 = np.sum(diff * diff, axis=1)
+            idx = int(np.argmin(d2))
+            return float(self.z[idx])
+        except Exception:
+            return float(default)
 
 class TrackBroadcaster:
     """
@@ -576,6 +645,9 @@ class RealtimeFusionServer:
             print("[Fusion] WARN: no camera positions loaded; distance weighting falls back to origin.")
         self.buffer = {}
 
+        flip_ply_y = bool((client_config or {}).get("flipPlyY", False))
+        self.ground_height = GroundHeightLookup(global_ply, flip_y=flip_ply_y)
+
         self.track_tx = TrackBroadcaster(tx_host, tx_port, tx_protocol) if tx_host else None
         self.carla_tx = TrackBroadcaster(carla_host, carla_port) if carla_host else None
         self.viz_cfg = viz_config
@@ -608,6 +680,11 @@ class RealtimeFusionServer:
         if cam_name not in self.buffer:
             self.buffer[cam_name] = deque(maxlen=1)
         self.active_cams.add(cam_name)
+
+    def _ground_height_at(self, x: float, y: float, default: float = 0.0) -> float:
+        if hasattr(self, "ground_height") and self.ground_height and self.ground_height.enabled:
+            return self.ground_height.query(x, y, default=default)
+        return float(default)
 
     def _should_log(self) -> bool:
         now = time.time()
@@ -816,7 +893,7 @@ class RealtimeFusionServer:
                 boxes, cams, idxs, self.cam_xy,
                 d0=5.0, p=2.0, extra_weights=weight_bias
             )
-            extras = self._aggregate_cluster(raw_detections, idxs) # 얘는일단그냥평균내고잇음 수정필요?
+            extras = self._aggregate_cluster(raw_detections, idxs, rep) # 얘는일단그냥평균내고잇음 수정필요?
             fused_list.append({
                 "cx": float(rep[0]),
                 "cy": float(rep[1]),
@@ -848,12 +925,11 @@ class RealtimeFusionServer:
                 biases.append(1.0)
         return biases
 
-    def _aggregate_cluster(self, detections: List[dict], idxs: List[int]) -> dict:
+    def _aggregate_cluster(self, detections: List[dict], idxs: List[int], fused_box: Optional[np.ndarray] = None) -> dict:
         subset = [detections[i] for i in idxs]
         if not subset:
             return {"cz": 0.0, "pitch": 0.0, "roll": 0.0, "score": 0.0, "source_cams": []}
         score = np.mean([float(d.get("score", 0.0)) for d in subset]) # 필요없음
-        cz = np.mean([float(d.get("cz", 0.0)) for d in subset]) # 어차피 다 같지 않나? 아니면 xy기반 그 맵의 z값을 받아와야하지않나? z누가쓰더라
         pitch = np.mean([float(d.get("pitch", 0.0)) for d in subset]) # 얘도 거의 안쓰지 않나
         roll = np.mean([float(d.get("roll", 0.0)) for d in subset]) # 얘도
         cams = [d.get("cam", "?") for d in subset] # 캠 어디어디에서 따왓는지
@@ -862,6 +938,14 @@ class RealtimeFusionServer:
         color_counts = Counter(valid_colors)
         color = color_counts.most_common(1)[0][0] if color_counts else None # 투표
         color_hex = color_label_to_hex(color) # 헥사코드 6중 1로 변환
+        # fused_box: [cx, cy, L, W, yaw]
+        if fused_box is not None and len(fused_box) >= 4:
+            cx_rep = float(fused_box[0])
+            cy_rep = float(fused_box[1])
+            cz_default = np.mean([float(d.get("cz", 0.0)) for d in subset])
+            cz = self._ground_height_at(cx_rep, cy_rep, default=cz_default)
+        else:
+            cz = np.mean([float(d.get("cz", 0.0)) for d in subset])
         return {
             "cz": float(cz),
             "pitch": float(pitch),
@@ -917,11 +1001,14 @@ class RealtimeFusionServer:
     def _serialize_raw(self, raw_detections: List[dict]) -> List[dict]:
         payload = []
         for det in raw_detections:
+            cx_val = float(det.get("cx", 0.0))
+            cy_val = float(det.get("cy", 0.0))
+            cz_val = self._ground_height_at(cx_val, cy_val, default=float(det.get("cz", 0.0)))
             vis = prepare_visual_item(
                 class_id=int(det.get("cls", 0)),
-                cx=float(det.get("cx", 0.0)),
-                cy=float(det.get("cy", 0.0)),
-                cz=float(det.get("cz", 0.0)),
+                cx=cx_val,
+                cy=cy_val,
+                cz=cz_val,
                 length=float(det.get("length", 0.0)),
                 width=float(det.get("width", 0.0)),
                 yaw_deg=float(det.get("yaw", 0.0)),
@@ -932,9 +1019,9 @@ class RealtimeFusionServer:
             )
             vis["cam"] = det.get("cam")
             vis["timestamp"] = float(det.get("ts", 0.0))
-            vis["cx"] = float(det.get("cx", 0.0))
-            vis["cy"] = float(det.get("cy", 0.0))
-            vis["cz"] = float(det.get("cz", 0.0))
+            vis["cx"] = cx_val
+            vis["cy"] = cy_val
+            vis["cz"] = cz_val
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
@@ -947,11 +1034,14 @@ class RealtimeFusionServer:
     def _serialize_fused(self, fused_list: List[dict]) -> List[dict]:
         payload = []
         for det in fused_list:
+            cx_val = float(det.get("cx", 0.0))
+            cy_val = float(det.get("cy", 0.0))
+            cz_val = self._ground_height_at(cx_val, cy_val, default=float(det.get("cz", 0.0)))
             vis = prepare_visual_item(
                 class_id=int(det.get("cls", 0)),
-                cx=float(det.get("cx", 0.0)),
-                cy=float(det.get("cy", 0.0)),
-                cz=float(det.get("cz", 0.0)),
+                cx=cx_val,
+                cy=cy_val,
+                cz=cz_val,
                 length=float(det.get("length", 0.0)),
                 width=float(det.get("width", 0.0)),
                 yaw_deg=float(det.get("yaw", 0.0)),
@@ -962,9 +1052,9 @@ class RealtimeFusionServer:
             )
             vis["sources"] = list(det.get("source_cams", []))
             vis["source_cams"] = list(det.get("source_cams", []))
-            vis["cx"] = float(det.get("cx", 0.0))
-            vis["cy"] = float(det.get("cy", 0.0))
-            vis["cz"] = float(det.get("cz", 0.0))
+            vis["cx"] = cx_val
+            vis["cy"] = cy_val
+            vis["cz"] = cz_val
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
@@ -984,11 +1074,12 @@ class RealtimeFusionServer:
             tid = int(row[0]); cls = int(row[1])
             cx, cy, L, W, yaw = map(float, row[2:7])
             extra = self.track_meta.get(tid, {})
+            cz_val = self._ground_height_at(cx, cy, default=float(extra.get("cz", 0.0)))
             vis = prepare_visual_item(
                 class_id=cls,
                 cx=cx,
                 cy=cy,
-                cz=float(extra.get("cz", 0.0)),
+                cz=cz_val,
                 length=L,
                 width=W,
                 yaw_deg=yaw,
@@ -1003,6 +1094,7 @@ class RealtimeFusionServer:
             vis["sources"] = list(extra.get("source_cams", []))
             vis["cx"] = cx
             vis["cy"] = cy
+            vis["cz"] = cz_val
             color = normalize_color_label(extra.get("color"))
             if color:
                 vis["color"] = color
