@@ -10,7 +10,7 @@ from collections import deque
 import ffmpeg
 import numpy as np
 '''
-python utils/ip_camera.py --capture-mode sequence --sequence-fps 1 --sequence-dir utils/color/black
+python utils/ip_camera.py --capture-mode sequence --sequence-fps 1 --sequence-dir utils/color/yellow
 
 '''
 
@@ -107,14 +107,10 @@ class IPCameraStreamer:
 
         # 프레임 저장 버퍼(최신 1장)
         self.latest = {cfg['camera_id']: deque(maxlen=1) for cfg in self.camera_configs}
-        # 최초 프레임 저장 여부
-        self.saved_first_frame = {cfg['camera_id']: False for cfg in self.camera_configs}
 
         self.captures = {}        # FFmpeg 프로세스 저장
         self.running = True
         self.connected = {cfg['camera_id']: False for cfg in self.camera_configs}
-        self.save_dir = "first_frames"
-        os.makedirs(self.save_dir, exist_ok=True)
         self.snapshot_dir = snapshot_dir
         os.makedirs(self.snapshot_dir, exist_ok=True)
 
@@ -130,7 +126,7 @@ class IPCameraStreamer:
 
         # 구간 저장 상태
         self.sequence_active = False
-        self.sequence_session_dir = None
+        # self.sequence_session_dir = None
         self.sequence_count = 0
         self.sequence_last_saved = 0.0
 
@@ -245,16 +241,6 @@ class IPCameraStreamer:
                 d.clear()
                 d.append(frame)
 
-                # 각 카메라 첫 프레임만 저장
-                if not self.saved_first_frame[cam_id]:
-                    filename = os.path.join(self.save_dir, f"cam_{cam_id}_{cfg['ip'].split('.')[-1]}.jpg")
-                    try:
-                        cv2.imwrite(filename, frame)
-                        print(f"[SAVE] Camera {cam_id} first frame saved: {filename}")
-                        self.saved_first_frame[cam_id] = True
-                    except Exception as e:
-                        print(f"[ERROR] Failed to save first frame for camera {cam_id}:", e)
-
             except Exception as e:
                 print(f"[ERROR] Camera {cam_id} streaming error:", e)
                 break
@@ -320,12 +306,12 @@ class IPCameraStreamer:
         if self.sequence_active:
             return
         session_ts = time.strftime("%Y%m%d_%H%M%S")
-        self.sequence_session_dir = os.path.join(self.sequence_dir, session_ts)
-        os.makedirs(self.sequence_session_dir, exist_ok=True)
+        # self.sequence_session_dir = os.path.join(self.sequence_dir, session_ts)
+        # os.makedirs(self.sequence_session_dir, exist_ok=True)
         self.sequence_count = 0
         self.sequence_last_saved = 0.0
         self.sequence_active = True
-        print(f"[SEQ] Start capture → {self.sequence_session_dir} @ {self.sequence_fps} fps")
+        print(f"[SEQ] Start capture → {self.sequence_dir} @ {self.sequence_fps} fps")
 
     def stop_sequence_capture(self):
         if not self.sequence_active:
@@ -348,7 +334,7 @@ class IPCameraStreamer:
                 continue
             frame = frames[-1].copy()
             filename = os.path.join(
-                self.sequence_session_dir,
+                self.sequence_dir,
                 f"cam{cam_id}_{timestamp}_{self.sequence_count:06d}.jpg"
             )
             try:

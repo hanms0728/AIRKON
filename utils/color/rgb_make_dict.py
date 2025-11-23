@@ -94,9 +94,15 @@ def build_color_rules_dict(folder: str) -> dict:
         min_tuple = (r_min / 255.0, g_min / 255.0, b_min / 255.0)
         max_tuple = (r_max / 255.0, g_max / 255.0, b_max / 255.0)
 
+        # 원본 0~255
+        _min_tuple = (r_min, g_min , b_min )
+        _max_tuple = (r_max , g_max,  b_max )
+
         result[label] = {
             "min": tuple(round(v, 4) for v in min_tuple),
             "max": tuple(round(v, 4) for v in max_tuple),
+            "_min": tuple(round(v, 4) for v in _min_tuple),
+            "_max": tuple(round(v, 4) for v in _max_tuple),
         }
 
     return result
@@ -113,6 +119,14 @@ def print_color_rules(folder: str):
         print(f'    "{label}": {{')
         print(f"        \"min\": {val['min']},")
         print(f"        \"max\": {val['max']},")
+        print("    },")
+    print("}")
+    print("====================")
+    print("_COLOR_RGB_RULES_0_255 = {")
+    for label, val in rules.items():
+        print(f'    "{label}": {{')
+        print(f"        \"min\": {val['_min']},")
+        print(f"        \"max\": {val['_max']},")
         print("    },")
     print("}")
 

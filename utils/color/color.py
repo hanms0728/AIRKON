@@ -16,6 +16,12 @@ from src.inference_lstm_onnx_pointcloud_add_color import (
     tiny_filter_on_dets,
 )
 
+'''
+
+python -m utils.color.color --folder utils/color/yellow --onnx_path onnx/yolo11m_2_5d_real_coshow_v4.onnx --conf 0.8 \
+--output utils/color/result/yellow.txt
+
+'''
 class _ONNXColorRunner:
     """
     color.py용 간단한 ONNX 실행기.
@@ -413,7 +419,7 @@ if __name__ == "__main__":
     parser.add_argument("--folder", required=True, help="이미지 폴더 경로")
     parser.add_argument("--onnx_path", required=True, help="객체 탐지 ONNX 파일 경로")
     parser.add_argument("--strides", default="8,16,32", help="모델 stride 목록 (콤마 구분)")
-    parser.add_argument("--conf", type=float, default=0.3, help="confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.8, help="confidence threshold")
     parser.add_argument("--nms_iou", type=float, default=0.2, help="NMS IoU threshold")
     parser.add_argument("--topk", type=int, default=50, help="NMS top-k")
     parser.add_argument("--score_mode", default="obj*cls", help="score_mode (ex: obj*cls)")
@@ -425,7 +431,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None, help="결과 저장 파일 경로 (default: <folder>/color_ranges.txt)")
 
     args = parser.parse_args()
-
     strides = _parse_comma_list_int(args.strides)
     providers = _parse_comma_list_str(args.providers)
     if providers is None:
