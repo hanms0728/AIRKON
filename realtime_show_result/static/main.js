@@ -576,28 +576,33 @@ function ensureInstancedCapacity(requiredCount) {
     rebuildInstancedMeshes(newCapacity);
 }
 
-function getDetectionColor(det) {
+function getDetectionColorInfo(det) {
     if (!det) {
         return null;
     }
-    let raw = typeof det.color_hex === "string" && det.color_hex.length
+    const label = typeof det.color === "string" ? det.color.trim() : "";
+    let hex = typeof det.color_hex === "string"
         ? det.color_hex.trim()
         : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
-    // if (!raw) {
-    //     const label = typeof det.color === "string" ? det.color.trim().toLowerCase() : "";
-    //     if (label && COLOR_PALETTE[label]) {
-    //         raw = COLOR_PALETTE[label];
-    //     }
-    // }
-    if (!raw) {
+    if (hex && !hex.startsWith("#")) {
+        hex = `#${hex}`;
+    }
+    if (hex && !/^#([0-9a-fA-F]{6})$/.test(hex)) {
+        hex = "";
+    }
+    if (!label && !hex) {
         return null;
     }
-    const normalized = raw.startsWith("#") ? raw : `#${raw}`;
-    if (!/^#([0-9a-fA-F]{6})$/.test(normalized)) {
+    return { label, hex };
+}
+
+function getDetectionColor(det) {
+    const info = getDetectionColorInfo(det);
+    if (!info || !info.hex) {
         return null;
     }
     try {
-        tmpColor.set(normalized);
+        tmpColor.set(info.hex);
         return tmpColor;
     } catch (err) {
         return null;
@@ -724,6 +729,29 @@ function renderDetections(detections) {
         detections.forEach((det, idx) => {
             const li = document.createElement("li");
             li.textContent = formatDetectionListEntry(det, idx);
+
+            const colorInfo = getDetectionColorInfo(det);
+            if (colorInfo) {
+                const wrapper = document.createElement("span");
+                wrapper.style.display = "inline-flex";
+                wrapper.style.alignItems = "center";
+                wrapper.style.gap = "4px";
+                wrapper.style.marginLeft = "6px";
+                const swatch = document.createElement("span");
+                swatch.style.display = "inline-block";
+                swatch.style.width = "12px";
+                swatch.style.height = "12px";
+                swatch.style.borderRadius = "2px";
+                swatch.style.border = "1px solid rgba(255,255,255,0.4)";
+                swatch.style.backgroundColor = colorInfo.hex || "#000000";
+                swatch.title = colorInfo.hex || colorInfo.label;
+                wrapper.appendChild(swatch);
+                const labelSpan = document.createElement("span");
+                labelSpan.textContent = colorInfo.label || colorInfo.hex;
+                wrapper.appendChild(labelSpan);
+                li.appendChild(wrapper);
+            }
+
             detectionListEl.appendChild(li);
         });
     }
@@ -1006,15 +1034,15 @@ function formatDetectionListEntry(det, idx) {
     if (det.score != null) {
         tags.push(`score ${(Number(det.score) || 0).toFixed(2)}`);
     }
-    const colorLabel = typeof det.color === "string" ? det.color.trim() : "";
-    const colorHex = typeof det.color_hex === "string"
-        ? det.color_hex.trim()
-        : (typeof det.colorHex === "string" ? det.colorHex.trim() : "");
-    if (colorLabel || colorHex) {
-        const colorText = colorLabel && colorHex
-            ? `${colorLabel} (${colorHex})`
-            : (colorLabel || colorHex);
-        tags.push(`color ${colorText}`);
+    const colorInfo = getDetectionColorInfo(det);
+    if (colorInfo) {
+        const { label, hex } = colorInfo;
+        const colorText = label && hex
+            ? `${label} (${hex})`
+            : (label || hex);
+        if (colorText) {
+            tags.push(`color ${colorText}`);
+        }
     }
     const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
     return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;

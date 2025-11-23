@@ -678,8 +678,8 @@ class RealtimeFusionServer:
             for det in fused:
                 det_rows.append([
                     0,
-                    -det["cx"],
-                    -det["cy"],
+                    det["cx"],
+                    det["cy"],
                     (self.tracker_fixed_length if self.tracker_fixed_length is not None else det["length"]),
                     (self.tracker_fixed_width if self.tracker_fixed_width is not None else det["width"]),
                     det["yaw"],
@@ -1032,7 +1032,7 @@ def main():
                     help="size-mode=mesh 일 때 GLB에 곱할 유니폼 스케일")
     ap.add_argument("--mesh-height", type=float, default=0.0,
                     help="size-mode=mesh 일 때 지면 높이 계산용 높이(0이면 mesh-scale 사용)")
-    ap.add_argument("--z-offset", type=float, default=4.0,
+    ap.add_argument("--z-offset", type=float, default=0.0,
                     help="모든 박스에 추가할 z 오프셋")
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")

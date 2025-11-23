@@ -41,7 +41,7 @@ class CameraAssets:
 
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
-COLOR_RGB_RULES = {
+_COLOR_RGB_RULES = {
     "green": {
         "min": (0.0745, 0.2, 0.1569),
         "max": (0.3922, 0.5529, 0.4314),
@@ -525,7 +525,7 @@ class InferWorker(threading.Thread):
             if idx < len(color_list):
                 color_hex = color_list[idx]
                 entry["color_hex"] = color_hex
-                label, confidence, embedding = _classify_hex_color_strict(color_hex) # _classify_hex_color로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
+                label, confidence, embedding = _classify_hex_color(color_hex) # _classify_hex_color_strict로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
                 if label:
                     entry["color"] = label
                     entry["color_confidence"] = confidence
