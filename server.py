@@ -5,6 +5,8 @@ import re
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque, Counter
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Callable
@@ -51,6 +53,15 @@ def color_label_to_hex(color: Optional[str]) -> Optional[str]:
     if not color:
         return None
     return COLOR_HEX_MAP.get(color)
+
+
+def _normalize_base_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    base = str(value).strip()
+    if not base:
+        return None
+    return base.rstrip("/")
 
 # ---일단 저장용---
 import os, gzip, json, csv, hashlib, threading, queue, time
@@ -280,6 +291,13 @@ def load_camera_markers(path: Optional[str], local_ply_root: Optional[str] = Non
 
         display_name = str(name or (f"cam{camera_id}" if camera_id is not None else f"marker{idx+1}"))
         slug = _dedup_slug(_slugify_label(display_name), used_slugs)
+        overlay_base_url = entry.get("overlay_base_url") or entry.get("overlay_url") or entry.get("overlay_host")
+        if overlay_base_url is not None:
+            overlay_base_url = str(overlay_base_url).strip()
+            if overlay_base_url:
+                overlay_base_url = overlay_base_url.rstrip("/")
+            else:
+                overlay_base_url = None
         markers.append({
             "key": slug,
             "name": display_name,
@@ -288,6 +306,7 @@ def load_camera_markers(path: Optional[str], local_ply_root: Optional[str] = Non
             "rotation": rotation,
             "local_ply": str(ply_path) if ply_path else None,
             "local_lut": str(lut_path) if lut_path else None,
+            "overlay_base_url": overlay_base_url,
         })
 
     if not markers:
@@ -544,6 +563,10 @@ class GlobalWebServer:
         tracker_fixed_width: Optional[float] = None,
         camera_markers: Optional[List[dict]] = None,
         command_handler: Optional[Callable[[dict, float], dict]] = None,
+        overlay_sources: Optional[Dict[int, str]] = None,
+        overlay_proxy_prefix: str = "/proxy",
+        overlay_proxy_timeout: float = 3.0,
+        overlay_default_base: Optional[str] = None,
     ):
         self.global_ply = str(Path(global_ply).resolve())
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
@@ -559,6 +582,23 @@ class GlobalWebServer:
             "cameras": [],
         }
         self.command_handler = command_handler
+        prefix = str(overlay_proxy_prefix or "/proxy").strip()
+        if not prefix.startswith("/"):
+            prefix = "/" + prefix
+        self.overlay_proxy_prefix = prefix.rstrip("/") or "/proxy"
+        self.overlay_proxy_timeout = max(0.5, float(overlay_proxy_timeout))
+        self.overlay_sources: Dict[int, str] = {}
+        for key, url in (overlay_sources or {}).items():
+            norm = _normalize_base_url(url)
+            if norm is None:
+                continue
+            try:
+                cam_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            self.overlay_sources[cam_id] = norm
+        self.overlay_default_base = _normalize_base_url(overlay_default_base)
+        self.overlay_proxy_enabled = bool(self.overlay_sources)
         if static_root is None:
             static_root = Path(__file__).resolve().parent / "realtime_show_result" / "static"
         self.static_root = static_root
@@ -609,6 +649,7 @@ class GlobalWebServer:
                     "yaw": _safe_float(rot.get("yaw"), 0.0) or 0.0,
                     "roll": _safe_float(rot.get("roll"), 0.0) or 0.0,
                 },
+                "overlay_base_url": entry.get("overlay_base_url"),
             }
             local_ply = entry.get("local_ply")
             if local_ply and os.path.exists(local_ply):
@@ -809,6 +850,12 @@ class GlobalWebServer:
             }
             return Response(content=arr.tobytes(), media_type="application/octet-stream", headers=headers)
 
+        @self.app.get(f"{self.overlay_proxy_prefix}/api/cameras/{{camera_id}}/overlay.jpg")
+        def _proxy_overlay(camera_id: int):
+            if not self.overlay_proxy_enabled:
+                raise HTTPException(status_code=404, detail="overlay proxy disabled")
+            return self._proxy_overlay_request(int(camera_id))
+
     # ----------------- Update Interface -----------------
     def update(self, *, raw, fused, tracks, timestamp: float, cameras: List[str]):
         with self._lock:
@@ -823,6 +870,25 @@ class GlobalWebServer:
             self._server.should_exit = True
         if self._thread:
             self._thread.join(timeout=2.0)
+
+    def _proxy_overlay_request(self, camera_id: int):
+        base = self.overlay_sources.get(int(camera_id))
+        if not base and self.overlay_default_base:
+            base = self.overlay_default_base
+        if not base:
+            raise HTTPException(status_code=404, detail="overlay source not configured")
+        target_url = f"{base}/api/cameras/{camera_id}/overlay.jpg"
+        try:
+            with urllib.request.urlopen(target_url, timeout=self.overlay_proxy_timeout) as resp:
+                data = resp.read()
+                content_type = resp.headers.get("Content-Type") or "image/jpeg"
+        except urllib.error.HTTPError as exc:
+            raise HTTPException(status_code=exc.code, detail=f"overlay upstream error: {exc.reason}")
+        except urllib.error.URLError as exc:
+            raise HTTPException(status_code=502, detail=f"overlay upstream unreachable: {exc.reason}")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"overlay proxy failed: {exc}")
+        return Response(content=data, media_type=content_type)
 
 
 class UDPReceiverSingle:
@@ -966,6 +1032,7 @@ class RealtimeFusionServer:
         # 카메라 위치(가중치/거리 계산 및 UI용)
         self.camera_markers = load_camera_markers(cam_positions_path, local_ply_dir, local_lut_dir)
         self.cam_xy: Dict[str, Tuple[float, float]] = {}
+        self.overlay_sources: Dict[int, str] = {}
         for marker in self.camera_markers:
             pos = marker.get("position") or {}
             x = _safe_float(pos.get("x"))
@@ -976,6 +1043,13 @@ class RealtimeFusionServer:
             if not name:
                 continue
             self.cam_xy[str(name)] = (float(x), float(y))
+            try:
+                cam_id_int = int(marker.get("camera_id"))
+            except (TypeError, ValueError):
+                cam_id_int = None
+            overlay_base = _normalize_base_url(marker.get("overlay_base_url"))
+            if overlay_base and cam_id_int is not None:
+                self.overlay_sources[cam_id_int] = overlay_base
         if not self.cam_xy:
             print("[Fusion] WARN: no camera positions loaded; distance weighting falls back to origin.")
         self.buffer = {}
@@ -987,6 +1061,10 @@ class RealtimeFusionServer:
         self.carla_tx = TrackBroadcaster(carla_host, carla_port) if carla_host else None
         self.viz_cfg = viz_config
         self.client_config = client_config or {}
+        self.overlay_default_base = _normalize_base_url(self.client_config.get("overlayBaseUrl"))
+        self.overlay_proxy_prefix = "/proxy"
+        if self.overlay_sources:
+            self.client_config["overlayBaseUrl"] = self.overlay_proxy_prefix
         self.tracker_fixed_length = float(tracker_fixed_length) if tracker_fixed_length is not None else None
         self.tracker_fixed_width = float(tracker_fixed_width) if tracker_fixed_width is not None else None
         self.web = GlobalWebServer(
@@ -998,6 +1076,9 @@ class RealtimeFusionServer:
             client_config=self.client_config,
             camera_markers=self.camera_markers,
             command_handler=(self._send_command if command_host and command_port else None),
+            overlay_sources=self.overlay_sources,
+            overlay_proxy_prefix=self.overlay_proxy_prefix,
+            overlay_default_base=self.overlay_default_base,
         ) if enable_web else None
 
         # 프레임 버퍼(최근 T초 동안 카메라별 최신)
