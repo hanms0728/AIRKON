@@ -126,7 +126,13 @@ class TrackState:
 class Track:
     track_id_counter = 0
 
-    def __init__(self, bbox_init: np.ndarray, confirm_hits: int = 3, color: Optional[str] = None):
+    def __init__(
+        self,
+        bbox_init: np.ndarray,
+        confirm_hits: int = 3,
+        color: Optional[str] = None,
+        color_lock_streak: int = 5,
+    ):
         # bbox_init: [class, x_c, y_c, l, w, yaw_deg]
         self.id = Track.track_id_counter
         Track.track_id_counter += 1
@@ -173,6 +179,10 @@ class Track:
         self.color_counts: Counter = Counter()
         self.current_color: Optional[str] = None
         self.total_color_votes = 0
+        self.color_streak_color: Optional[str] = None
+        self.color_streak: int = 0
+        self.color_lock: Optional[str] = None
+        self.color_lock_streak = max(1, int(color_lock_streak))
         self._update_color(color)
 
         self._append_history_entry()
@@ -240,9 +250,22 @@ class Track:
         normalized = normalize_color_label(color)
         if not normalized:
             return
+        # 잠금된 상태에서 다른 색이 들어오면 무시 (수동 해제/변경만 허용)
+        if self.color_lock and normalized != self.color_lock:
+            return
+
+        if normalized == self.color_streak_color:
+            self.color_streak += 1
+        else:
+            self.color_streak_color = normalized
+            self.color_streak = 1
+
         self.color_counts[normalized] += 1
         self.total_color_votes += 1
         self.current_color = self.color_counts.most_common(1)[0][0]
+
+        if not self.color_lock and self.color_streak >= self.color_lock_streak:
+            self.color_lock = normalized
 
     def force_set_color(self, color: Optional[str]) -> None:
         """
@@ -252,10 +275,16 @@ class Track:
         self.color_counts.clear()
         self.current_color = None
         self.total_color_votes = 0
+        self.color_streak_color = None
+        self.color_streak = 0
+        self.color_lock = None
         if normalized:
             self.color_counts[normalized] = 1
             self.total_color_votes = 1
             self.current_color = normalized
+            self.color_streak_color = normalized
+            self.color_streak = self.color_lock_streak
+            self.color_lock = normalized
 
     def _append_history_entry(self, state: Optional[np.ndarray] = None) -> None:
         if state is None:
@@ -320,12 +349,13 @@ class Track:
         return yaw_heading
 
     def get_color(self) -> Optional[str]:
-        return self.current_color
+        return self.color_lock if self.color_lock else self.current_color
 
     def get_color_confidence(self) -> float:
-        if not self.current_color or self.total_color_votes == 0:
+        color = self.get_color()
+        if not color or self.total_color_votes == 0:
             return 0.0
-        return self.color_counts[self.current_color] / float(self.total_color_votes)
+        return self.color_counts.get(color, 0) / float(self.total_color_votes)
 
     def _assemble_state(self) -> np.ndarray:
         return np.array([
@@ -404,6 +434,7 @@ class SortTracker:
         iou_threshold: float = 0.3,
         color_penalty: float = 0.3,
         smooth_window: int = DEFAULT_SMOOTH_WINDOW,
+        color_lock_streak: int = 5,
     ):
         self.tracks: List[Track] = []
         self.max_age = max_age
@@ -411,6 +442,7 @@ class SortTracker:
         self.iou_threshold = iou_threshold
         self.color_penalty = color_penalty
         self.smooth_window = max(1, smooth_window)
+        self.color_lock_streak = max(1, int(color_lock_streak))
         self.last_matches: List[Tuple[int, int]] = []
 
     def update(
@@ -473,7 +505,12 @@ class SortTracker:
 
         for det_idx in unmatched_detections:
             color = det_colors[det_idx] if det_colors else None
-            new_track = Track(detections_carla[det_idx], confirm_hits=self.min_hits, color=color)
+            new_track = Track(
+                detections_carla[det_idx],
+                confirm_hits=self.min_hits,
+                color=color,
+                color_lock_streak=self.color_lock_streak,
+            )
             self.tracks.append(new_track)
 
         self.tracks = [t for t in self.tracks if t.state != TrackState.DELETED]
