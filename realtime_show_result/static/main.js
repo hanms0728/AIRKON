@@ -1747,18 +1747,8 @@ async function ensureMarkerModel() {
                 bbox.getSize(size);
                 const center = new THREE.Vector3();
                 bbox.getCenter(center);
-    const brightMaterial = new THREE.MeshStandardMaterial({
-        color: 0xffe6a3,
-        emissive: 0x2d240f,
-        roughness: 0.5,
-        metalness: 0.1,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.95,
-    });
     model.traverse((obj) => {
         if (obj.isMesh) {
-            obj.material = brightMaterial.clone();
             if ("frustumCulled" in obj) {
                 obj.frustumCulled = false;
             }
