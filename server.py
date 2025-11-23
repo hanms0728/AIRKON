@@ -1605,7 +1605,7 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="pointcloud/real_coshow_map_small.ply")
+    ap.add_argument("--global-ply", default="pointcloud/real_coshow_map_v2.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
     ap.add_argument("--web-port", type=int, default=18000)
@@ -1627,7 +1627,7 @@ def main():
                     help="모든 박스에 추가할 z 오프셋")
     ap.add_argument("--invert-bev-y", dest="invert_bev_y", action="store_true")
     ap.add_argument("--no-invert-bev-y", dest="invert_bev_y", action="store_false")
-    ap.set_defaults(no_invert_bev_y=True)
+    ap.set_defaults(invert_bev_y=True)
     ap.add_argument("--normalize-vehicle", dest="normalize_vehicle", action="store_true",
                     help="GLB를 최대 변 1.0으로 정규화")
     ap.add_argument("--no-normalize-vehicle", dest="normalize_vehicle", action="store_false",
@@ -1642,7 +1642,7 @@ def main():
                     help="global ply의 Y축을 반전하여 로드")
     ap.add_argument("--no-flip-ply-y", dest="flip_ply_y", action="store_false",
                     help="global ply Y축 반전하지 않음")
-    ap.set_defaults(flip_ply_y=False)
+    ap.set_defaults(flip_ply_y=True)
     ap.add_argument("--flip-marker-x", dest="flip_marker_x", action="store_true",
                     help="뷰어에서 카메라 버튼/로컬 클라우드의 X축을 반전")
     ap.add_argument("--no-flip-marker-x", dest="flip_marker_x", action="store_false")
@@ -1650,7 +1650,7 @@ def main():
     ap.add_argument("--flip-marker-y", dest="flip_marker_y", action="store_true",
                     help="뷰어에서 카메라 버튼/로컬 클라우드의 Y축을 반전")
     ap.add_argument("--no-flip-marker-y", dest="flip_marker_y", action="store_false")
-    ap.set_defaults(flip_marker_y=False)
+    ap.set_defaults(flip_marker_y=True)
     ap.add_argument("--cmd-host", default="0.0.0.0", help="yaw 명령 서버 바인드 호스트 (미지정 시 비활성화)")
     ap.add_argument("--cmd-port", type=int, default=18100, help="yaw 명령 서버 포트")
 
