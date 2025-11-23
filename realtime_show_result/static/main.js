@@ -1236,6 +1236,19 @@ function showOverlayImage() {
     }
 }
 
+function getPollingIntervalMs(defaultMs = 400) {
+    const override = state.config?.fusionPollIntervalMs ?? state.config?.pollIntervalMs;
+    const explicit = Number(override);
+    if (Number.isFinite(explicit) && explicit > 0) {
+        return explicit;
+    }
+    const fps = Number(state.config?.fps);
+    if (Number.isFinite(fps) && fps > 0) {
+        return Math.max(50, 1000 / fps);
+    }
+    return defaultMs;
+}
+
 function startLivePolling() {
     stopLivePolling();
     if (state.cameraId == null) {
@@ -1249,7 +1262,7 @@ function startLivePolling() {
             console.error(err);
             if (statusEl) statusEl.textContent = `Error: ${err.message}`;
         } finally {
-            state.pollingHandle = window.setTimeout(poll, 400);
+            state.pollingHandle = window.setTimeout(poll, getPollingIntervalMs());
         }
     };
     poll();
@@ -1309,7 +1322,7 @@ function startFusionPolling() {
             console.error(err);
             if (statusEl) statusEl.textContent = `Fusion error: ${err.message}`;
         } finally {
-            state.pollingHandle = window.setTimeout(poll, 400);
+            state.pollingHandle = window.setTimeout(poll, getPollingIntervalMs());
         }
     };
     poll();

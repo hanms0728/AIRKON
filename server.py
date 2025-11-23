@@ -1675,6 +1675,9 @@ def main():
         "initialViewTarget": [0, 0, 30],
         "initialViewOffset": [0, -30, 50],
     }
+    poll_interval_ms = max(50.0, 1000.0 / max(1e-3, float(args.fps)))
+    client_config["fps"] = float(args.fps)
+    client_config["fusionPollIntervalMs"] = poll_interval_ms
     if args.overlay_base_url:
         client_config["overlayBaseUrl"] = args.overlay_base_url
 
