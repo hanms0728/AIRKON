@@ -525,7 +525,7 @@ class InferWorker(threading.Thread):
             if idx < len(color_list):
                 color_hex = color_list[idx]
                 entry["color_hex"] = color_hex
-                label, confidence, embedding = _classify_hex_color(color_hex) # _classify_hex_color_strict로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
+                label, confidence, embedding = _classify_hex_color_strict(color_hex) # _classify_hex_color로 둘중 뭐가낫나 색 none이너무많으면에바긴해 
                 if label:
                     entry["color"] = label
                     entry["color_confidence"] = confidence
@@ -1086,7 +1086,7 @@ def main():
     ap.add_argument("--transport", default="tcp", choices=["tcp","udp"])
     ap.add_argument("--no-cuda", action="store_true")
     ap.add_argument("--udp-enable", action="store_true")
-    ap.add_argument("--udp-host", default="127.0.0.1")
+    ap.add_argument("--udp-host", default="192.168.0.165")
     ap.add_argument("--udp-port", type=int, default=50050)
     ap.add_argument("--udp-format", choices=["json","text"], default="json")
     ap.add_argument("--udp-fixed-length", type=float, default=4.4,
