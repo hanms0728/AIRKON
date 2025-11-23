@@ -52,6 +52,8 @@ CAM_LIST_DEFAULT = [
     {"name":"cam13", "x":-24.0, "y":-56.0, "z":10.0,  "pitch":-35.0, "yaw":135.0,  "roll":0.0, "fov":89.0},
     {"name":"cam14", "x":-32.0, "y":-22.0, "z":10.0,  "pitch":-35.0, "yaw":-45.0,  "roll":0.0, "fov":89.0},
     {"name":"cam15", "x":32.0,  "y":-22.0, "z":10.0,  "pitch":-35.0, "yaw":-125.0, "roll":0.0, "fov":89.0},
+    {"name":"cam16", "x":65.0,  "y":-30.0, "z":10.0,  "pitch":-40.0, "yaw":180.0, "roll":0.0, "fov":89.0},
+    {"name":"top", "x":0.0,  "y":-25.0, "z":100.0,  "pitch":-90.0, "yaw":0.0, "roll":90.0, "fov":89.0}
 ]
 
 # ---------------- Utilities ----------------
@@ -317,7 +319,7 @@ def main():
     ap.add_argument("--sample-step", type=int, default=0)
     ap.add_argument("--out-root", type=str, default="./multi_out")
     ap.add_argument("--voxel", type=float, default=0.0, help=">0: voxel downsample fused points (m)")
-    ap.add_argument("--cloud-ground-only", type=int, default=1, help="1=only ground for points, 0=all valid")
+    ap.add_argument("--cloud-ground-only", type=int, default=0, help="1=only ground for points, 0=all valid")
 
     # 추가: lane/road semantic id 설정
     ap.add_argument("--lane-id", type=int, default=24, help="semantic id for lane marking")

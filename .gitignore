@@ -8,3 +8,7 @@ runs
 utils/color/green
 utils/color/red
 utils/color/purple
+utils/color/pink
+utils/color/yellow
+utils/color/white
+pointcloud/real_coshow_map.ply

@@ -19,9 +19,9 @@ from torch.utils.data import Dataset, DataLoader
 from ultralytics import YOLO
 from tqdm import tqdm
 
-from geometry_utils import parallelogram_from_triangle as _para
-from geometry_utils import aabb_of_poly4, iou_aabb_xywh, tiny_filter_on_dets
-from evaluation_utils import decode_predictions, evaluate_single_image, compute_detection_metrics
+from src.geometry_utils import parallelogram_from_triangle as _para
+from src.geometry_utils import aabb_of_poly4, iou_aabb_xywh, tiny_filter_on_dets
+from src.evaluation_utils import decode_predictions, evaluate_single_image, compute_detection_metrics
 
 # ───────────────── 추가: matmul/TF32 설정 (안정/속도)
 try:

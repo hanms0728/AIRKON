@@ -11,6 +11,7 @@ COLOR_HEX_MAP = {
     "white": "#f0f0f0",
     "yellow": "#ffdd00",
     "purple": "#781de7",
+    "black": "#000000",
 }
 
 DEFAULT_COLOR_LABEL = "white"
@@ -68,6 +69,11 @@ client = carla.Client("localhost", 2000)
 client.set_timeout(10.0)
 world = client.get_world()
 bp_lib = world.get_blueprint_library()
+try:
+    carla_map = world.get_map()
+except RuntimeError as exc:
+    print(f"[CARLA][WARN] Unable to fetch map ({exc}); ground snapping disabled.")
+    carla_map = None
 
 
 def get_vehicle_blueprint_with_color(blueprint_library):
@@ -110,6 +116,12 @@ print(f"[CARLA] Using blueprint: {VEHICLE_BP_ID} (color attribute: {VEHICLE_BP_S
 vehicle_map = {}
 vehicle_colors = {}
 z_offset = 0.2
+DISABLE_COLLISIONS = True
+AUTO_GROUND_HEIGHT = True
+try:
+    LANE_TYPE_ANY = carla.LaneType.Any
+except AttributeError:
+    LANE_TYPE_ANY = carla.LaneType.Driving
 
 
 def build_vehicle_blueprint(color_label):
@@ -131,6 +143,38 @@ def apply_vehicle_color(vehicle, color_label):
         return True
     except Exception:
         return False
+
+def disable_vehicle_collisions(vehicle):
+    """Disable collision response for a vehicle actor if supported."""
+    if not DISABLE_COLLISIONS or vehicle is None:
+        return
+    try:
+        vehicle.set_collision_enabled(False)
+        return
+    except AttributeError:
+        # Older CARLA versions do not expose set_collision_enabled
+        pass
+    except RuntimeError:
+        # Vehicle may be pending spawn
+        return
+    try:
+        vehicle.set_simulate_physics(False)
+    except Exception:
+        pass
+
+def get_ground_z(x, y, fallback_z):
+    """Query CARLA map for ground height at (x, y)."""
+    if not AUTO_GROUND_HEIGHT or carla_map is None:
+        return fallback_z
+    try:
+        location = carla.Location(x=x, y=y, z=fallback_z)
+        waypoint = carla_map.get_waypoint(location, project_to_road=True, lane_type=LANE_TYPE_ANY)
+        if waypoint:
+            return waypoint.transform.location.z
+    except RuntimeError:
+        # Query failed (e.g., far from road), fall back to provided z
+        pass
+    return fallback_z
 
 def move_vehicle_to(vehicle, x, y, z,pitch ,yaw_deg):
     """Teleport vehicle to (x, y, z) with yaw/pitch (degrees)."""
@@ -162,15 +206,18 @@ def move_or_spawn_vehicles(info_dict):
     # Move existing or spawn new
     for vid, (x, y, z, pitch, yaw, color_label) in info_dict.items():
         normalized_color = normalize_color_label(color_label)
+        ground_z = get_ground_z(x, y, z)
+        target_z = ground_z + z_offset
         if vid in vehicle_map:
             vehicle = vehicle_map[vid]
-            move_vehicle_to(vehicle, x, y, z+z_offset, pitch, yaw)
+            disable_vehicle_collisions(vehicle)
+            move_vehicle_to(vehicle, x, y, target_z, pitch, yaw)
             if normalized_color and normalized_color != vehicle_colors.get(vid):
                 if apply_vehicle_color(vehicle, normalized_color):
                     vehicle_colors[vid] = normalized_color
         else:
             transform = carla.Transform(
-                carla.Location(x=x, y=y, z=z+z_offset),
+                carla.Location(x=x, y=y, z=target_z),
                 carla.Rotation(pitch=pitch, yaw=yaw)
             )
             spawn_color = normalized_color or DEFAULT_COLOR_LABEL
@@ -180,6 +227,7 @@ def move_or_spawn_vehicles(info_dict):
             vehicle = world.try_spawn_actor(bp, transform)
             if vehicle:
                 vehicle_map[vid] = vehicle
+                disable_vehicle_collisions(vehicle)
                 if spawn_color and apply_vehicle_color(vehicle, spawn_color):
                     vehicle_colors[vid] = spawn_color
             else:
@@ -242,7 +290,7 @@ def main():
                     center = it.get("center", [0.0, 0.0, 0.0])
                     cx = float(center[0])
                     cy = float(center[1])
-                    cz = float(center[2])
+                    cz = float(3.5)
                     pitch = float(it.get("pitch", 0.0))  # degree
                     yaw = float(it.get("yaw", 0.0))  # degree
                     color = normalize_color_label(it.get("color"))  # normalized color label
