@@ -1,7 +1,7 @@
 python main.py --weights onnx/yolo11m_2_5d_epoch_005.onnx --lut-path pointcloud/cloud_rgb_npz --web-enable --viewer3d
 
 
-python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config.json --web-enable --udp-enable --no-invert-bev-y --mesh-scale 4 --no-gui
+python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config.json --web-enable --udp-enable --no-invert-bev-y --mesh-scale 4 --no-gui --udp-host "192.168.0.165"
 
 python server.py \
   --udp-port 50050 --no-invert-bev-y\
