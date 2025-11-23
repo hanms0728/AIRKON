@@ -69,7 +69,7 @@ class IPCameraStreamer:
             {'ip': '192.168.0.30', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 3, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
-            {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.51', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 4, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
             {'ip': '192.168.0.25', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
@@ -77,7 +77,7 @@ class IPCameraStreamer:
 
             {'ip': '192.168.0.35', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
-            {'ip': '192.168.0.51', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
              'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
 
             {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
