@@ -280,6 +280,9 @@ async function initFusionMode() {
         console.warn("Failed to load fusion config", err);
         state.config = {};
     }
+    const showSceneAxes = Boolean(state.config?.showSceneAxes);
+    grid.visible = showSceneAxes;
+    axes.visible = showSceneAxes;
     try {
         state.site = await fetchJson("/api/site");
     } catch (err) {
