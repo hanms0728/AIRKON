@@ -615,41 +615,44 @@ class InferWorker(threading.Thread):
                         tris_img_orig=tris_img_orig,
                         colors_hex=colors_hex,
                     )
+
                 overlay_frame = None
                 if frame_bgr is not None and dets:
-                    tris_for_gui = [
-                        np.asarray(d.get("tri"), dtype=np.float32)
-                        for d in dets
-                        if d.get("tri") is not None
-                    ]
-                    pseudo3d = None
-                    if tris_for_gui:
-                        pseudo3d = draw_pred_pseudo3d(
-                            frame_bgr,
-                            tris_for_gui,
-                            save_path_img=None,
-                            dy=None,
-                            height_scale=0.25,
-                            min_dy=8,
-                            max_dy=80,
-                            return_image=True,
-                        )
-                    overlay_frame = pseudo3d
+                    with wrk.span("draw"):
+                        tris_for_gui = [
+                            np.asarray(d.get("tri"), dtype=np.float32)
+                            for d in dets
+                            if d.get("tri") is not None
+                        ]
+                        pseudo3d = None
+                        if tris_for_gui:
+                            pseudo3d = draw_pred_pseudo3d(
+                                frame_bgr,
+                                tris_for_gui,
+                                save_path_img=None,
+                                dy=None,
+                                height_scale=0.25,
+                                min_dy=8,
+                                max_dy=80,
+                                return_image=True,
+                            )
+                        overlay_frame = pseudo3d
                 if overlay_frame is None:
                     overlay_frame = draw_detections(frame_bgr, dets)
                 self._save_image(overlay_frame, self.save_dirs.get("overlay"), cid, capture_ts, "overlay")
 
                 if self.web_publisher is not None:
-                    try:
-                        self.web_publisher.update(
-                            cam_id=cid,
-                            ts=ts,
-                            capture_ts=capture_ts,
-                            bev_dets=bev,
-                            overlay_bgr=overlay_frame,
-                        )
-                    except Exception as e:
-                        print(f"[WEB] publish error cam{cid}: {e}")
+                    with wrk.span("web"):
+                        try:
+                            self.web_publisher.update(
+                                cam_id=cid,
+                                ts=ts,
+                                capture_ts=capture_ts,
+                                bev_dets=bev,
+                                overlay_bgr=overlay_frame,
+                            )
+                        except Exception as e:
+                            print(f"[WEB] publish error cam{cid}: {e}")
 
                 if self.udp_sender is not None:
                     with wrk.span("udp"):

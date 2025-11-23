@@ -19,12 +19,12 @@
             width: 100%;
         }
         #viewer {
-            flex: 3;
+            flex: 1;
             position: relative;
             background: #000;
         }
         #side-panel {
-            flex: 1;
+            width: 320px;
             display: flex;
             flex-direction: column;
             background: #111;
@@ -34,52 +34,105 @@
         }
         #toolbar {
             display: flex;
-            gap: 12px;
-            align-items: center;
+            flex-direction: column;
+            gap: 10px;
             margin-bottom: 16px;
-            flex-wrap: wrap;
         }
-        select, button {
-            padding: 6px 10px;
-            background: #1f1f1f;
-            border: 1px solid #333;
-            color: #e6e6e6;
-            border-radius: 4px;
-        }
-        #overlay-wrapper {
-            margin-top: 16px;
-            border: 1px solid #333;
-            background: #000;
-            position: relative;
+        #label-panel {
             flex: 1;
             display: flex;
-            align-items: center;
-            justify-content: center;
+            flex-direction: column;
+            overflow-y: auto;
+            gap: 8px;
         }
-        #overlay-wrapper img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
+        #label-panel h2 {
+            margin: 0 0 8px 0;
+            font-size: 1rem;
+            color: #ddd;
+        }
+        #label-panel ol {
+            margin: 0;
+            padding-left: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 0.85rem;
+        }
+        #label-panel li {
+            background: #1a1a1a;
+            padding: 6px 8px;
+            border-radius: 4px;
         }
         #status {
             font-size: 0.9rem;
             color: #bbb;
         }
+        #overlay-wrapper {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 10;
+            display: none;
+            pointer-events: none;
+        }
+        body.local-mode #overlay-wrapper {
+            display: block;
+        }
+        #overlay-wrapper img {
+            max-width: min(40vw, 500px);
+            max-height: min(45vh, 320px);
+            object-fit: contain;
+            display: none;
+            border: 1px solid #333;
+            border-radius: 6px;
+            background: #000;
+            padding: 4px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        }
+        #overlay-placeholder {
+            display: none;
+            color: #666;
+            text-align: center;
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            background: rgba(0, 0, 0, 0.8);
+            font-size: 0.8rem;
+            max-width: 240px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        }
+        body.global-mode #overlay-placeholder {
+            display: inline-block;
+        }
+        body.local-mode #overlay-wrapper img {
+            display: block;
+        }
+        body.local-mode #side-panel {
+            display: none !important;
+            width: 0;
+        }
+        body.local-mode #viewer {
+            flex: 1 1 auto;
+        }
     </style>
 </head>
 <body>
     <div id="app">
-        <div id="viewer"></div>
-        <div id="side-panel">
-            <div id="toolbar">
-                <label for="camera-select">Camera</label>
-                <select id="camera-select"></select>
-                <span id="status">Waiting…</span>
-            </div>
+        <div id="viewer">
             <div id="overlay-wrapper">
+                <div id="overlay-placeholder">Click a camera marker in the 3D view to see its feed</div>
                 <img id="overlay-img" alt="Overlay stream" />
             </div>
         </div>
+        <aside id="side-panel">
+            <div id="toolbar">
+                <span id="status">Click a floating camera marker to view the feed</span>
+            </div>
+            <div id="label-panel">
+                <h2>Detections</h2>
+                <ol id="detection-list"></ol>
+            </div>
+        </aside>
     </div>
     <script>
         window.VIEW_MODE = "live";

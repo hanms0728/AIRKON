@@ -19,11 +19,11 @@
             width: 100%;
         }
         #viewer {
-            flex: 3;
+            flex: 1;
             position: relative;
         }
         #sidebar {
-            flex: 1;
+            width: 320px;
             display: flex;
             flex-direction: column;
             padding: 16px;
@@ -35,6 +35,62 @@
             margin-bottom: 12px;
             font-size: 0.9rem;
             color: #9dd6ff;
+        }
+        #camera-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        #overlay-wrapper {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            z-index: 10;
+            display: none;
+            pointer-events: none;
+        }
+        body.local-mode #overlay-wrapper {
+            display: block;
+        }
+        #overlay-wrapper img {
+            max-width: min(40vw, 500px);
+            max-height: min(45vh, 320px);
+            object-fit: contain;
+            display: none;
+            border: 1px solid #1f1f1f;
+            border-radius: 6px;
+            background: #000;
+            padding: 4px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        }
+        #overlay-placeholder {
+            display: none;
+            color: #888;
+            text-align: center;
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid #1f1f1f;
+            background: rgba(0, 0, 0, 0.85);
+            font-size: 0.8rem;
+            max-width: 240px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        }
+        body.global-mode #overlay-placeholder {
+            display: inline-block;
+        }
+        body.local-mode #overlay-wrapper img {
+            display: block;
+        }
+        #detection-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        #detection-panel h2 {
+            margin: 12px 0 8px;
+            font-size: 1rem;
+            color: #ddd;
         }
         #detection-list {
             flex: 1;
@@ -50,14 +106,29 @@
         #detection-list li:last-child {
             border-bottom: none;
         }
+        body.local-mode #sidebar {
+            display: none !important;
+            width: 0;
+        }
     </style>
 </head>
 <body>
     <div id="fusion-app">
-        <div id="viewer"></div>
+        <div id="viewer">
+            <div id="overlay-wrapper">
+                <div id="overlay-placeholder">Click a camera marker in the 3D view to see its feed</div>
+                <img id="overlay-img" alt="Camera overlay stream" />
+            </div>
+        </div>
         <div id="sidebar">
             <div id="status">Initializing…</div>
-            <ol id="detection-list"></ol>
+            <div id="camera-panel">
+                <span style="font-size:0.9rem;color:#ddd;">Click a floating camera marker to view an overlay.</span>
+            </div>
+            <div id="detection-panel">
+                <h2>Detections</h2>
+                <ol id="detection-list"></ol>
+            </div>
         </div>
     </div>
     <script>

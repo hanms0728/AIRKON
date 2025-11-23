@@ -424,6 +424,15 @@ class Track:
         self.heading_lock_score = 0
         self.locked_heading = None
 
+    def force_set_yaw(self, yaw_deg: float) -> None:
+        """
+        명령으로 yaw 값을 직접 지정한다. heading 락은 해제한다.
+        """
+        self.car_yaw = wrap_deg(float(yaw_deg))
+        self.kf_yaw.x[0, 0] = self.car_yaw
+        self.heading_locked = False
+        self.heading_lock_score = 0
+        self.locked_heading = None
 
 
 class SortTracker:
@@ -553,6 +562,7 @@ class SortTracker:
                 attrs[track.id] = {
                     "color": track.get_color(),
                     "color_confidence": track.get_color_confidence(),
+                    "color_locked": bool(track.color_lock),
                 }
         return attrs
 
@@ -600,6 +610,14 @@ class SortTracker:
         for track in self.tracks:
             if track.id == track_id and track.state != TrackState.DELETED:
                 track.force_flip_yaw(offset_deg)
+                return True
+        return False
+
+    def force_set_yaw(self, track_id: int, yaw_deg: float) -> bool:
+        """Force-set yaw (degrees) for a track id."""
+        for track in self.tracks:
+            if track.id == track_id and track.state != TrackState.DELETED:
+                track.force_set_yaw(yaw_deg)
                 return True
         return False
 
