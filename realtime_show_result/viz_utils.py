@@ -140,7 +140,7 @@ def prepare_visual_item(
         [
             cx,
             cy,
-            cz + float(cfg.z_offset) + 0.5 * max(0.0, height_for_center),
+            cz + float(cfg.z_offset),
         ],
         dtype=np.float64,
     )
