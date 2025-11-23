@@ -619,8 +619,6 @@ class GlobalWebServer:
         self.client_config.setdefault("flipMarkerX", False)
         self.client_config.setdefault("flipMarkerY", False)
         self.client_config["vizConfig"] = self.viz_cfg.as_client_dict()
-        self.client_config["initialViewTarget"] = [0,-50,50]
-        self.client_config["initialViewOffset"] = [0, -50, 60]
 
         self.camera_marker_payload: List[dict] = []
         self.marker_local_map: Dict[str, str] = {}
@@ -1093,7 +1091,7 @@ class RealtimeFusionServer:
         self.buffer: Dict[str, deque] = {cam: deque(maxlen=1) for cam in cam_ports.keys()}
 
         # 추적기
-        self.tracker = SortTracker(max_age=20, min_hits=10, iou_threshold=0.15) 
+        self.tracker = SortTracker(max_age=20, min_hits=20, iou_threshold=0.15) 
         self._log_interval = 1.0
         self._next_log_ts = 0.0
         self.command_queue: Optional[queue.Queue] = None
@@ -1587,6 +1585,7 @@ def parse_cam_ports(text: str) -> Dict[str, int]:
         out[name.strip()] = int(port)
     return out
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cam-ports", default="cam1:50050,cam2:50051")
@@ -1673,6 +1672,8 @@ def main():
         "vehicleYAxisUp": bool(args.vehicle_y_up),
         "flipMarkerX": bool(args.flip_marker_x),
         "flipMarkerY": bool(args.flip_marker_y),
+        "initialViewTarget": [0, 0, 30],
+        "initialViewOffset": [0, -30, 50],
     }
     if args.overlay_base_url:
         client_config["overlayBaseUrl"] = args.overlay_base_url
