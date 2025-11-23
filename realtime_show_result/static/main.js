@@ -27,6 +27,7 @@ const cameraSelectEl = document.getElementById("camera-select");
 const statusEl = document.getElementById("status");
 const overlayImgEl = document.getElementById("overlay-img");
 const overlayPlaceholderEl = document.getElementById("overlay-placeholder");
+const adminToggleBtnEl = document.getElementById("admin-toggle-btn");
 
 const ADMIN_COLORS = ["red", "pink", "green", "white", "yellow", "purple", "none"];
 const ADMIN_HOTKEY = { key: "a", ctrl: true, shift: true };
@@ -3183,7 +3184,20 @@ function refreshFusionViewAfterAdmin() {
     });
 }
 
+function setupAdminToggleButton() {
+    if (!adminState.enabled || !adminToggleBtnEl) {
+        return;
+    }
+    adminState.elements.toggle = adminToggleBtnEl;
+    adminToggleBtnEl.style.display = "block";
+    adminToggleBtnEl.addEventListener("click", () => {
+        setupAdminPanel();
+        toggleAdminPanel();
+    });
+}
+
 if (adminState.enabled) {
+    setupAdminToggleButton();
     setupAdminPanel();
     if (adminAutoOpen) {
         toggleAdminPanel(true);

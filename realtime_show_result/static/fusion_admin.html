@@ -42,6 +42,19 @@
             gap: 8px;
             margin-bottom: 12px;
         }
+        #admin-toggle-btn {
+            background: #2563eb;
+            color: #f8fafc;
+            border: 1px solid #1d4ed8;
+            border-radius: 6px;
+            padding: 8px 10px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        #admin-toggle-btn.active {
+            background: #1d4ed8;
+            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.35);
+        }
         #overlay-wrapper {
             position: absolute;
             top: 16px;
@@ -125,6 +138,7 @@
             <div id="camera-panel">
                 <span style="font-size:0.9rem;color:#ddd;">Admin view: use the panel (Ctrl+Shift+A) to edit track color / yaw.</span>
                 <span style="font-size:0.85rem;color:#888;">Selecting a track in the list or clicking it in 3D will prefill the admin panel.</span>
+                <button id="admin-toggle-btn" type="button">관리 패널 열기 / 닫기</button>
             </div>
             <div id="detection-panel">
                 <h2>Detections</h2>
