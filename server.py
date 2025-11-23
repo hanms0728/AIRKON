@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque, Counter
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Callable
 
 import numpy as np
 import open3d as o3d
@@ -543,6 +543,7 @@ class GlobalWebServer:
         tracker_fixed_length: Optional[float] = None,
         tracker_fixed_width: Optional[float] = None,
         camera_markers: Optional[List[dict]] = None,
+        command_handler: Optional[Callable[[dict, float], dict]] = None,
     ):
         self.global_ply = str(Path(global_ply).resolve())
         self.vehicle_glb = str(Path(vehicle_glb).resolve())
@@ -557,6 +558,7 @@ class GlobalWebServer:
             "timestamp": None,
             "cameras": [],
         }
+        self.command_handler = command_handler
         if static_root is None:
             static_root = Path(__file__).resolve().parent / "realtime_show_result" / "static"
         self.static_root = static_root
@@ -727,6 +729,53 @@ class GlobalWebServer:
         def _tracks():
             with self._lock:
                 return {"timestamp": self._state["timestamp"], "items": self._state["tracks"]}
+
+        def _run_admin_command(payload: dict) -> dict:
+            if not self.command_handler:
+                raise HTTPException(status_code=503, detail="admin command unavailable")
+            try:
+                resp = self.command_handler(payload, 2.0)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
+            if not isinstance(resp, dict):
+                raise HTTPException(status_code=502, detail="invalid admin response")
+            return resp
+
+        @self.app.get("/api/admin/tracks")
+        def _admin_tracks():
+            resp = _run_admin_command({"cmd": "list_tracks"})
+            if resp.get("status") != "ok":
+                raise HTTPException(status_code=400, detail=resp.get("message", "command failed"))
+            return resp
+
+        @self.app.post("/api/admin/tracks/{track_id}/color")
+        def _admin_set_color(track_id: int, body: Optional[dict] = None):
+            payload = {"cmd": "set_color", "track_id": track_id, "color": None}
+            if isinstance(body, dict) and "color" in body:
+                payload["color"] = body.get("color")
+            resp = _run_admin_command(payload)
+            if resp.get("status") != "ok":
+                raise HTTPException(status_code=400, detail=resp.get("message", "command failed"))
+            return resp
+
+        @self.app.post("/api/admin/tracks/{track_id}/yaw")
+        def _admin_set_yaw(track_id: int, body: Optional[dict] = None):
+            if not isinstance(body, dict) or "yaw" not in body:
+                raise HTTPException(status_code=400, detail="yaw required")
+            payload = {"cmd": "set_yaw", "track_id": track_id, "yaw": body.get("yaw")}
+            resp = _run_admin_command(payload)
+            if resp.get("status") != "ok":
+                raise HTTPException(status_code=400, detail=resp.get("message", "command failed"))
+            return resp
+
+        @self.app.post("/api/admin/tracks/{track_id}/flip")
+        def _admin_flip(track_id: int, body: Optional[dict] = None):
+            delta = body.get("delta", 180.0) if isinstance(body, dict) else 180.0
+            payload = {"cmd": "flip_yaw", "track_id": track_id, "delta": delta}
+            resp = _run_admin_command(payload)
+            if resp.get("status") != "ok":
+                raise HTTPException(status_code=400, detail=resp.get("message", "command failed"))
+            return resp
 
         @self.app.get("/assets/global.ply")
         def _global_ply():
@@ -948,6 +997,7 @@ class RealtimeFusionServer:
             viz_config=self.viz_cfg,
             client_config=self.client_config,
             camera_markers=self.camera_markers,
+            command_handler=(self._send_command if command_host and command_port else None),
         ) if enable_web else None
 
         # 프레임 버퍼(최근 T초 동안 카메라별 최신)
@@ -1000,6 +1050,23 @@ class RealtimeFusionServer:
         if timings:
             timing_str = " ".join(f"{k}={v:.2f}ms" for k, v in timings.items())
             print(f"  timings {timing_str}")
+
+    def _send_command(self, payload: dict, timeout: float = 2.0) -> dict:
+        if not self.command_queue:
+            raise RuntimeError("command queue not initialized")
+        cmd = payload.get("cmd")
+        if not cmd:
+            raise RuntimeError("cmd required")
+        resp_q: queue.Queue = queue.Queue(maxsize=1)
+        item = {"cmd": cmd, "payload": payload, "response": resp_q}
+        try:
+            self.command_queue.put_nowait(item)
+        except queue.Full:
+            raise RuntimeError("command queue busy")
+        try:
+            return resp_q.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise RuntimeError("command timeout") from exc
 
     def start(self):
         self.receiver.start()
@@ -1153,6 +1220,24 @@ class RealtimeFusionServer:
             if updated:
                 print(f"[Command] set track {tid} color -> {normalized_color}")
                 return {"status": "ok", "track_id": tid, "color": normalized_color}
+            return {"status": "error", "message": f"track {tid} not found"}
+        if cmd == "set_yaw":
+            track_id = payload.get("track_id")
+            if track_id is None:
+                return {"status": "error", "message": "track_id required"}
+            try:
+                tid = int(track_id)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "track_id must be int"}
+            raw_yaw = payload.get("yaw")
+            try:
+                yaw_val = float(raw_yaw)
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "yaw must be float"}
+            updated = self.tracker.force_set_yaw(tid, yaw_val)
+            if updated:
+                print(f"[Command] set track {tid} yaw -> {yaw_val:.1f}°")
+                return {"status": "ok", "track_id": tid, "yaw": yaw_val}
             return {"status": "error", "message": f"track {tid} not found"}
         if cmd == "list_tracks":
             tracks = self.tracker.list_tracks()

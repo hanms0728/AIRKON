@@ -21,6 +21,24 @@ const statusEl = document.getElementById("status");
 const overlayImgEl = document.getElementById("overlay-img");
 const overlayPlaceholderEl = document.getElementById("overlay-placeholder");
 
+const ADMIN_COLORS = ["red", "pink", "green", "white", "yellow", "purple", "none"];
+const ADMIN_HOTKEY = { key: "a", ctrl: true, shift: true };
+const adminState = {
+    enabled: isFusion,
+    initialized: false,
+    open: false,
+    refreshHandle: null,
+    elements: {
+        panel: null,
+        toggle: null,
+        list: null,
+        status: null,
+        trackInput: null,
+        colorSelect: null,
+        yawInput: null,
+    },
+};
+
 const state = {
     mode,
     fusionSource,
@@ -824,6 +842,7 @@ function renderDetections(detections) {
             btn.textContent = formatDetectionListEntry(det, idx);
             btn.addEventListener("click", () => {
                 startDetectionFollow(det, idx);
+                prefillAdminFromDetection(det);
             });
             li.appendChild(btn);
 
@@ -2277,6 +2296,12 @@ function performMarkerHitTest(clientX, clientY) {
 }
 
 function handleGlobalKeydown(evt) {
+    if (adminState.enabled && matchesAdminHotkey(evt)) {
+        evt.preventDefault();
+        setupAdminPanel();
+        toggleAdminPanel();
+        return;
+    }
     if (evt.key === "Escape") {
         triggerEscapeAction();
     }
@@ -2564,6 +2589,487 @@ function updateDetectionFollowPose(detections) {
     }
     const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
     return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
+}
+
+function matchesAdminHotkey(evt) {
+    if (!evt || !ADMIN_HOTKEY || !ADMIN_HOTKEY.key) {
+        return false;
+    }
+    const keyMatch = typeof evt.key === "string" && evt.key.toLowerCase() === ADMIN_HOTKEY.key;
+    const needCtrl = Boolean(ADMIN_HOTKEY.ctrl);
+    const needShift = Boolean(ADMIN_HOTKEY.shift);
+    return keyMatch && (!needCtrl || evt.ctrlKey) && (!needShift || evt.shiftKey);
+}
+
+function injectAdminStyles() {
+    if (!adminState.enabled) {
+        return;
+    }
+    const style = document.createElement("style");
+    style.textContent = `
+#admin-toggle {
+  position: fixed;
+  left: 16px;
+  top: 16px;
+  z-index: 40;
+  background: linear-gradient(120deg, #1f6feb, #58a6ff);
+  color: #f8fbff;
+  border: 1px solid rgba(88,166,255,0.4);
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+}
+#admin-toggle.active {
+  background: linear-gradient(120deg, #7c3aed, #c084fc);
+  border-color: rgba(192,132,252,0.5);
+}
+#admin-panel {
+  position: fixed;
+  left: 16px;
+  top: 60px;
+  width: min(400px, 90vw);
+  max-height: 80vh;
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: rgba(10, 12, 18, 0.96);
+  border: 1px solid #1f2937;
+  border-radius: 14px;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+  z-index: 50;
+  color: #e5e7eb;
+  backdrop-filter: blur(6px);
+}
+#admin-panel.open {
+  display: flex;
+}
+#admin-panel .admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#admin-panel .admin-title {
+  font-weight: 800;
+  font-size: 1rem;
+  letter-spacing: 0.2px;
+}
+#admin-panel .admin-hotkey {
+  font-size: 0.8rem;
+  color: #9ca3af;
+}
+#admin-panel .admin-status {
+  font-size: 0.85rem;
+  color: #9ce0ff;
+}
+#admin-panel .admin-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+#admin-panel input, #admin-panel select {
+  flex: 1;
+  padding: 8px 10px;
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+}
+#admin-panel button {
+  background: #2563eb;
+  color: #f8fafc;
+  border: 1px solid #1d4ed8;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+#admin-panel button.secondary {
+  background: #111827;
+  border-color: #1f2937;
+}
+#admin-panel button.danger {
+  background: #dc2626;
+  border-color: #b91c1c;
+}
+#admin-panel #admin-track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 42vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.admin-track {
+  width: 100%;
+  text-align: left;
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: #e5e7eb;
+}
+.admin-track:hover {
+  border-color: #2563eb;
+}
+.admin-track .admin-track-title {
+  font-weight: 700;
+}
+.admin-track .admin-track-meta {
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+`;
+    document.head.appendChild(style);
+}
+
+function setupAdminPanel() {
+    if (!adminState.enabled || adminState.initialized) {
+        return;
+    }
+    adminState.initialized = true;
+    injectAdminStyles();
+    const toggleBtn = document.createElement("button");
+    toggleBtn.id = "admin-toggle";
+    toggleBtn.type = "button";
+    toggleBtn.textContent = "Admin";
+    toggleBtn.title = "Ctrl+Shift+A";
+    toggleBtn.addEventListener("click", () => toggleAdminPanel());
+    adminState.elements.toggle = toggleBtn;
+    document.body.appendChild(toggleBtn);
+
+    const panel = document.createElement("div");
+    panel.id = "admin-panel";
+    adminState.elements.panel = panel;
+
+    const header = document.createElement("div");
+    header.className = "admin-header";
+    const title = document.createElement("div");
+    title.className = "admin-title";
+    title.textContent = "Track Admin";
+    const hotkey = document.createElement("div");
+    hotkey.className = "admin-hotkey";
+    hotkey.textContent = "Ctrl+Shift+A";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "secondary";
+    closeBtn.textContent = "Close";
+    closeBtn.addEventListener("click", () => toggleAdminPanel(false));
+    header.appendChild(title);
+    header.appendChild(hotkey);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+
+    const status = document.createElement("div");
+    status.className = "admin-status";
+    status.textContent = "Ready";
+    adminState.elements.status = status;
+    panel.appendChild(status);
+
+    const row1 = document.createElement("div");
+    row1.className = "admin-row";
+    const trackInput = document.createElement("input");
+    trackInput.type = "number";
+    trackInput.placeholder = "Track id";
+    adminState.elements.trackInput = trackInput;
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.className = "secondary";
+    refreshBtn.textContent = "Refresh";
+    refreshBtn.addEventListener("click", () => refreshAdminTracks(true));
+    row1.appendChild(trackInput);
+    row1.appendChild(refreshBtn);
+    panel.appendChild(row1);
+
+    const row2 = document.createElement("div");
+    row2.className = "admin-row";
+    const colorSelect = document.createElement("select");
+    ADMIN_COLORS.forEach((c) => {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        colorSelect.appendChild(opt);
+    });
+    adminState.elements.colorSelect = colorSelect;
+    const colorBtn = document.createElement("button");
+    colorBtn.type = "button";
+    colorBtn.textContent = "Set color";
+    colorBtn.addEventListener("click", () => applyAdminColor());
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "secondary";
+    clearBtn.textContent = "Clear";
+    clearBtn.addEventListener("click", () => {
+        if (adminState.elements.colorSelect) {
+            adminState.elements.colorSelect.value = "none";
+        }
+        applyAdminColor();
+    });
+    row2.appendChild(colorSelect);
+    row2.appendChild(colorBtn);
+    row2.appendChild(clearBtn);
+    panel.appendChild(row2);
+
+    const row3 = document.createElement("div");
+    row3.className = "admin-row";
+    const yawInput = document.createElement("input");
+    yawInput.type = "number";
+    yawInput.placeholder = "Yaw °";
+    yawInput.step = "1";
+    adminState.elements.yawInput = yawInput;
+    const yawBtn = document.createElement("button");
+    yawBtn.type = "button";
+    yawBtn.textContent = "Set yaw";
+    yawBtn.addEventListener("click", () => applyAdminYaw());
+    const flipBtn = document.createElement("button");
+    flipBtn.type = "button";
+    flipBtn.className = "secondary";
+    flipBtn.textContent = "Flip 180°";
+    flipBtn.addEventListener("click", () => applyAdminFlip());
+    row3.appendChild(yawInput);
+    row3.appendChild(yawBtn);
+    row3.appendChild(flipBtn);
+    panel.appendChild(row3);
+
+    const list = document.createElement("div");
+    list.id = "admin-track-list";
+    adminState.elements.list = list;
+    panel.appendChild(list);
+
+    document.body.appendChild(panel);
+}
+
+function toggleAdminPanel(forceOpen = null) {
+    if (!adminState.enabled || !adminState.initialized) {
+        return;
+    }
+    const shouldOpen = forceOpen === null ? !adminState.open : Boolean(forceOpen);
+    adminState.open = shouldOpen;
+    if (adminState.elements.panel) {
+        adminState.elements.panel.style.display = shouldOpen ? "flex" : "none";
+        adminState.elements.panel.classList.toggle("open", shouldOpen);
+    }
+    if (adminState.elements.toggle) {
+        adminState.elements.toggle.classList.toggle("active", shouldOpen);
+    }
+    if (shouldOpen) {
+        refreshAdminTracks(true);
+        startAdminRefresh();
+    } else {
+        stopAdminRefresh();
+    }
+}
+
+function startAdminRefresh() {
+    stopAdminRefresh();
+    adminState.refreshHandle = window.setInterval(() => refreshAdminTracks(false), 1500);
+}
+
+function stopAdminRefresh() {
+    if (adminState.refreshHandle) {
+        clearInterval(adminState.refreshHandle);
+        adminState.refreshHandle = null;
+    }
+}
+
+function setAdminStatus(message, isError = false) {
+    if (adminState.elements.status) {
+        adminState.elements.status.textContent = message;
+        adminState.elements.status.style.color = isError ? "#fca5a5" : "#9ce0ff";
+    }
+}
+
+function getSelectedTrackId() {
+    const input = adminState.elements.trackInput;
+    if (!input) {
+        return null;
+    }
+    const val = Number(input.value);
+    return Number.isFinite(val) ? val : null;
+}
+
+function prefillAdminFromTrack(track) {
+    if (!adminState.enabled || !track) {
+        return;
+    }
+    const tid = track.track_id ?? track.id;
+    if (adminState.elements.trackInput && tid != null) {
+        adminState.elements.trackInput.value = tid;
+    }
+    const yawVal = track.yaw ?? track.yaw_deg;
+    if (adminState.elements.yawInput && Number.isFinite(Number(yawVal))) {
+        adminState.elements.yawInput.value = Number(yawVal).toFixed(1);
+    }
+    const colorInfo = getDetectionColorInfo(track);
+    if (adminState.elements.colorSelect && colorInfo?.label) {
+        const normalized = colorInfo.label.toLowerCase();
+        if (ADMIN_COLORS.includes(normalized)) {
+            adminState.elements.colorSelect.value = normalized;
+        }
+    }
+}
+
+function prefillAdminFromDetection(det) {
+    if (!adminState.enabled) {
+        return;
+    }
+    setupAdminPanel();
+    prefillAdminFromTrack(det);
+}
+
+async function fetchAdminTracks() {
+    const resp = await fetch("/api/admin/tracks", { cache: "no-store" });
+    if (!resp.ok) {
+        throw new Error(`admin list failed (${resp.status})`);
+    }
+    return resp.json();
+}
+
+async function adminSetColor(trackId, color) {
+    const resp = await fetch(`/api/admin/tracks/${trackId}/color`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ color }),
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || "color update failed");
+    }
+    return resp.json();
+}
+
+async function adminSetYaw(trackId, yaw) {
+    const resp = await fetch(`/api/admin/tracks/${trackId}/yaw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ yaw }),
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || "yaw update failed");
+    }
+    return resp.json();
+}
+
+async function adminFlipYaw(trackId, delta = 180.0) {
+    const resp = await fetch(`/api/admin/tracks/${trackId}/flip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delta }),
+    });
+    if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || "flip failed");
+    }
+    return resp.json();
+}
+
+async function applyAdminColor() {
+    const trackId = getSelectedTrackId();
+    if (trackId == null) {
+        setAdminStatus("Track id is required", true);
+        return;
+    }
+    const select = adminState.elements.colorSelect;
+    const raw = (select?.value || "").trim().toLowerCase();
+    const color = !raw || raw === "none" ? null : raw;
+    try {
+        await adminSetColor(trackId, color);
+        setAdminStatus(`Track ${trackId} color -> ${color ?? "cleared"}`);
+        refreshAdminTracks(true);
+    } catch (err) {
+        setAdminStatus(err?.message || "Color update failed", true);
+    }
+}
+
+async function applyAdminYaw() {
+    const trackId = getSelectedTrackId();
+    if (trackId == null) {
+        setAdminStatus("Track id is required", true);
+        return;
+    }
+    const yawInput = adminState.elements.yawInput;
+    const yawVal = Number(yawInput?.value);
+    if (!Number.isFinite(yawVal)) {
+        setAdminStatus("Enter yaw in degrees", true);
+        return;
+    }
+    try {
+        await adminSetYaw(trackId, yawVal);
+        setAdminStatus(`Track ${trackId} yaw -> ${yawVal.toFixed(1)}°`);
+        refreshAdminTracks(true);
+    } catch (err) {
+        setAdminStatus(err?.message || "Yaw update failed", true);
+    }
+}
+
+async function applyAdminFlip(delta = 180.0) {
+    const trackId = getSelectedTrackId();
+    if (trackId == null) {
+        setAdminStatus("Track id is required", true);
+        return;
+    }
+    try {
+        await adminFlipYaw(trackId, delta);
+        setAdminStatus(`Track ${trackId} flipped by ${delta.toFixed(1)}°`);
+        refreshAdminTracks(true);
+    } catch (err) {
+        setAdminStatus(err?.message || "Flip failed", true);
+    }
+}
+
+async function refreshAdminTracks(force = false) {
+    if (!adminState.open && !force) {
+        return;
+    }
+    try {
+        const data = await fetchAdminTracks();
+        const tracks = Array.isArray(data?.tracks) ? data.tracks : [];
+        renderAdminTracks(tracks);
+        setAdminStatus(`Tracks: ${tracks.length}`);
+    } catch (err) {
+        setAdminStatus(err?.message || "Admin refresh failed", true);
+    }
+}
+
+function renderAdminTracks(tracks) {
+    const listEl = adminState.elements.list;
+    if (!listEl) {
+        return;
+    }
+    listEl.innerHTML = "";
+    const rows = Array.isArray(tracks) ? tracks.slice() : [];
+    if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.textContent = "No active tracks";
+        empty.style.color = "#9ca3af";
+        listEl.appendChild(empty);
+        return;
+    }
+    rows.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+    rows.forEach((t) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "admin-track";
+        const yawText = Number.isFinite(Number(t.yaw)) ? Number(t.yaw).toFixed(1) : "-";
+        const colorLabel = t.color || "-";
+        btn.innerHTML = `
+            <div class="admin-track-title">#${t.id} | ${t.state || "-"}</div>
+            <div class="admin-track-meta">yaw ${yawText}° | color ${colorLabel}</div>
+        `;
+        btn.addEventListener("click", () => {
+            prefillAdminFromTrack(t);
+        });
+        listEl.appendChild(btn);
+    });
+}
+
+if (adminState.enabled) {
+    setupAdminPanel();
 }
 
 init().catch((err) => console.error("Initialization error:", err));
