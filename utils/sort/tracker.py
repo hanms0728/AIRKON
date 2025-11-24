@@ -239,7 +239,10 @@ class Track:
         self.kf_pos.update(measurement[1:3].reshape((2, 1)))
         self.kf_pos.R = self._pos_base_R
 
-        # yaw(front/back) stays fixed after initialization unless a manual command flips/sets it
+        yaw_det = float(measurement[5])
+        yaw_det = self._align_measurement_yaw(yaw_det, measurement[1:3])
+        yaw_meas = nearest_equivalent_deg(yaw_det, self.kf_yaw.x[0, 0], period=180.0)
+        self.kf_yaw.update(np.array([[yaw_meas]]))
         self.car_yaw = wrap_deg(self.kf_yaw.x[0, 0])
         self.kf_yaw.x[0, 0] = self.car_yaw
 
@@ -248,7 +251,7 @@ class Track:
         self.car_length = max(0.0, self.kf_length.x[0, 0])
         self.car_width = max(0.0, self.kf_width.x[0, 0])
         current_xy = self.kf_pos.x[:2].flatten()
-        self.last_pos = np.array(current_xy, dtype=float)
+        self._enforce_forward_heading(current_xy)
 
         self.time_since_update = 0
         self.hits += 1
