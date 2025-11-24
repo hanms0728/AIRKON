@@ -50,7 +50,8 @@ class InferWorker(threading.Thread):
     def __init__(self, *, streamer, cam_ids, img_hw, strides, onnx_path,
                  score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
                  calib_dir=None, bev_scale=1.0, providers=None,
-                 gui_queue=None, udp_sender=None):
+                 gui_queue=None, udp_sender=None, backend="onnxruntime",
+                 trt_options=None):
         super().__init__(daemon=True)
         self.streamer = streamer
         self.cam_ids = list(cam_ids)
@@ -65,19 +66,32 @@ class InferWorker(threading.Thread):
         
         self.H_cache: Dict[int, Optional[np.ndarray]] = {}
 
-        if providers is None:
-            providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
-                if (ort.get_device().upper() == "GPU") else ["CPUExecutionProvider"]
-
-        self.runner = BatchedTemporalRunner(
-            onnx_path=onnx_path,
-            cam_ids=self.cam_ids,
-            img_size=(self.H, self.W),
-            temporal="lstm", 
-            providers=providers,
-            state_stride_hint=32,
-            default_hidden_ch=256,
-        )
+        backend = (backend or "onnxruntime").lower()
+        trt_options = dict(trt_options or {})
+        if backend == "tensorrt":
+            from batch_infer_trt import TensorRTBatchedTemporalRunner
+            self.runner = TensorRTBatchedTemporalRunner(
+                onnx_path=onnx_path,
+                cam_ids=self.cam_ids,
+                img_size=(self.H, self.W),
+                temporal="lstm",
+                state_stride_hint=32,
+                default_hidden_ch=256,
+                **trt_options,
+            )
+        else:
+            if providers is None:
+                providers = ["CUDAExecutionProvider","CPUExecutionProvider"] \
+                    if (ort.get_device().upper() == "GPU") else ["CPUExecutionProvider"]
+            self.runner = BatchedTemporalRunner(
+                onnx_path=onnx_path,
+                cam_ids=self.cam_ids,
+                img_size=(self.H, self.W),
+                temporal="lstm", 
+                providers=providers,
+                state_stride_hint=32,
+                default_hidden_ch=256,
+            )
         # 호모그래피 캐시(없으면 None)
         self.H_cache = {cid: (load_H_for_cam(calib_dir, cid) if calib_dir else None)
                         for cid in self.cam_ids}
@@ -441,6 +455,16 @@ class StageTimer:
 def main():
     ap = argparse.ArgumentParser("Realtime Edge Infer")
     ap.add_argument("--weights", required=True, type=str)
+    ap.add_argument("--backend", default="onnxruntime",
+                    choices=["onnxruntime","tensorrt"],
+                    help="Select inference backend.")
+    ap.add_argument("--trt-engine", type=str,
+                    help="Existing TensorRT engine path (optional).")
+    ap.add_argument("--trt-save-engine", type=str,
+                    help="Where to save a newly built TensorRT engine.")
+    ap.add_argument("--trt-workspace-mb", type=int, default=2048)
+    ap.add_argument("--trt-fp16", action="store_true")
+    ap.add_argument("--trt-max-batch", type=int, default=None)
     ap.add_argument("--img-size", default="864,1536", type=str)
     ap.add_argument("--strides", default="8,16,32", type=str)
     ap.add_argument("--conf", default=0.30, type=float)
@@ -459,6 +483,7 @@ def main():
     ap.add_argument("--visual-size", default="216,384", type=str)
     ap.add_argument("--target-fps", default=30, type=int)
     args = ap.parse_args()
+    backend = args.backend.lower()
     
     # GUI 여부
     def gui_available() -> bool:
@@ -515,10 +540,30 @@ def main():
         laytency_check=False
     )
     
-    providers = ["CUDAExecutionProvider","CPUExecutionProvider"]
-    if args.no_cuda or ort.get_device().upper() != "GPU":
-        providers = ["CPUExecutionProvider"]
-        
+    weights_for_runner: Optional[str] = args.weights
+    trt_engine_path = args.trt_engine
+    if backend == "tensorrt" and not trt_engine_path:
+        w_lower = args.weights.lower()
+        if w_lower.endswith(".engine") and os.path.isfile(args.weights):
+            trt_engine_path = args.weights
+            weights_for_runner = None
+    if backend != "tensorrt" and weights_for_runner is None:
+        raise ValueError("ONNX weights are required for the onnxruntime backend.")
+
+    providers = None
+    if backend == "onnxruntime":
+        providers = ["CUDAExecutionProvider","CPUExecutionProvider"]
+        if args.no_cuda or ort.get_device().upper() != "GPU":
+            providers = ["CPUExecutionProvider"]
+
+    trt_options = {
+        "engine_path": trt_engine_path,
+        "save_engine_path": args.trt_save_engine,
+        "workspace_mb": args.trt_workspace_mb,
+        "fp16": args.trt_fp16,
+        "max_batch_size": args.trt_max_batch,
+    }
+    
     
     udp_sender = None
     if args.udp_enable:
@@ -530,9 +575,9 @@ def main():
     gui_queue = queue.Queue(maxsize=128)
     worker = InferWorker(
         streamer=streamer, cam_ids=cam_ids, img_hw=(H, W), strides=strides,
-        onnx_path=args.weights, score_mode=args.score_mode, conf=args.conf, nms_iou=args.nms_iou, topk=args.topk,
+        onnx_path=weights_for_runner, score_mode=args.score_mode, conf=args.conf, nms_iou=args.nms_iou, topk=args.topk,
         calib_dir=args.calib_dir, bev_scale=args.bev_scale, providers=providers,
-        gui_queue=gui_queue, udp_sender=udp_sender  
+        gui_queue=gui_queue, udp_sender=udp_sender, backend=backend, trt_options=trt_options 
     )
     worker.start()
     # -------- 메인 스레드: 오직 GUI --------
