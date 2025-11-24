@@ -361,6 +361,7 @@ def load_camera_config_file(path: str, default_hw: Tuple[int, int]) -> List[Dict
             "visible_ply": str((cfg_path.parent / visible_ply_rel).resolve()) if visible_ply_rel else None,
             "name": item.get("name") or item.get("label") or f"cam{cid}",
             "group": item.get("group"),
+            "conf": item.get("conf"),
         }
         result.append(cfg)
     return result
@@ -395,7 +396,7 @@ def build_camera_assets(camera_cfgs: List[Dict], lut_root: Optional[str]) -> Dic
 # ---
 class InferWorker(threading.Thread):
     def __init__(self, *, streamer, camera_assets: Dict[int, CameraAssets], img_hw, strides, onnx_path,
-                 score_mode="obj*cls", conf=0.3, nms_iou=0.2, topk=50,
+                 score_mode="obj*cls", conf={1:0.3}, nms_iou=0.2, topk=50,
                  bev_scale=1.0, providers=None,
                  gui_queue=None, udp_sender=None, web_publisher=None,
                  save_image_root=None):
@@ -406,7 +407,7 @@ class InferWorker(threading.Thread):
         self.H, self.W = img_hw
         self.strides = list(map(float, strides))
         self.score_mode = score_mode
-        self.conf = float(conf)
+        self.conf = conf
         self.nms_iou = float(nms_iou)
         self.topk = int(topk)
         self.gui_queue = gui_queue
@@ -470,8 +471,9 @@ class InferWorker(threading.Thread):
         chw = rgb.transpose(2,0,1).astype(np.float32) / 255.0
         return chw, bgr, (orig_h, orig_w)
 
-    def _decode(self, outs):
+    def _decode(self, cam_id, outs):
         dets = decode_predictions(
+            cam_id,
             outs, self.strides,
             clip_cells=None,
             conf_th=self.conf, nms_iou=self.nms_iou,
@@ -591,7 +593,7 @@ class InferWorker(threading.Thread):
                 orig_h, orig_w = int(orig_hw[0]), int(orig_hw[1])
                 self._save_image(frame_bgr, self.save_dirs.get("undist"), cid, capture_ts, "undist")
                 with wrk.span("decode"):
-                    dets = self._decode(outs)
+                    dets = self._decode(cid,outs)
 
                 tris_img_orig = None
                 colors_hex = None
@@ -1078,14 +1080,14 @@ def main():
     ap.add_argument("--weights", required=True, type=str)
     ap.add_argument("--img-size", default="864,1536", type=str)
     ap.add_argument("--strides", default="8,16,32", type=str)
-    ap.add_argument("--conf", default=0.30, type=float)
+    ap.add_argument("--conf", default=0.3, type=float)
     ap.add_argument("--nms-iou", default=0.20, type=float)
     ap.add_argument("--topk", default=50, type=int)
     ap.add_argument("--score-mode", default="obj*cls", choices=["obj","cls","obj*cls"])
     ap.add_argument("--bev-scale", default=1.0, type=float)
     ap.add_argument("--lut-path", default="./calib", type=str)
     ap.add_argument("--lut-dir", dest="lut_path", type=str)
-    ap.add_argument("--camera-config", type=str)
+    ap.add_argument("--camera-config", type=str, default ="camera_config.json")
     ap.add_argument("--transport", default="tcp", choices=["tcp","udp"])
     ap.add_argument("--no-cuda", action="store_true")
     ap.add_argument("--udp-enable", action="store_true")
@@ -1128,7 +1130,7 @@ def main():
     ap.add_argument("--global-ply", type=str, default="pointcloud/merged_05.ply")
     ap.add_argument("--vehicle-glb", type=str, default="pointcloud/car.glb")
     args = ap.parse_args()
-    
+
     # GUI 
     def gui_available() -> bool:
         try:
@@ -1159,6 +1161,7 @@ def main():
     vis_H, vis_W = map(int, args.visual_size.split(","))
     Target_fps = args.target_fps
     
+    camera_configs: List[Dict] = []
     if args.camera_config:
         try:
             camera_configs = load_camera_config_file(args.camera_config, (H, W))
@@ -1166,6 +1169,11 @@ def main():
             raise SystemExit(f"[Main] failed to parse camera_config: {exc}")
     if not camera_configs:
         raise SystemExit("[Main] no cameras configured")
+
+    conf_dict = {
+        int(cfg["camera_id"]): float(cfg["conf"]) if cfg.get("conf") is not None else float(args.conf)
+        for cfg in camera_configs
+    }
 
     cam_cfg_map = {int(cfg["camera_id"]): cfg for cfg in camera_configs} 
     camera_assets = build_camera_assets(camera_configs, args.lut_path)
@@ -1228,7 +1236,7 @@ def main():
         strides=strides,
         onnx_path=args.weights,
         score_mode=args.score_mode,
-        conf=args.conf,
+        conf=conf_dict,
         nms_iou=args.nms_iou,
         topk=args.topk,
         bev_scale=args.bev_scale,

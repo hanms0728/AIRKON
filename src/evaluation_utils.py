@@ -69,10 +69,11 @@ def _nms_iou_or_ios(dets, iou_thr=0.5, contain_thr=None, topk=300):
 
 
 def decode_predictions(
+    cam_id,
     outputs,
     strides,
     clip_cells=None,
-    conf_th=0.15,
+    conf_th={1:0.15},
     nms_iou=0.5,
     topk=300,
     contain_thr=0.7,     #작은 객체의 큰 객체 대비 겹침 정도
@@ -112,7 +113,7 @@ def decode_predictions(
             else:  # "obj*cls"
                 score_map = obj_map * cls_map
 
-            keep = score_map > conf_th
+            keep = score_map > conf_th[cam_id]
             if keep.sum().item() == 0:
                 continue
 

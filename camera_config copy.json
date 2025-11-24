@@ -12,7 +12,8 @@
       "force_tcp": true,
       "lut": "outputs/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam27_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_crop.ply"
+      "visible_ply": "modify_ply/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_crop.ply",
+      "conf": 0.8
     },
     {
       "camera_id": 2,
