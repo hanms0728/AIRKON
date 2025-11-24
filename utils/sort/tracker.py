@@ -40,10 +40,12 @@ YAW_PROCESS_NOISE_SCALE = 0.05
 YAW_MEAS_NOISE_SCALE = 0.5
 SIZE_PROCESS_NOISE_SCALE = 0.01
 SIZE_MEAS_NOISE_SCALE = 0.5
+# 측정 업데이트 시 프레임 간격이 길어질수록 관측값 영향 줄이는 계수
+MEAS_GAP_SMOOTH_FACTOR = 0.15
 
 # History-based smoothing parameters
 STATE_HISTORY_SIZE = 8
-DEFAULT_SMOOTH_WINDOW = 3
+DEFAULT_SMOOTH_WINDOW = 5
 
 def wrap_deg(angle):
     """[-180, 180)로 정규화"""
@@ -132,6 +134,12 @@ class Track:
         confirm_hits: int = 3,
         color: Optional[str] = None,
         color_lock_streak: int = 5,
+        pos_process_noise_scale: float = POS_PROCESS_NOISE_SCALE,
+        pos_meas_noise_scale: float = POS_MEAS_NOISE_SCALE,
+        yaw_process_noise_scale: float = YAW_PROCESS_NOISE_SCALE,
+        yaw_meas_noise_scale: float = YAW_MEAS_NOISE_SCALE,
+        size_process_noise_scale: float = SIZE_PROCESS_NOISE_SCALE,
+        size_meas_noise_scale: float = SIZE_MEAS_NOISE_SCALE,
     ):
         # bbox_init: [class, x_c, y_c, l, w, yaw_deg]
         self.id = Track.track_id_counter
@@ -150,23 +158,25 @@ class Track:
         
         # 💡 파라미터 조정
         self.kf_pos.P *= POS_INIT_COV_SCALE
-        self.kf_pos.Q *= POS_PROCESS_NOISE_SCALE
-        self.kf_pos.R *= POS_MEAS_NOISE_SCALE
+        self.kf_pos.Q *= pos_process_noise_scale
+        self.kf_pos.R *= pos_meas_noise_scale
+        self._pos_base_R = self.kf_pos.R.copy()
+        self._gap_smooth_factor = MEAS_GAP_SMOOTH_FACTOR
 
         self.kf_yaw = self._init_2d_kf(
             initial_value=self.car_yaw,
-            Q_scale=YAW_PROCESS_NOISE_SCALE,
-            R_scale=YAW_MEAS_NOISE_SCALE,
+            Q_scale=yaw_process_noise_scale,
+            R_scale=yaw_meas_noise_scale,
         )
         self.kf_length = self._init_2d_kf(
             initial_value=self.car_length,
-            Q_scale=SIZE_PROCESS_NOISE_SCALE,
-            R_scale=SIZE_MEAS_NOISE_SCALE,
+            Q_scale=size_process_noise_scale,
+            R_scale=size_meas_noise_scale,
         )
         self.kf_width = self._init_2d_kf(
             initial_value=self.car_width,
-            Q_scale=SIZE_PROCESS_NOISE_SCALE,
-            R_scale=SIZE_MEAS_NOISE_SCALE,
+            Q_scale=size_process_noise_scale,
+            R_scale=size_meas_noise_scale,
         )
 
         self.time_since_update = 0
@@ -220,7 +230,14 @@ class Track:
         measurement = np.asarray(bbox, dtype=float)
         self.cls = measurement[0]
 
+        missed_frames = max(0, int(self.time_since_update) - 1)
+        meas_scale = 1.0 + missed_frames * self._gap_smooth_factor
+        if meas_scale != 1.0:
+            self.kf_pos.R = self._pos_base_R * meas_scale
+        else:
+            self.kf_pos.R = self._pos_base_R
         self.kf_pos.update(measurement[1:3].reshape((2, 1)))
+        self.kf_pos.R = self._pos_base_R
 
         # yaw(front/back) stays fixed after initialization unless a manual command flips/sets it
         self.car_yaw = wrap_deg(self.kf_yaw.x[0, 0])
@@ -441,6 +458,12 @@ class SortTracker:
         color_penalty: float = 0.3,
         smooth_window: int = DEFAULT_SMOOTH_WINDOW,
         color_lock_streak: int = 5,
+        pos_process_noise_scale: float = POS_PROCESS_NOISE_SCALE,
+        pos_meas_noise_scale: float = POS_MEAS_NOISE_SCALE,
+        yaw_process_noise_scale: float = YAW_PROCESS_NOISE_SCALE,
+        yaw_meas_noise_scale: float = YAW_MEAS_NOISE_SCALE,
+        size_process_noise_scale: float = SIZE_PROCESS_NOISE_SCALE,
+        size_meas_noise_scale: float = SIZE_MEAS_NOISE_SCALE,
     ):
         self.tracks: List[Track] = []
         self.max_age = max_age
@@ -450,6 +473,12 @@ class SortTracker:
         self.smooth_window = max(1, smooth_window)
         self.color_lock_streak = max(1, int(color_lock_streak))
         self.last_matches: List[Tuple[int, int]] = []
+        self.pos_process_noise_scale = float(pos_process_noise_scale)
+        self.pos_meas_noise_scale = float(pos_meas_noise_scale)
+        self.yaw_process_noise_scale = float(yaw_process_noise_scale)
+        self.yaw_meas_noise_scale = float(yaw_meas_noise_scale)
+        self.size_process_noise_scale = float(size_process_noise_scale)
+        self.size_meas_noise_scale = float(size_meas_noise_scale)
 
     def update(
         self,
@@ -516,6 +545,12 @@ class SortTracker:
                 confirm_hits=self.min_hits,
                 color=color,
                 color_lock_streak=self.color_lock_streak,
+                pos_process_noise_scale=self.pos_process_noise_scale,
+                pos_meas_noise_scale=self.pos_meas_noise_scale,
+                yaw_process_noise_scale=self.yaw_process_noise_scale,
+                yaw_meas_noise_scale=self.yaw_meas_noise_scale,
+                size_process_noise_scale=self.size_process_noise_scale,
+                size_meas_noise_scale=self.size_meas_noise_scale,
             )
             self.tracks.append(new_track)
 

@@ -1091,7 +1091,13 @@ class RealtimeFusionServer:
         self.buffer: Dict[str, deque] = {cam: deque(maxlen=1) for cam in cam_ports.keys()}
 
         # 추적기
-        self.tracker = SortTracker(max_age=20, min_hits=20, iou_threshold=0.15) 
+        smooth_window = max(3, min(8, int(round(0.2 / max(self.dt, 1e-3)))))
+        self.tracker = SortTracker(
+            max_age=20,
+            min_hits=20,
+            iou_threshold=0.15,
+            smooth_window=smooth_window,
+        )
         self._log_interval = 1.0
         self._next_log_ts = 0.0
         self.command_queue: Optional[queue.Queue] = None
