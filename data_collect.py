@@ -37,6 +37,23 @@ def get_next_index(save_dir):
     return max(nums) + 1
 
 
+def get_unique_save_dir(path):
+    """
+    기존 디렉토리가 있으면 _1, _2 ...를 붙여 새로운 디렉토리 이름을 반환
+    """
+    expanded = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(expanded):
+        return path
+
+    idx = 1
+    while True:
+        candidate = f"{path}_{idx}"
+        candidate_expanded = os.path.abspath(os.path.expanduser(candidate))
+        if not os.path.exists(candidate_expanded):
+            return candidate
+        idx += 1
+
+
 # ============================================================
 # 카메라 스트림 캡처 함수
 # ============================================================
@@ -167,19 +184,22 @@ def capture_rtsp_frames(cam):
 def run_multi_cameras():
 
     cams = [
-        {"cam_name": "cam1", "ip": "192.168.0.25", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam1_15"},
-        {"cam_name": "cam2", "ip": "192.168.0.36", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2_15"},
-        {"cam_name": "cam3", "ip": "192.168.0.27", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam3_15"},
-        {"cam_name": "cam4", "ip": "192.168.0.51", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam4_15"},
-        {"cam_name": "cam5", "ip": "192.168.0.26", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam5_15"},
-        {"cam_name": "cam6", "ip": "192.168.0.28", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam6_15"},
-        {"cam_name": "cam7", "ip": "192.168.0.32", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam7_15"},
-        {"cam_name": "cam8", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam8_15"},
-        {"cam_name": "cam9", "ip": "192.168.0.31", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam9_15"},
-        {"cam_name": "cam10", "ip": "192.168.0.35", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam10_15"},
-        {"cam_name": "cam11", "ip": "192.168.0.29", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam11_15"},
-        {"cam_name": "cam12", "ip": "192.168.0.37", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam12_15"}
+        {"cam_name": "cam1", "ip": "192.168.0.25", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam1_25"},
+        {"cam_name": "cam2", "ip": "192.168.0.36", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2_36"},
+        {"cam_name": "cam3", "ip": "192.168.0.27", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam3_27"},
+        {"cam_name": "cam4", "ip": "192.168.0.51", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam4_51"},
+        {"cam_name": "cam5", "ip": "192.168.0.26", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam5_26"},
+        {"cam_name": "cam6", "ip": "192.168.0.28", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam6_28"},
+        {"cam_name": "cam7", "ip": "192.168.0.32", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam7_32"},
+        {"cam_name": "cam8", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam8_21"},
+        {"cam_name": "cam9", "ip": "192.168.0.31", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam9_31"},
+        {"cam_name": "cam10", "ip": "192.168.0.35", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam10_35"},
+        {"cam_name": "cam11", "ip": "192.168.0.29", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam11_29"},
+        {"cam_name": "cam12", "ip": "192.168.0.37", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam12_37"}
     ]
+
+    for cam in cams:
+        cam["save_dir"] = get_unique_save_dir(cam["save_dir"])
 
     threads = []
 
