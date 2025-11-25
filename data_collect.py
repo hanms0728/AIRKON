@@ -167,13 +167,18 @@ def capture_rtsp_frames(cam):
 def run_multi_cameras():
 
     cams = [
-        {"cam_name": "cam1", "ip": "192.168.0.32", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam1_15"},
-        {"cam_name": "cam2", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2_15"},
-        {"cam_name": "cam3", "ip": "192.168.0.29", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam3_15"},
-        {"cam_name": "cam4", "ip": "192.168.0.27", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam4_15"},
-        {"cam_name": "cam5", "ip": "192.168.0.36", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam5_15"},
-        {"cam_name": "cam6", "ip": "192.168.0.37", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam6_15"},
-        {"cam_name": "cam7", "ip": "192.168.0.37", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam7_15"}
+        {"cam_name": "cam1", "ip": "192.168.0.25", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam1_15"},
+        {"cam_name": "cam2", "ip": "192.168.0.36", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam2_15"},
+        {"cam_name": "cam3", "ip": "192.168.0.27", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam3_15"},
+        {"cam_name": "cam4", "ip": "192.168.0.51", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam4_15"},
+        {"cam_name": "cam5", "ip": "192.168.0.26", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam5_15"},
+        {"cam_name": "cam6", "ip": "192.168.0.28", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam6_15"},
+        {"cam_name": "cam7", "ip": "192.168.0.32", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam7_15"},
+        {"cam_name": "cam8", "ip": "192.168.0.21", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam8_15"},
+        {"cam_name": "cam9", "ip": "192.168.0.31", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam9_15"},
+        {"cam_name": "cam10", "ip": "192.168.0.35", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam10_15"},
+        {"cam_name": "cam11", "ip": "192.168.0.29", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam11_15"},
+        {"cam_name": "cam12", "ip": "192.168.0.37", "port": 554, "username": "admin", "password": "zjsxmfhf", "save_dir": "dataset/cam12_15"}
     ]
 
     threads = []
