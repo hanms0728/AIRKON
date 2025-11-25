@@ -3,7 +3,7 @@
     {
       "camera_id": 1,
       "name": "cam_1",
-      "ip": "192.168.0.27",
+      "ip": "192.168.0.25",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -18,7 +18,7 @@
     {
       "camera_id": 2,
       "name": "cam_2",
-      "ip": "192.168.0.21",
+      "ip": "192.168.0.36",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -32,7 +32,7 @@
     {
       "camera_id": 3,
       "name": "cam_3",
-      "ip": "192.168.0.30",
+      "ip": "192.168.0.27",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -60,7 +60,7 @@
     {
       "camera_id": 5,
       "name": "cam_5",
-      "ip": "192.168.0.25",
+      "ip": "192.168.0.26",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -74,7 +74,7 @@
     {
       "camera_id": 6,
       "name": "cam_6",
-      "ip": "192.168.0.35",
+      "ip": "192.168.0.28",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -88,7 +88,7 @@
     {
       "camera_id": 7,
       "name": "cam_7",
-      "ip": "192.168.0.50",
+      "ip": "192.168.0.32",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -102,7 +102,7 @@
     {
       "camera_id": 8,
       "name": "cam_8",
-      "ip": "192.168.0.36",
+      "ip": "192.168.0.21",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -127,24 +127,24 @@
       "undistort": "realtime/disto/cam31_calibration_results_params.npz",
       "visible_ply": "modify_ply/cam9_x31.40_y-12.20_z10.80_yaw33.00_pit-30.00_rol-1.00_f93.75_crop.ply"
     },
-    // {
-    //   "camera_id": 10,
-    //   "name": "cam_10",
-    //   "ip": "192.168.0.32",
-    //   "port": 554,
-    //   "username": "admin",
-    //   "password": "zjsxmfhf",
-    //   "width": 1536,
-    //   "height": 864,
-    //   "force_tcp": true,
-    //   "lut": "outputs/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_pixel2world_lut_floor.npz",
-    //   "undistort": "realtime/disto/cam32_calibration_results_params.npz",
-    //   "visible_ply": "modify_ply/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_crop.ply"
-    // },
+    {
+      "camera_id": 10,
+      "name": "cam_10",
+      "ip": "192.168.0.35",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam32_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_crop.ply"
+    },
     {
       "camera_id": 11,
       "name": "cam_11",
-      "ip": "192.168.0.26",
+      "ip": "192.168.0.29",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -168,34 +168,6 @@
       "lut": "outputs/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam37_calibration_results_params.npz",
       "visible_ply": "modify_ply/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_crop.ply"
-    },
-    {
-      "camera_id": 13,
-      "name": "cam_13",
-      "ip": "192.168.0.29",
-      "port": 554,
-      "username": "admin",
-      "password": "zjsxmfhf",
-      "width": 1536,
-      "height": 864,
-      "force_tcp": true,
-      "lut": "outputs/cam13_x37.77_y-28.87_z10.68_yaw-181.38_pit-39.25_rol0.03_f91.74_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam29_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam13_x37.77_y-28.87_z10.68_yaw-181.38_pit-39.25_rol0.03_f91.74_crop.ply"
-    },
-    {
-      "camera_id": 14,
-      "name": "cam_14",
-      "ip": "192.168.0.28",
-      "port": 554,
-      "username": "admin",
-      "password": "zjsxmfhf",
-      "width": 1536,
-      "height": 864,
-      "force_tcp": true,
-      "lut": "outputs/cam14_x28.80_y-22.25_z10.60_yaw-92.12_pit-29.75_rol-0.38_f94.04_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam28_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam14_x28.80_y-22.25_z10.60_yaw-92.12_pit-29.75_rol-0.38_f94.04_crop.ply"
     }
   ]
 }
