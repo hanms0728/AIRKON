@@ -12,7 +12,7 @@ import numpy as np
 '''
 python utils/ip_camera.py --capture-mode sequence --sequence-fps 1 --sequence-dir data
 
-python utils/ip_camera.py --capture-mode snapshot --snapshot-dir /home/airkon/new/AIRKON/cam_36
+python utils/ip_camera.py --capture-mode snapshot --snapshot-dir real_image
 '''
 
 def parse_keys(value):
@@ -269,7 +269,7 @@ class IPCameraStreamer:
             if not frames:
                 continue
             frame = frames[-1].copy()
-            filename = os.path.join(self.snapshot_dir, f"{self.snapshot_dir}_{timestamp}.jpg")
+            filename = os.path.join(self.snapshot_dir, f"{cam_id}_{self.snapshot_dir}_{timestamp}.jpg")
             try:
                 cv2.imwrite(filename, frame)
                 saved += 1
