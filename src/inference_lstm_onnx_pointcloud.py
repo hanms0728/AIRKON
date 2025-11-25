@@ -883,7 +883,12 @@ def main():
     ap.add_argument("--labels-are-original-size", action="store_true", default=True)
 
     # BEV via LUT
-    ap.add_argument("--lut-path", type=str, required=True, help="pixel2world_lut.npz 경로")
+    ap.add_argument(
+        "--lut-path",
+        type=str,
+        default=None,
+        help="pixel2world_lut.npz 경로 (지정하면 BEV 라벨/시각화 수행)",
+    )
     ap.add_argument("--bev-scale", type=float, default=1.0)
     
     # LUT interpolation robustness
@@ -936,11 +941,16 @@ def main():
     os.makedirs(out_lab_dir, exist_ok=True)
     os.makedirs(out_mix_dir, exist_ok=True)
 
-    # LUT 로드
-    if not os.path.isfile(args.lut_path):
-        raise FileNotFoundError(f"LUT not found: {args.lut_path}")
-    lut_data = dict(np.load(args.lut_path))
-    print(f"[BEV] Using LUT: {args.lut_path}")
+    # LUT 로드 (선택)
+    use_bev = bool(args.lut_path)
+    lut_data = None
+    if use_bev:
+        if not os.path.isfile(args.lut_path):
+            raise FileNotFoundError(f"LUT not found: {args.lut_path}")
+        lut_data = dict(np.load(args.lut_path))
+        print(f"[BEV] Using LUT: {args.lut_path}")
+    else:
+        print("[BEV] LUT path not provided; skipping BEV label/visualization outputs.")
 
     exts = tuple([e.strip().lower() for e in args.exts.split(",") if e.strip()])
     names = [f for f in os.listdir(args.input_dir) if f.lower().endswith(exts)]
@@ -951,18 +961,24 @@ def main():
     metric_records = []
     total_gt = 0
 
-    # BEV 시각화/라벨 출력
-    out_bev_img_dir = os.path.join(args.output_dir, "bev_images")
-    out_bev_mix_dir = os.path.join(args.output_dir, "bev_images_with_gt")
-    out_bev_lab_dir = os.path.join(args.output_dir, "bev_labels")
-    os.makedirs(out_bev_img_dir, exist_ok=True)
-    os.makedirs(out_bev_mix_dir, exist_ok=True)
-    os.makedirs(out_bev_lab_dir, exist_ok=True)
-
+    # BEV 시각화/라벨 출력 (LUT 제공 시에만)
     metric_records_bev = []
     total_gt_bev = 0
+    out_bev_img_dir = None
+    out_bev_mix_dir = None
+    out_bev_lab_dir = None
+    if use_bev:
+        out_bev_img_dir = os.path.join(args.output_dir, "bev_images")
+        out_bev_mix_dir = os.path.join(args.output_dir, "bev_images_with_gt")
+        out_bev_lab_dir = os.path.join(args.output_dir, "bev_labels")
+        os.makedirs(out_bev_img_dir, exist_ok=True)
+        os.makedirs(out_bev_mix_dir, exist_ok=True)
+        os.makedirs(out_bev_lab_dir, exist_ok=True)
 
-    print(f"[Infer-ONNX] imgs={len(names)}, temporal={args.temporal}, seq={args.seq_mode}, reset_per_seq={args.reset_per_seq}, eval2D={do_eval_2d}, use_bev=True")
+    print(
+        f"[Infer-ONNX] imgs={len(names)}, temporal={args.temporal}, seq={args.seq_mode}, "
+        f"reset_per_seq={args.reset_per_seq}, eval2D={do_eval_2d}, use_bev={use_bev}"
+    )
 
     prev_key = None
     for name in tqdm(names, desc="[Infer-ONNX]"):
@@ -1037,103 +1053,115 @@ def main():
                 total_gt += gt_for_eval.shape[0]
 
         # ---- BEV (LUT) ----
-        bev_dets = []
-        if pred_tris_orig:
-            pred_stack_orig = np.asarray(pred_tris_orig, dtype=np.float64)  # [N,3,2]
-            pred_tris_bev_xy, pred_tris_bev_z, good_mask = tris_img_to_bev_by_lut(
-                pred_stack_orig, lut_data, bev_scale=float(args.bev_scale),
-                min_valid_corners=int(args.lut_min_corners),
-                boundary_eps=float(args.lut_boundary_eps)
-            )
-            num_tri = min(len(dets), pred_tris_bev_xy.shape[0])
-            if len(dets) != pred_tris_bev_xy.shape[0]:
-                print(f"[WARN] BEV LUT triangles ({pred_tris_bev_xy.shape[0]}) and detections ({len(dets)}) differ; clipping to {num_tri}.")
-            for idx in range(num_tri):
-                det = dets[idx]
-                if not good_mask[idx]:
-                    continue
-                tri_bev_xy = pred_tris_bev_xy[idx]
-                tri_bev_z  = pred_tris_bev_z[idx]
-                if not np.all(np.isfinite(tri_bev_xy)):
-                    continue
-                poly_bev = poly_from_tri(tri_bev_xy)
-                props = None
-                try:
-                    props = compute_bev_properties_3d(
-                        tri_bev_xy, tri_bev_z,
-                        pitch_clamp_deg=args.pitch_clamp_deg,
-                        use_roll=args.use_roll,
-                        roll_threshold_deg=args.roll_threshold_deg,
-                        roll_clamp_deg=args.roll_clamp_deg
+        if use_bev:
+            bev_dets = []
+            if pred_tris_orig:
+                pred_stack_orig = np.asarray(pred_tris_orig, dtype=np.float64)  # [N,3,2]
+                pred_tris_bev_xy, pred_tris_bev_z, good_mask = tris_img_to_bev_by_lut(
+                    pred_stack_orig, lut_data, bev_scale=float(args.bev_scale),
+                    min_valid_corners=int(args.lut_min_corners),
+                    boundary_eps=float(args.lut_boundary_eps)
+                )
+                num_tri = min(len(dets), pred_tris_bev_xy.shape[0])
+                if len(dets) != pred_tris_bev_xy.shape[0]:
+                    print(
+                        f"[WARN] BEV LUT triangles ({pred_tris_bev_xy.shape[0]}) "
+                        f"and detections ({len(dets)}) differ; clipping to {num_tri}."
                     )
-                except Exception:
+                for idx in range(num_tri):
+                    det = dets[idx]
+                    if not good_mask[idx]:
+                        continue
+                    tri_bev_xy = pred_tris_bev_xy[idx]
+                    tri_bev_z = pred_tris_bev_z[idx]
+                    if not np.all(np.isfinite(tri_bev_xy)):
+                        continue
+                    poly_bev = poly_from_tri(tri_bev_xy)
                     props = None
+                    try:
+                        props = compute_bev_properties_3d(
+                            tri_bev_xy,
+                            tri_bev_z,
+                            pitch_clamp_deg=args.pitch_clamp_deg,
+                            use_roll=args.use_roll,
+                            roll_threshold_deg=args.roll_threshold_deg,
+                            roll_clamp_deg=args.roll_clamp_deg,
+                        )
+                    except Exception:
+                        props = None
 
-                # 실패/결측이면 기존 XY 기반 fallback
-                if props is None:
-                    props = compute_bev_properties(
-                        tri_bev_xy, tri_bev_z,
-                        pitch_clamp_deg=args.pitch_clamp_deg,
-                        use_roll=args.use_roll,
-                        roll_threshold_deg=args.roll_threshold_deg,
-                        roll_clamp_deg=args.roll_clamp_deg
+                    # 실패/결측이면 기존 XY 기반 fallback
+                    if props is None:
+                        props = compute_bev_properties(
+                            tri_bev_xy,
+                            tri_bev_z,
+                            pitch_clamp_deg=args.pitch_clamp_deg,
+                            use_roll=args.use_roll,
+                            roll_threshold_deg=args.roll_threshold_deg,
+                            roll_clamp_deg=args.roll_clamp_deg,
+                        )
+                    if props is None:
+                        continue
+
+                    center, length, width, yaw, front_edge, cz, pitch_deg, roll_deg = props
+
+                    # === 치수/비율 이상치 필터 ===
+                    if not _sane_dims(length, width, args):
+                        continue
+
+                    bev_dets.append(
+                        {
+                            "score": float(det["score"]),
+                            "tri": tri_bev_xy,
+                            "poly": poly_bev,
+                            "center": center,
+                            "length": length,
+                            "width": width,
+                            "yaw": yaw,
+                            "front_edge": front_edge,
+                            "cz": cz,
+                            "pitch": pitch_deg,
+                            "roll": roll_deg if args.use_roll else 0.0,
+                        }
                     )
-                if props is None:
-                    continue
 
-                center, length, width, yaw, front_edge, cz, pitch_deg, roll_deg = props
+            # GT → BEV (동일 LUT 사용)
+            if gt_tri_orig_for_bev.size > 0:
+                gt_u = gt_tri_orig_for_bev[:, :, 0].reshape(-1)
+                gt_v = gt_tri_orig_for_bev[:, :, 1].reshape(-1)
+                Xg, Yg, Zg, Vg = _bilinear_lut_xyz(
+                    lut_data,
+                    gt_u,
+                    gt_v,
+                    min_valid_corners=int(args.lut_min_corners),
+                    boundary_eps=float(args.lut_boundary_eps),
+                )
+                Vg = Vg.reshape(-1, 3)
+                good_gt = np.all(Vg, axis=1)
+                Xg = Xg.reshape(-1, 3)
+                Yg = Yg.reshape(-1, 3)
+                gt_tris_bev = np.stack([Xg, Yg], axis=-1).astype(np.float32)
+                gt_tris_bev *= float(args.bev_scale)
+                gt_tris_bev = gt_tris_bev[good_gt]
+            else:
+                gt_tris_bev = np.zeros((0, 3, 2), dtype=np.float32)
 
-                # === 치수/비율 이상치 필터 ===
-                if not _sane_dims(length, width, args):
-                    continue
+            # BEV 시각화/라벨 저장
+            bev_img_path = os.path.join(out_bev_img_dir, name)
+            draw_bev_visualization(bev_dets, None, bev_img_path, f"{name} | Pred BEV")
 
-                bev_dets.append({
-                    "score": float(det["score"]),
-                    "tri": tri_bev_xy,
-                    "poly": poly_bev,
-                    "center": center,
-                    "length": length,
-                    "width": width,
-                    "yaw": yaw,
-                    "front_edge": front_edge,
-                    "cz": cz,
-                    "pitch": pitch_deg,
-                    "roll": roll_deg if args.use_roll else 0.0,
-                })
+            bev_mix_path = os.path.join(out_bev_mix_dir, name)
+            draw_bev_visualization(bev_dets, gt_tris_bev, bev_mix_path, f"{name} | Pred & GT BEV")
 
-        # GT → BEV (동일 LUT 사용)
-        if gt_tri_orig_for_bev.size > 0:
-            gt_u = gt_tri_orig_for_bev[:, :, 0].reshape(-1)
-            gt_v = gt_tri_orig_for_bev[:, :, 1].reshape(-1)
-            Xg, Yg, Zg, Vg = _bilinear_lut_xyz(
-                lut_data, gt_u, gt_v,
-                min_valid_corners=int(args.lut_min_corners),
-                boundary_eps=float(args.lut_boundary_eps)
-            )
-            Vg = Vg.reshape(-1, 3)
-            good_gt = np.all(Vg, axis=1)
-            Xg = Xg.reshape(-1, 3)
-            Yg = Yg.reshape(-1, 3)
-            gt_tris_bev = np.stack([Xg, Yg], axis=-1).astype(np.float32)
-            gt_tris_bev *= float(args.bev_scale)
-            gt_tris_bev = gt_tris_bev[good_gt]
-        else:
-            gt_tris_bev = np.zeros((0, 3, 2), dtype=np.float32)
+            bev_label_path = os.path.join(out_bev_lab_dir, os.path.splitext(name)[0] + ".txt")
+            write_bev_labels(bev_label_path, bev_dets, write_3d=bool(args.bev_label_3d))
 
-        # BEV 시각화/라벨 저장
-        bev_img_path = os.path.join(out_bev_img_dir, name)
-        draw_bev_visualization(bev_dets, None, bev_img_path, f"{name} | Pred BEV")
-
-        bev_mix_path = os.path.join(out_bev_mix_dir, name)
-        draw_bev_visualization(bev_dets, gt_tris_bev, bev_mix_path, f"{name} | Pred & GT BEV")
-
-        bev_label_path = os.path.join(out_bev_lab_dir, os.path.splitext(name)[0] + ".txt")
-        write_bev_labels(bev_label_path, bev_dets, write_3d=bool(args.bev_label_3d))
-
-        if gt_tris_bev.shape[0] > 0 and len(bev_dets) > 0:
-            records_bev, _ = evaluate_single_image_bev(bev_dets, gt_tris_bev, iou_thr=args.eval_iou_thr)
-            metric_records_bev.extend(records_bev)
             total_gt_bev += gt_tris_bev.shape[0]
+            if gt_tris_bev.shape[0] > 0 and len(bev_dets) > 0:
+                records_bev, _ = evaluate_single_image_bev(
+                    bev_dets, gt_tris_bev, iou_thr=args.eval_iou_thr
+                )
+                metric_records_bev.extend(records_bev)
 
     # ---- 전체 메트릭 출력 ----
     if do_eval_2d:
@@ -1144,15 +1172,22 @@ def main():
         print("mAP@50:     {:.4f}".format(metrics["map50"]))
         print("mAOE(deg):  {:.2f}".format(metrics["mAOE_deg"]))
 
-    metrics_bev = compute_detection_metrics(metric_records_bev, total_gt_bev) if (total_gt_bev > 0 or metric_records_bev) else None
-    if metrics_bev is not None:
-        print("== BEV Eval (dataset-wide) ==")
-        print("Precision:  {:.4f}".format(metrics_bev["precision"]))
-        print("Recall:     {:.4f}".format(metrics_bev["recall"]))
-        print("APbev@50:   {:.4f}".format(metrics_bev["map50"]))
-        print("mAOE_bev:   {:.2f}".format(metrics_bev["mAOE_deg"]))
+    if use_bev:
+        metrics_bev = (
+            compute_detection_metrics(metric_records_bev, total_gt_bev)
+            if (total_gt_bev > 0 or metric_records_bev)
+            else None
+        )
+        if metrics_bev is not None:
+            print("== BEV Eval (dataset-wide) ==")
+            print("Precision:  {:.4f}".format(metrics_bev["precision"]))
+            print("Recall:     {:.4f}".format(metrics_bev["recall"]))
+            print("APbev@50:   {:.4f}".format(metrics_bev["map50"]))
+            print("mAOE_bev:   {:.2f}".format(metrics_bev["mAOE_deg"]))
+        else:
+            print("[Info] BEV 평가는 GT 또는 유효 매칭이 부족해 계산하지 않았습니다.")
     else:
-        print("[Info] BEV 평가는 GT 또는 유효 매칭이 부족해 계산하지 않았습니다.")
+        print("[Info] LUT 미지정으로 BEV 라벨/시각화/평가를 생략했습니다.")
 
     print("Done.")
 

@@ -1,6 +1,6 @@
 # evaluation_utils.py
 import math
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Sequence
 
 import numpy as np
 import torch
@@ -68,12 +68,26 @@ def _nms_iou_or_ios(dets, iou_thr=0.5, contain_thr=None, topk=300):
     return keep
 
 
-def decode_predictions(
+def _resolve_conf_threshold(conf_cfg, cam_id) -> float:
+    """Return a float confidence threshold for the given cam id."""
+    if isinstance(conf_cfg, dict):
+        if cam_id in conf_cfg:
+            return float(conf_cfg[cam_id])
+        cam_key = str(cam_id)
+        if cam_key in conf_cfg:
+            return float(conf_cfg[cam_key])
+        if conf_cfg:
+            return float(next(iter(conf_cfg.values())))
+        raise ValueError("conf_th dictionary is empty")
+    return float(conf_cfg)
+
+
+def _decode_predictions_impl(
     cam_id,
     outputs,
     strides,
     clip_cells=None,
-    conf_th={1:0.15},
+    conf_th=0.15,
     nms_iou=0.5,
     topk=300,
     contain_thr=0.7,     #작은 객체의 큰 객체 대비 겹침 정도
@@ -113,7 +127,8 @@ def decode_predictions(
             else:  # "obj*cls"
                 score_map = obj_map * cls_map
 
-            keep = score_map > conf_th[cam_id]
+            thr = _resolve_conf_threshold(conf_th, cam_id)
+            keep = score_map > thr
             if keep.sum().item() == 0:
                 continue
 
@@ -176,6 +191,42 @@ def decode_predictions(
             batch_results.append(dets_nms)
 
     return batch_results
+
+
+def decode_predictions(*args, **kwargs):
+    """Backward-compatible wrapper for decoding predictions.
+
+    기존 버전(outputs,strides,...)과 신규 버전(cam_id,outputs,strides,...) 호출 모두 지원한다.
+    cam_id가 주어지지 않으면 기본값 0을 사용한다.
+    """
+
+    positional_opt_names: Sequence[str] = (
+        "clip_cells",
+        "conf_th",
+        "nms_iou",
+        "topk",
+        "contain_thr",
+        "score_mode",
+        "use_gpu_nms",
+    )
+
+    if len(args) >= 3 and not isinstance(args[0], (list, tuple)):
+        # 신규 시그니처(cam_id, outputs, strides, ...)
+        cam_id = args[0]
+        outputs = args[1]
+        strides = args[2]
+        remaining = list(args[3:])
+    else:
+        # 구 버전(outputs, strides, ...)
+        cam_id = kwargs.pop("cam_id", 0)
+        outputs = args[0]
+        strides = args[1]
+        remaining = list(args[2:])
+
+    for name, value in zip(positional_opt_names, remaining):
+        kwargs.setdefault(name, value)
+
+    return _decode_predictions_impl(cam_id, outputs, strides, **kwargs)
 
 def evaluate_single_image(preds, gt_tris, iou_thr=0.5):
     gt_tris = np.asarray(gt_tris)
