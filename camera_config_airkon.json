@@ -1,0 +1,46 @@
+{
+  "cameras": [
+    {
+      "camera_id": 7,
+      "name": "cam_7",
+      "ip": "192.168.0.50",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam7_x-11.69_y-15.85_z10.40_yaw-222.40_pit-35.73_rol-0.40_f97.70_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam50_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam7_x-11.69_y-15.85_z10.40_yaw-222.40_pit-35.73_rol-0.40_f97.70_crop.ply"
+    },
+    {
+      "camera_id": 8,
+      "name": "cam_8",
+      "ip": "192.168.0.32",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam8_x10.00_y-15.40_z10.80_yaw29.00_pit-39.00_rol0.60_f90.95_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam36_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam8_x10.00_y-15.40_z10.80_yaw29.00_pit-39.00_rol0.60_f90.95_crop.ply"
+    },
+    {
+      "camera_id": 9,
+      "name": "cam_9",
+      "ip": "192.168.0.21",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam9_x31.40_y-12.20_z10.80_yaw33.00_pit-30.00_rol-1.00_f93.75_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam31_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam9_x31.40_y-12.20_z10.80_yaw33.00_pit-30.00_rol-1.00_f93.75_crop.ply"
+    }
+  ]
+}
