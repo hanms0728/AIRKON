@@ -10,9 +10,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam27_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_crop.ply",
+      "lut": "outputs/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
+      "visible_ply": "outputs/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18.ply",
       "conf": 0.8
     },
     {
@@ -25,9 +25,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam2_x-26.61_y-21.81_z10.40_yaw-91.15_pit-30.29_rol-0.40_f94.17_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam21_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam2_x-26.61_y-21.81_z10.40_yaw-91.15_pit-30.29_rol-0.40_f94.17_crop.ply"
+      "lut": "outputs/cam2_x-28.86_y-19.86_z10.60_yaw-95.15_pit-36.84_rol-0.50_f90.95_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam36_calibration_results_params.npz",
+      "visible_ply": "outputs/cam2_x-28.86_y-19.86_z10.60_yaw-95.15_pit-36.84_rol-0.50_f90.95.ply"
     },
     {
       "camera_id": 3,
@@ -39,9 +39,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam3_x-38.44_y-29.65_z10.51_yaw1.43_pit-35.99_rol2.65_f90.25_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam30_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam3_x-38.44_y-29.65_z10.51_yaw1.43_pit-35.99_rol2.65_f90.25_crop.ply"
+      "lut": "outputs/cam3_x-37.83_y-25.26_z10.65_yaw1.22_pit-39.47_rol0.00_f97.70_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam27_calibration_results_params.npz",
+      "visible_ply": "outputs/cam3_x-37.83_y-25.26_z10.65_yaw1.22_pit-39.47_rol0.00_f97.70.ply"
     }
   ]
 }

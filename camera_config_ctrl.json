@@ -10,9 +10,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam4_x-23.30_y-40.35_z16.44_yaw-171.00_pit-35.38_rol0.50_f94.50_pixel2world_lut_floor.npz",
+      "lut": "outputs/cam4_x-24.46_y-46.86_z20.60_yaw-180.77_pit-38.34_rol1.00_f97.70_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam51_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam4_x-23.30_y-40.35_z16.44_yaw-171.00_pit-35.38_rol0.50_f94.50_crop.ply"
+      "visible_ply": "outputs/cam4_x-24.46_y-46.86_z20.60_yaw-180.77_pit-38.34_rol1.00_f97.70.ply"
     },
     {
       "camera_id": 5,
@@ -24,9 +24,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam5_x-50.57_y-37.58_z10.43_yaw99.00_pit-34.38_rol-1.75_f98.18_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam5_x-50.57_y-37.58_z10.43_yaw99.00_pit-34.38_rol-1.75_f98.18_crop.ply"
+      "lut": "outputs/cam5_x-48.52_y8.04_z15.28_yaw-94.50_pit-51.80_rol0.00_f94.92_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam26_calibration_results_params.npz",
+      "visible_ply": "outputs/cam5_x-48.52_y8.04_z15.28_yaw-94.50_pit-51.80_rol0.00_f94.92.ply"
     },
     {
       "camera_id": 6,
@@ -38,9 +38,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam6_x-26.75_y-10.50_z10.40_yaw-203.25_pit-28.00_rol0.50_f87.56_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam35_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam6_x-26.75_y-10.50_z10.40_yaw-203.25_pit-28.00_rol0.50_f87.56_crop.ply"
+      "lut": "outputs/cam6_x-46.25_y4.45_z12.62_yaw-5.70_pit-36.90_rol0.00_f94.04_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam28_calibration_results_params.npz",
+      "visible_ply": "outputs/cam6_x-46.25_y4.45_z12.62_yaw-5.70_pit-36.90_rol0.00_f94.04.ply"
     }
   ]
 }

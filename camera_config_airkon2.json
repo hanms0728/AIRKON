@@ -10,9 +10,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam32_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_crop.ply"
+      "lut": "outputs/cam10_x46.20_y-24.80_z10.00_yaw3.00_pit-43.00_rol0.00_f93.75_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam31_calibration_results_params.npz",
+      "visible_ply": "outputs/cam10_x46.20_y-24.80_z10.00_yaw3.00_pit-43.00_rol0.00_f93.75.ply"
     },
     {
       "camera_id": 11,
@@ -24,9 +24,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam11_x46.60_y-29.60_z9.20_yaw0.00_pit-51.00_rol0.00_f94.92_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam26_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam11_x46.60_y-29.60_z9.20_yaw0.00_pit-51.00_rol0.00_f94.92_crop.ply"
+      "lut": "outputs/cam11_x19.20_y-49.60_z10.00_yaw4.00_pit-35.00_rol0.00_f87.56_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam35_calibration_results_params.npz",
+      "visible_ply": "outputs/cam11_x19.20_y-49.60_z10.00_yaw4.00_pit-35.00_rol0.00_f87.56.ply"
     },
     {
       "camera_id": 12,
@@ -38,9 +38,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam37_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_crop.ply"
+      "lut": "outputs/cam12_x36.00_y-29.40_z10.00_yaw180.00_pit-40.00_rol0.00_f91.74_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam29_calibration_results_params.npz",
+      "visible_ply": "outputs/cam12_x36.00_y-29.40_z10.00_yaw180.00_pit-40.00_rol0.00_f91.74.ply"
     },
     {
       "camera_id": 13,
@@ -52,9 +52,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_pixel2world_lut_floor.npz",
+      "lut": "outputs/cam13_x27.20_y-13.60_z10.00_yaw-93.00_pit-35.00_rol0.00_f91.38_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam37_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_crop.ply"
+      "visible_ply": "outputs/cam13_x27.20_y-13.60_z10.00_yaw-93.00_pit-35.00_rol0.00_f91.38.ply"
     }
   ]
 }
