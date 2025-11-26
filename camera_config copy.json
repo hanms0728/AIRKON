@@ -88,7 +88,7 @@
     {
       "camera_id": 7,
       "name": "cam_7",
-      "ip": "192.168.0.32",
+      "ip": "192.168.0.50",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -102,7 +102,7 @@
     {
       "camera_id": 8,
       "name": "cam_8",
-      "ip": "192.168.0.21",
+      "ip": "192.168.0.32",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -116,7 +116,7 @@
     {
       "camera_id": 9,
       "name": "cam_9",
-      "ip": "192.168.0.31",
+      "ip": "192.168.0.21",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -130,7 +130,7 @@
     {
       "camera_id": 10,
       "name": "cam_10",
-      "ip": "192.168.0.35",
+      "ip": "192.168.0.31",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -144,7 +144,7 @@
     {
       "camera_id": 11,
       "name": "cam_11",
-      "ip": "192.168.0.29",
+      "ip": "192.168.0.35",
       "port": 554,
       "username": "admin",
       "password": "zjsxmfhf",
@@ -158,6 +158,20 @@
     {
       "camera_id": 12,
       "name": "cam_12",
+      "ip": "192.168.0.29",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam37_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_crop.ply"
+    },
+    {
+      "camera_id": 13,
+      "name": "cam_13",
       "ip": "192.168.0.37",
       "port": 554,
       "username": "admin",
