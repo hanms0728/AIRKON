@@ -1,0 +1,62 @@
+{
+  "cameras": [
+    {
+      "camera_id": 0,
+      "name": "cam_0",
+      "ip": "192.168.0.30",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam30_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_crop.ply",
+      "conf": 0.8
+    },
+    {
+      "camera_id": 1,
+      "name": "cam_1",
+      "ip": "192.168.0.25",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_crop.ply",
+      "conf": 0.8
+    },
+    {
+      "camera_id": 2,
+      "name": "cam_2",
+      "ip": "192.168.0.36",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam2_x-28.86_y-21.31_z10.60_yaw-95.90_pit-38.34_rol-1.12_f90.95_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam36_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam2_x-28.86_y-21.31_z10.60_yaw-95.90_pit-38.34_rol-1.12_f90.95_crop.ply"
+    },
+    {
+      "camera_id": 3,
+      "name": "cam_3",
+      "ip": "192.168.0.27",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam3_x-38.14_y-24.12_z10.00_yaw-1.25_pit-37.04_rol-2.55_f95.25_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam27_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam3_x-38.14_y-24.12_z10.00_yaw-1.25_pit-37.04_rol-2.55_f95.25_crop.ply"
+    }
+  ]
+}

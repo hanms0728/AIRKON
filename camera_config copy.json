@@ -1,6 +1,21 @@
 {
   "cameras": [
     {
+      "camera_id": 0,
+      "name": "cam_0",
+      "ip": "192.168.0.30",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam30_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_crop.ply",
+      "conf": 0.8
+    },
+    {
       "camera_id": 1,
       "name": "cam_1",
       "ip": "192.168.0.25",
@@ -10,9 +25,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam27_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam1_x-0.39_y-32.87_z16.06_yaw-270.15_pit-38.79_rol-0.00_f94.17_crop.ply",
+      "lut": "outputs_new/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_crop.ply",
       "conf": 0.8
     },
     {
@@ -25,9 +40,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam2_x-26.61_y-21.81_z10.40_yaw-91.15_pit-30.29_rol-0.40_f94.17_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam21_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam2_x-26.61_y-21.81_z10.40_yaw-91.15_pit-30.29_rol-0.40_f94.17_crop.ply"
+      "lut": "outputs_new/cam2_x-28.86_y-21.31_z10.60_yaw-95.90_pit-38.34_rol-1.12_f90.95_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam36_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam2_x-28.86_y-21.31_z10.60_yaw-95.90_pit-38.34_rol-1.12_f90.95_crop.ply"
     },
     {
       "camera_id": 3,
@@ -39,9 +54,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam3_x-38.44_y-29.65_z10.51_yaw1.43_pit-35.99_rol2.65_f90.25_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam30_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam3_x-38.44_y-29.65_z10.51_yaw1.43_pit-35.99_rol2.65_f90.25_crop.ply"
+      "lut": "outputs_new/cam3_x-38.14_y-24.12_z10.00_yaw-1.25_pit-37.04_rol-2.55_f95.25_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam27_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam3_x-38.14_y-24.12_z10.00_yaw-1.25_pit-37.04_rol-2.55_f95.25_crop.ply"
     },
     {
       "camera_id": 4,
@@ -53,9 +68,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam4_x-23.30_y-40.35_z16.44_yaw-171.00_pit-35.38_rol0.50_f94.50_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam4_x-24.79_y-46.56_z20.85_yaw-181.87_pit-38.34_rol1.10_f95.25_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam51_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam4_x-23.30_y-40.35_z16.44_yaw-171.00_pit-35.38_rol0.50_f94.50_crop.ply"
+      "visible_ply": "modify_ply/cam4_x-24.79_y-46.56_z20.85_yaw-181.87_pit-38.34_rol1.10_f95.25_crop.ply"
     },
     {
       "camera_id": 5,
@@ -67,9 +82,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam5_x-50.57_y-37.58_z10.43_yaw99.00_pit-34.38_rol-1.75_f98.18_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam5_x-50.57_y-37.58_z10.43_yaw99.00_pit-34.38_rol-1.75_f98.18_crop.ply"
+      "lut": "outputs_new/cam5_x-53.82_y8.04_z15.68_yaw-84.00_pit-55.34_rol11.50_f94.92_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam26_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam5_x-53.82_y8.04_z15.68_yaw-84.00_pit-55.34_rol11.50_f94.92_crop.ply"
     },
     {
       "camera_id": 6,
@@ -81,13 +96,27 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam6_x-26.75_y-10.50_z10.40_yaw-203.25_pit-28.00_rol0.50_f87.56_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam35_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam6_x-26.75_y-10.50_z10.40_yaw-203.25_pit-28.00_rol0.50_f87.56_crop.ply"
+      "lut": "outputs_new/cam6_x-55.14_y8.08_z18.68_yaw-8.75_pit-40.88_rol0.80_f94.04_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam28_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam6_x-55.14_y8.08_z18.68_yaw-8.75_pit-40.88_rol0.80_f94.04_crop.ply"
     },
     {
       "camera_id": 7,
       "name": "cam_7",
+      "ip": "192.168.0.50",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam7_x-27.32_y-4.35_z10.40_yaw32.20_pit-45.70_rol-2.25_f97.70_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam50_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam7_x-27.32_y-4.35_z10.40_yaw32.20_pit-45.70_rol-2.25_f97.70_crop.ply"
+    },
+    {
+      "camera_id": 8,
+      "name": "cam_8",
       "ip": "192.168.0.32",
       "port": 554,
       "username": "admin",
@@ -95,13 +124,13 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam7_x-11.69_y-15.85_z10.40_yaw-222.40_pit-35.73_rol-0.40_f97.70_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam50_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam7_x-11.69_y-15.85_z10.40_yaw-222.40_pit-35.73_rol-0.40_f97.70_crop.ply"
+      "lut": "outputs_new/cam8_x13.85_y-3.75_z9.70_yaw24.55_pit-40.50_rol5.75_f95.34_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam32_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam8_x13.85_y-3.75_z9.70_yaw24.55_pit-40.50_rol5.75_f95.34_crop.ply"
     },
     {
-      "camera_id": 8,
-      "name": "cam_8",
+      "camera_id": 9,
+      "name": "cam_9",
       "ip": "192.168.0.21",
       "port": 554,
       "username": "admin",
@@ -109,13 +138,13 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam8_x10.00_y-15.40_z10.80_yaw29.00_pit-39.00_rol0.60_f90.95_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam36_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam8_x10.00_y-15.40_z10.80_yaw29.00_pit-39.00_rol0.60_f90.95_crop.ply"
+      "lut": "outputs_new/cam9_x26.85_y-3.75_z10.70_yaw11.75_pit-35.50_rol5.75_f94.17_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam21_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam9_x26.85_y-3.75_z10.70_yaw11.75_pit-35.50_rol5.75_f94.17_crop.ply"
     },
     {
-      "camera_id": 9,
-      "name": "cam_9",
+      "camera_id": 10,
+      "name": "cam_10",
       "ip": "192.168.0.31",
       "port": 554,
       "username": "admin",
@@ -123,13 +152,13 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam9_x31.40_y-12.20_z10.80_yaw33.00_pit-30.00_rol-1.00_f93.75_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam31_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam9_x31.40_y-12.20_z10.80_yaw33.00_pit-30.00_rol-1.00_f93.75_crop.ply"
+      "visible_ply": "modify_ply/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_crop.ply"
     },
     {
-      "camera_id": 10,
-      "name": "cam_10",
+      "camera_id": 11,
+      "name": "cam_11",
       "ip": "192.168.0.35",
       "port": 554,
       "username": "admin",
@@ -137,13 +166,13 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam32_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam10_x49.40_y-9.00_z10.80_yaw-40.00_pit-31.00_rol1.50_f95.34_crop.ply"
+      "lut": "outputs_new/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam35_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_crop.ply"
     },
     {
-      "camera_id": 11,
-      "name": "cam_11",
+      "camera_id": 12,
+      "name": "cam_12",
       "ip": "192.168.0.29",
       "port": 554,
       "username": "admin",
@@ -151,13 +180,13 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam11_x46.60_y-29.60_z9.20_yaw0.00_pit-51.00_rol0.00_f94.92_pixel2world_lut_floor.npz",
-      "undistort": "realtime/disto/cam26_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam11_x46.60_y-29.60_z9.20_yaw0.00_pit-51.00_rol0.00_f94.92_crop.ply"
+      "lut": "outputs_new/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam29_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_crop.ply"
     },
     {
-      "camera_id": 12,
-      "name": "cam_12",
+      "camera_id": 13,
+      "name": "cam_13",
       "ip": "192.168.0.37",
       "port": 554,
       "username": "admin",
@@ -165,9 +194,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam37_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam12_x21.64_y-39.32_z16.41_yaw4.55_pit-31.10_rol-0.50_f91.38_crop.ply"
+      "visible_ply": "modify_ply/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_crop.ply"
     }
   ]
 }

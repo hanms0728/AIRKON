@@ -1,0 +1,60 @@
+{
+  "cameras": [
+    {
+      "camera_id": 10,
+      "name": "cam_10",
+      "ip": "192.168.0.31",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam31_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_crop.ply"
+    },
+    {
+      "camera_id": 11,
+      "name": "cam_11",
+      "ip": "192.168.0.35",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam35_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_crop.ply"
+    },
+    {
+      "camera_id": 12,
+      "name": "cam_12",
+      "ip": "192.168.0.29",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam29_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_crop.ply"
+    },
+    {
+      "camera_id": 13,
+      "name": "cam_13",
+      "ip": "192.168.0.37",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs_new/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam37_calibration_results_params.npz",
+      "visible_ply": "modify_ply/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_crop.ply"
+    }
+  ]
+}
