@@ -15,24 +15,24 @@ python server.py \
 ----------11월 26일
 
 
-ctrl_server(192.168.0.8)
+ctrl_server(192.168.0.9)
 
 python server.py \
-  --udp-port 50050 --no-invert-bev-y\
-  --tx-host 192.168.0.200 --tx-port 60200 \
+  --udp-port 50050 \
+  --tx-host 192.168.0.5 --tx-port 60200 \
   --carla-host 127.0.0.1 --carla-port 60200 --mesh-scale 4 --overlay-base-url http://0.0.0.0:10000
 
 
-python main.py --weights onnx/yolo11m_2_5d_real_coshow_v5.onnx --camera-config camera_config_ctrl_server.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.8" 
+python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config_ctrl_server.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.9" 
 
-ctrl(192.168.0.6)
+ctrl(192.168.0.10)
 
-python main.py --weights onnx/yolo11m_2_5d_real_coshow_v5.onnx --camera-config camera_config_ctrl.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.8" 
+python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config_ctrl.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.9" 
 
 airkon(192.168.0.166)
 
-python main.py --weights onnx/yolo11m_2_5d_real_coshow_v5.onnx --camera-config camera_config_airkon.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.8" 
+python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config_airkon.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.9" 
 
 airkon2(192.168.0.173)
 
-python main.py --weights onnx/yolo11m_2_5d_real_coshow_v5.onnx --camera-config camera_config_airkon2.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.8" 
+python main.py --weights onnx/yolo11m_2_5d_real_coshow_v4.onnx --camera-config camera_config_airkon2.json --web-enable --udp-enable --mesh-scale 4 --no-gui --udp-host "192.168.0.9" 
