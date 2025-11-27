@@ -984,7 +984,7 @@ class UDPReceiverSingle:
                         "pitch": float(it.get("pitch", 0.0)),
                         "roll": float(it.get("roll", 0.0)),
                         "color": color,
-                        # "color_hex": color_hex,
+                        "color_hex": it.get("color_hex"),
                     })
                 self._log_packet(cam, dets if dets else [], meta=msg)
                 return cam, dets if dets else []

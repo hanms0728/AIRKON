@@ -17,6 +17,8 @@ import open3d as o3d
 
 BACKGROUND_BGR = (18, 18, 18)
 UNDO_HISTORY = 80
+BRUSH_MAX_RADIUS = 150
+BRUSH_STEP = 5
 
 
 def load_ply(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -162,18 +164,29 @@ def main():
 
     undo_stack = deque(maxlen=UNDO_HISTORY)
     mode = "brush"  # 'brush', 'erase', 'picker'
-    brush_radius = 8
+    brush_radius = 50
     paint_color = np.array([1.0, 0.0, 0.0], dtype=np.float64)  # RGB
     canvas = None
 
     cv2.createTrackbar("R", controls_win, int(paint_color[0] * 255), 255, lambda v: None)
     cv2.createTrackbar("G", controls_win, int(paint_color[1] * 255), 255, lambda v: None)
     cv2.createTrackbar("B", controls_win, int(paint_color[2] * 255), 255, lambda v: None)
-    cv2.createTrackbar("Brush", controls_win, brush_radius, 150, lambda v: None)
+    cv2.createTrackbar("Brush", controls_win, brush_radius, BRUSH_MAX_RADIUS, lambda v: None)
 
     help1 = "LMB drag: paint/erase | E:Erase  B:Brush  C:Picker"
-    help2 = "S:save  Z:undo  ESC:quit"
+    help2 = "S:save  Z:undo  ESC:quit  Ctrl +/-: Brush size"
     info3 = f"INPUT: {os.path.basename(src_path)} -> OUTPUT: {os.path.basename(out_path)}"
+
+    def set_brush_radius(new_r, do_redraw=True):
+        """Clamp, sync trackbar, and optionally redraw."""
+        nonlocal brush_radius
+        new_r = int(np.clip(new_r, 1, BRUSH_MAX_RADIUS))
+        if new_r == brush_radius:
+            return
+        brush_radius = new_r
+        cv2.setTrackbarPos("Brush", controls_win, brush_radius)
+        if do_redraw:
+            redraw()
 
     def redraw():
         nonlocal canvas
@@ -280,6 +293,21 @@ def main():
     redraw()
     print("[INFO] Controls 창에서 R,G,B,Brush 조절 가능.")
     print("[INFO] E(erase), B(brush), C(picker), S(save), Z(undo), ESC(quit)")
+    print("[INFO] Ctrl +/- 로 브러쉬 크기 조절 가능 (숫자패드 +, - 지원).")
+
+    # 키 입력이 플랫폼마다 다를 수 있어 여러 코드 동시 지원
+    plus_keys_low = {ord('+'), ord('='), 0x6B, 187}  # 일반/Shift-=/OEM+/KP+
+    plus_keys_full = {0xFFAB, 65451}
+    minus_keys_low = {ord('-'), ord('_'), 0x6D, 189}  # 일반/_/OEM-/KP-
+    minus_keys_full = {0xFFAD, 65453}
+
+    def is_plus_key(k):
+        low = k & 0xFF
+        return low in plus_keys_low or k in plus_keys_full
+
+    def is_minus_key(k):
+        low = k & 0xFF
+        return low in minus_keys_low or k in minus_keys_full
 
     while True:
         r = cv2.getTrackbarPos("R", controls_win)
@@ -288,26 +316,31 @@ def main():
         br = cv2.getTrackbarPos("Brush", controls_win)
         br = max(1, br)
         paint_color = np.array([r, g, b], dtype=np.float64) / 255.0
-        brush_radius = br
+        if br != brush_radius:
+            brush_radius = br
+            redraw()
 
         key = cv2.waitKeyEx(20)
-        if key == 27:
+        if key == -1:
+            continue
+        key_base = key & 0xFF
+        if key_base == 27:
             break
-        elif key in (ord('e'), ord('E')):
+        elif key_base in (ord('e'), ord('E')):
             mode = "erase"
             print("[MODE] Brush -> ERASE")
             redraw()
-        elif key in (ord('b'), ord('B')):
+        elif key_base in (ord('b'), ord('B')):
             mode = "brush"
             print("[MODE] Brush -> PAINT")
             redraw()
-        elif key in (ord('c'), ord('C')):
+        elif key_base in (ord('c'), ord('C')):
             mode = "picker"
             print("[MODE] COLOR PICKER")
             redraw()
-        elif key in (ord('z'), ord('Z')):
+        elif key_base in (ord('z'), ord('Z')):
             undo_last()
-        elif key in (ord('s'), ord('S')):
+        elif key_base in (ord('s'), ord('S')):
             width = args.win_w
             height = args.win_h
             px = px_all[:, 0]
@@ -336,6 +369,10 @@ def main():
             pts_save = np.vstack(outputs_pts)
             cols_save = np.vstack(outputs_cols)
             save_ply(pts_save, cols_save, out_path)
+        elif is_plus_key(key):
+            set_brush_radius(brush_radius + BRUSH_STEP)
+        elif is_minus_key(key):
+            set_brush_radius(brush_radius - BRUSH_STEP)
 
     cv2.destroyAllWindows()
 
