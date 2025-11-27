@@ -61,6 +61,8 @@ class IPCameraStreamer:
     ):
         # 6개 카메라 구성
         self.camera_configs = [
+            {'ip': '192.168.0.30', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+             'camera_id': 0, 'transport': 'tcp', 'width': 1536, 'height': 864},
             # {'ip': '192.168.0.25', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
             #  'camera_id': 1, 'transport': 'tcp', 'width': 1536, 'height': 864},
             #  {'ip': '192.168.0.36', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
@@ -73,8 +75,8 @@ class IPCameraStreamer:
             #  'camera_id': 5, 'transport': 'tcp', 'width': 1536, 'height': 864},
             #  {'ip': '192.168.0.28', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
             #  'camera_id': 6, 'transport': 'tcp', 'width': 1536, 'height': 864},
-             {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
-             'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
+            #  {'ip': '192.168.0.50', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
+            #  'camera_id': 7, 'transport': 'tcp', 'width': 1536, 'height': 864},
             #  {'ip': '192.168.0.32', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
             #  'camera_id': 8, 'transport': 'tcp', 'width': 1536, 'height': 864},
             # {'ip': '192.168.0.21', 'port': 554, 'username': 'admin', 'password': 'zjsxmfhf',
