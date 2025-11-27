@@ -1,6 +1,21 @@
 {
   "cameras": [
     {
+      "camera_id": 0,
+      "name": "cam_0",
+      "ip": "192.168.0.30",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam25_calibration_results_params.npz",
+      "visible_ply": "outputs/cam1_x-0.86_y-26.06_z20.60_yaw-268.40_pit-48.34_rol1.00_f98.18.ply",
+      "conf": 0.8
+    },
+    {
       "camera_id": 1,
       "name": "cam_1",
       "ip": "192.168.0.25",

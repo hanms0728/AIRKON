@@ -41,6 +41,20 @@
       "lut": "outputs/cam9_x29.80_y-2.40_z10.00_yaw8.00_pit-38.00_rol0.00_f94.17_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam21_calibration_results_params.npz",
       "visible_ply": "outputs/cam9_x29.80_y-2.40_z10.00_yaw8.00_pit-38.00_rol0.00_f94.17.ply"
+    },
+    {
+      "camera_id": 0,
+      "name": "cam_9",
+      "ip": "192.168.0.30",
+      "port": 554,
+      "username": "admin",
+      "password": "zjsxmfhf",
+      "width": 1536,
+      "height": 864,
+      "force_tcp": true,
+      "lut": "outputs/cam9_x29.80_y-2.40_z10.00_yaw8.00_pit-38.00_rol0.00_f94.17_pixel2world_lut_floor.npz",
+      "undistort": "realtime/disto/cam21_calibration_results_params.npz",
+      "visible_ply": "outputs/cam9_x29.80_y-2.40_z10.00_yaw8.00_pit-38.00_rol0.00_f94.17.ply"
     }
   ]
 }
