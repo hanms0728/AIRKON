@@ -12,7 +12,7 @@
         "yaw": -90.8,
         "roll": 0.0
       },
-      "overlay_base_url": "http://192.168.0.8:10000"
+      "overlay_base_url": "http://192.168.0.9:10000"
     },
     {
       "name": "cam1",
@@ -26,7 +26,7 @@
         "yaw": -268.4,
         "roll": 1.0
       },
-      "overlay_base_url": "http://192.168.0.8:10000"
+      "overlay_base_url": "http://192.168.0.9:10000"
     },
     {
       "name": "cam2",
@@ -40,7 +40,7 @@
         "yaw": -95.9,
         "roll": -1.12
       },
-      "overlay_base_url": "http://192.168.0.8:10000"
+      "overlay_base_url": "http://192.168.0.9:10000"
     },
     {
       "name": "cam3",
@@ -54,7 +54,7 @@
         "yaw": -1.25,
         "roll": -2.55
       },
-      "overlay_base_url": "http://192.168.0.8:10000"
+      "overlay_base_url": "http://192.168.0.9:10000"
     },
     {
       "name": "cam4",
@@ -68,7 +68,7 @@
         "yaw": -181.87,
         "roll": 1.1
       },
-      "overlay_base_url": "http://192.168.0.6:10000"
+      "overlay_base_url": "http://192.168.0.10:10000"
     },
     {
       "name": "cam5",
@@ -82,7 +82,7 @@
         "yaw": -84.0,
         "roll": 11.5
       },
-      "overlay_base_url": "http://192.168.0.6:10000"
+      "overlay_base_url": "http://192.168.0.10:10000"
     },
     {
       "name": "cam6",
@@ -96,7 +96,7 @@
         "yaw": -8.75,
         "roll": 0.8
       },
-      "overlay_base_url": "http://192.168.0.6:10000"
+      "overlay_base_url": "http://192.168.0.10:10000"
     },
     {
       "name": "cam7",
