@@ -8,7 +8,7 @@ import math
 import argparse
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 import torch
 from tqdm import tqdm
@@ -241,8 +241,8 @@ def draw_pred_pseudo3d(
     img = image_bgr.copy()
     H, W = image_bgr.shape[:2]
 
-    # 1) 삼각형 → 평행사변형, front edge 인덱스 추적
-    polys: List[Tuple[np.ndarray, int, int]] = []
+    # 1) 삼각형 → 평행사변형
+    polys: List[np.ndarray] = []
     for tri in tris_orig:
         tri = np.asarray(tri, dtype=np.float32)
         if tri.shape != (3, 2) or not np.all(np.isfinite(tri)):
@@ -250,26 +250,15 @@ def draw_pred_pseudo3d(
         p0, p1, p2 = tri[0], tri[1], tri[2]
         poly4 = parallelogram_from_triangle(p0, p1, p2).astype(np.float32)
 
-        # p1(앞-좌), p2(앞-우)에 해당하는 인덱스를 poly4에서 찾기
-        i_front1, i_front2 = -1, -1
-        for idx_pt, pt in enumerate(poly4):
-            if i_front1 < 0 and np.allclose(pt, p1, atol=1e-3):
-                i_front1 = idx_pt
-            if i_front2 < 0 and np.allclose(pt, p2, atol=1e-3):
-                i_front2 = idx_pt
-        # 혹시 못 찾으면 기본값으로 (1,2) 가정
-        if i_front1 < 0 or i_front2 < 0:
-            i_front1, i_front2 = 1, 2
-
-        polys.append((poly4, i_front1, i_front2))
+        polys.append(poly4)
 
     if not polys:
         return None
 
     # 2) 아래에 있는 것(큰 y_max)부터 먼저 그려서 겹침 자연스럽게
-    polys.sort(key=lambda item: item[0][:, 1].max())
+    polys.sort(key=lambda poly: poly[:, 1].max())
 
-    for poly, idx_front1, idx_front2 in polys:
+    for poly in polys:
         # 화면상 polygon의 크기(대각선 길이)를 기준으로 높이 자동 스케일
         x_min, x_max = poly[:, 0].min(), poly[:, 0].max()
         y_min, y_max = poly[:, 1].min(), poly[:, 1].max()
@@ -315,20 +304,13 @@ def draw_pred_pseudo3d(
         cv2.fillPoly(overlay, [base], (0, 170, 240))  # 바닥면
         cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
 
-        # 옆면 수직 모서리: 앞부분은 빨간색, 나머지는 노란색
+        # 옆면 수직 모서리는 모두 동일 색상으로 표시
         for i in range(n):
-            color_edge = (0, 0, 255) if i in (idx_front1, idx_front2) else (0, 255, 255)
-            cv2.line(img, tuple(base[i]), tuple(top[i]), color_edge, 2)
+            cv2.line(img, tuple(base[i]), tuple(top[i]), (0, 255, 255), 2)
 
         # 바닥/윗면 외곽선: 기본은 노란색
         cv2.polylines(img, [base], True, (0, 255, 255), 2)
         cv2.polylines(img, [top],  True, (0, 255, 255), 2)
-
-        # 앞쪽 바닥/윗면 엣지는 빨간색으로 덮어쓰기
-        bf1, bf2 = base[idx_front1], base[idx_front2]
-        tf1, tf2 = top[idx_front1],  top[idx_front2]
-        cv2.line(img, tuple(bf1), tuple(bf2), (0, 0, 255), 3)  # 바닥 앞 엣지
-        cv2.line(img, tuple(tf1), tuple(tf2), (0, 0, 255), 3)  # 윗면 앞 엣지
 
         # --- 평균 색상을 pseudo-3D 박스 "위쪽"에 표시 (겹치지 않게) ---
         if mean_bgr is not None:
