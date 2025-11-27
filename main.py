@@ -42,32 +42,31 @@ class CameraAssets:
 COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
 _COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
 _COLOR_RGB_RULES = {
-    "green": {
-        "min": (0.0745, 0.2, 0.1569),
-        "max": (0.3922, 0.5529, 0.4314),
-    },
-    "red": {
-        "min": (0.2824, 0.1059, 0.0784),
-        "max": (0.7725, 0.2627, 0.1922),
-    },
-    "yellow": {
-        "min": (0.2902, 0.2314, 0.0784),
-        "max": (0.8196, 0.7412, 0.2353),
+    "purple": {
+        "min": (120.0, 46.0, 184.0),
+        "max": (174.0, 133.0, 237.0),
     },
     "white": {
-        "min": (0.2118, 0.2235, 0.2157),
-        "max": (0.7843, 0.7922, 0.7961),
+        "min": (218.0, 200.0, 223.0),
+        "max": (218.0, 200.0, 223.0),
     },
-    "purple": {
-        "min": (0.1216, 0.1098, 0.1529),
-        "max": (0.349, 0.3255, 0.502),
+    "red": {
+        "min": (72.0, 27.0, 20.0),
+        "max": (197.0, 67.0, 49.0),
     },
     "pink": {
-        "min": (0.2471, 0.1412, 0.2118),
-        "max": (0.7098, 0.3843, 0.6235),
+        "min": (199.0, 135.0, 192.0),
+        "max": (237.0, 189.0, 239.0),
+    },
+    "green": {
+        "min": (39.0, 196.0, 141.0),
+        "max": (127.0, 229.0, 232.0),
+    },
+    "yellow": {
+        "min": (218.0, 203.0, 74.0),
+        "max": (218.0, 203.0, 74.0),
     },
 }
-
 def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
     if not hex_color:
         return None
