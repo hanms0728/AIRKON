@@ -10,9 +10,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam10_x46.20_y-24.80_z10.00_yaw3.00_pit-43.00_rol0.00_f93.75_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam31_calibration_results_params.npz",
-      "visible_ply": "outputs/cam10_x46.20_y-24.80_z10.00_yaw3.00_pit-43.00_rol0.00_f93.75.ply"
+      "visible_ply": "modify_ply/cam10_x46.85_y-26.50_z10.80_yaw3.75_pit-45.00_rol2.50_f93.75_crop.ply"
     },
     {
       "camera_id": 11,
@@ -24,9 +24,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam11_x19.20_y-49.60_z10.00_yaw4.00_pit-35.00_rol0.00_f87.56_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam35_calibration_results_params.npz",
-      "visible_ply": "outputs/cam11_x19.20_y-49.60_z10.00_yaw4.00_pit-35.00_rol0.00_f87.56.ply"
+      "visible_ply": "modify_ply/cam11_x21.83_y-45.29_z21.18_yaw-2.12_pit-44.25_rol-4.50_f87.56_crop.ply"
     },
     {
       "camera_id": 12,
@@ -38,9 +38,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam12_x36.00_y-29.40_z10.00_yaw180.00_pit-40.00_rol0.00_f91.74_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam29_calibration_results_params.npz",
-      "visible_ply": "outputs/cam12_x36.00_y-29.40_z10.00_yaw180.00_pit-40.00_rol0.00_f91.74.ply"
+      "visible_ply": "modify_ply/cam12_x39.34_y-26.11_z10.40_yaw187.80_pit-33.85_rol5.85_f91.74_crop.ply"
     },
     {
       "camera_id": 13,
@@ -52,9 +52,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs/cam13_x27.20_y-13.60_z10.00_yaw-93.00_pit-35.00_rol0.00_f91.38_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam37_calibration_results_params.npz",
-      "visible_ply": "outputs/cam13_x27.20_y-13.60_z10.00_yaw-93.00_pit-35.00_rol0.00_f91.38.ply"
+      "visible_ply": "modify_ply/cam13_x27.11_y-16.87_z10.60_yaw-92.00_pit-37.20_rol1.00_f91.74_crop.ply"
     }
   ]
 }
