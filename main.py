@@ -481,22 +481,23 @@ class InferWorker(threading.Thread):
         )[0]
         return tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
 
-    def _make_bev(self, dets, lut_data: Optional[dict], tris_img_orig=None, colors_hex=None):
+    def _make_bev(self, dets, lut_data: Optional[dict], tris_img_orig=None, colors_hex=None) -> Tuple[List[dict], List[int]]:
         if lut_data is None or not dets:
-            return []
+            return [], []
 
         if tris_img_orig is not None:
             tris_img = np.asarray(tris_img_orig, dtype=np.float32)
         else:
             tris_img = np.asarray([d["tri"] for d in dets], dtype=np.float32)
         if tris_img.size == 0:
-            return []
+            return [], []
 
         tris_bev_xy, tris_bev_z, tri_ok = tris_img_to_bev_by_lut(
             tris_img, lut_data, bev_scale=self.bev_scale
         )
 
-        bev = []
+        bev: List[dict] = []
+        valid_indices: List[int] = []
 
         color_list = colors_hex or []
         for idx, (d, tri_xy, tri_z, ok) in enumerate(zip(dets, tris_bev_xy, tris_bev_z, tri_ok)):
@@ -533,7 +534,8 @@ class InferWorker(threading.Thread):
                 if embedding is not None:
                     entry["color_embedding"] = embedding
             bev.append(entry)
-        return bev
+            valid_indices.append(idx)
+        return bev, valid_indices
 
 
     def run(self):
@@ -610,19 +612,21 @@ class InferWorker(threading.Thread):
                     )
 
                 with wrk.span("bev"):
-                    bev = self._make_bev(
+                    bev, bev_valid_indices = self._make_bev(
                         dets,
                         self.LUT_cache.get(cid),
                         tris_img_orig=tris_img_orig,
                         colors_hex=colors_hex,
                     )
+                valid_indices = bev_valid_indices if bev_valid_indices else []
+                filtered_dets = [dets[i] for i in valid_indices] if valid_indices else []
 
                 overlay_frame = None
-                if frame_bgr is not None and dets:
+                if frame_bgr is not None and filtered_dets:
                     with wrk.span("draw"):
                         tris_for_gui = [
                             np.asarray(d.get("tri"), dtype=np.float32)
-                            for d in dets
+                            for d in filtered_dets
                             if d.get("tri") is not None
                         ]
                         pseudo3d = None
@@ -639,7 +643,7 @@ class InferWorker(threading.Thread):
                             )
                         overlay_frame = pseudo3d
                 if overlay_frame is None:
-                    overlay_frame = draw_detections(frame_bgr, dets)
+                    overlay_frame = draw_detections(frame_bgr, filtered_dets)
                 self._save_image(overlay_frame, self.save_dirs.get("overlay"), cid, capture_ts, "overlay")
 
                 if self.web_publisher is not None:

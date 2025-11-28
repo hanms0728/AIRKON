@@ -1,6 +1,7 @@
 import argparse
 import json
 import queue
+import random
 import re
 import socket
 import threading
@@ -39,6 +40,18 @@ COLOR_HEX_MAP = {
     "yellow": "#ffdd00",
     "purple": "#781de7",
 }
+
+def normalize_color_hex(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if not text.startswith("#"):
+        text = f"#{text}"
+    if re.match(r"^#[0-9a-fA-F]{6}$", text):
+        return text.lower()
+    return None
 
 def normalize_color_label(value: Optional[str]) -> Optional[str]:
     if value is None:
@@ -984,7 +997,7 @@ class UDPReceiverSingle:
                         "pitch": float(it.get("pitch", 0.0)),
                         "roll": float(it.get("roll", 0.0)),
                         "color": color,
-                        # "color_hex": color_hex,
+                        "color_hex": it.get("color_hex"),
                     })
                 self._log_packet(cam, dets if dets else [], meta=msg)
                 return cam, dets if dets else []
@@ -1402,7 +1415,9 @@ class RealtimeFusionServer:
         valid_colors = [c for c in normalized_colors if c is not None]  # None/none 은 투표 제외
         color_counts = Counter(valid_colors)
         color = color_counts.most_common(1)[0][0] if color_counts else None # 투표
-        color_hex = color_label_to_hex(color) # 헥사코드 6중 1로 변환
+        hex_candidates = [normalize_color_hex(d.get("color_hex")) for d in subset if d.get("color_hex")]
+        hex_candidates = [h for h in hex_candidates if h]
+        color_hex = random.choice(hex_candidates) if hex_candidates else None
         # fused_box: [cx, cy, L, W, yaw]
         if fused_box is not None and len(fused_box) >= 4:
             cx_rep = float(fused_box[0])
@@ -1433,6 +1448,10 @@ class RealtimeFusionServer:
                 hex_color = color_label_to_hex(color)
                 if hex_color:
                     meta["color_hex"] = hex_color
+            elif attrs.get("color_hex"):
+                hex_color = normalize_color_hex(attrs.get("color_hex"))
+                if hex_color:
+                    meta["color_hex"] = hex_color
             else:
                 meta.pop("color", None)
                 meta.pop("color_hex", None)
@@ -1455,9 +1474,9 @@ class RealtimeFusionServer:
                 color = normalize_color_label(det.get("color"))
                 if color:
                     meta["color"] = color
-                    hex_color = color_label_to_hex(color)
-                    if hex_color:
-                        meta["color_hex"] = hex_color
+                hex_color = normalize_color_hex(det.get("color_hex"))
+                if hex_color:
+                    meta["color_hex"] = hex_color
             votes = det.get("color_votes")
             if votes:
                 meta["color_votes"] = dict(votes)
@@ -1495,9 +1514,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
-                hex_color = color_label_to_hex(color)
-                if hex_color:
-                    vis["color_hex"] = hex_color
+            color_hex = normalize_color_hex(det.get("color_hex"))
+            if color_hex:
+                vis["color_hex"] = color_hex
             payload.append(vis)
         return payload
 
@@ -1528,9 +1547,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(det.get("color"))
             if color:
                 vis["color"] = color
-                hex_color = color_label_to_hex(color)
-                if hex_color:
-                    vis["color_hex"] = hex_color
+            color_hex = normalize_color_hex(det.get("color_hex"))
+            if color_hex:
+                vis["color_hex"] = color_hex
             votes = det.get("color_votes")
             if votes:
                 vis["color_votes"] = dict(votes)
@@ -1568,9 +1587,9 @@ class RealtimeFusionServer:
             color = normalize_color_label(extra.get("color"))
             if color:
                 vis["color"] = color
-                hex_color = color_label_to_hex(color)
-                if hex_color:
-                    vis["color_hex"] = hex_color
+            hex_color = normalize_color_hex(extra.get("color_hex"))
+            if hex_color:
+                vis["color_hex"] = hex_color
             if "color_confidence" in extra:
                 vis["color_confidence"] = float(extra["color_confidence"])
             if "color_votes" in extra:
@@ -1610,7 +1629,7 @@ def main():
     ap.add_argument("--tx-protocol", choices=["udp","tcp"], default="udp")
     ap.add_argument("--carla-host", default=None)
     ap.add_argument("--carla-port", type=int, default=61000)
-    ap.add_argument("--global-ply", default="pointcloud/real_coshow_map_v2.ply")
+    ap.add_argument("--global-ply", default="pointcloud/real_coshow_map_1127.ply")
     ap.add_argument("--vehicle-glb", default="pointcloud/car.glb")
     ap.add_argument("--web-host", default="0.0.0.0")
     ap.add_argument("--web-port", type=int, default=18000)

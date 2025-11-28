@@ -82,6 +82,7 @@ const state = {
     localClouds: new Map(),
     localLoadToken: 0,
     globalColorLookup: null,
+    adminColorLookup: new Map(),
     viewLockBackup: null,
     viewLockAnimation: null,
     liveCameraSwitchToken: 0,
@@ -130,6 +131,7 @@ const fusionEndpointMap = {
 
 const defaultLocalColor = new THREE.Color(0xf7b801);
 const defaultLocalColorArray = [defaultLocalColor.r, defaultLocalColor.g, defaultLocalColor.b];
+const adminDefaultColor = new THREE.Color(0x9254de);
 const markerModelUrl = "/static/assets/street_lamp_hanging.glb";
 const markerTargetHeight = 3.2;          // 가로등 높이 목표 (GLB 스케일링용)
 const markerActiveScaleMult = 1.06;      // 선택 시 약간만 확대
@@ -771,6 +773,19 @@ function getFallbackVehicleColor(det, idx) {
     return paletteColor;
 }
 
+function getAdminColorHex(det) {
+    if (!det || !adminState.enabled || !state.adminColorLookup) {
+        return null;
+    }
+    const trackId = det.track_id ?? det.id;
+    if (trackId == null) {
+        return null;
+    }
+    const key = String(trackId);
+    const hex = state.adminColorLookup.get(key);
+    return typeof hex === "string" && hex.length ? hex : null;
+}
+
 function renderDetections(detections) {
     detections = filterDetectionsForLocalView(detections);
     const count = Array.isArray(detections) ? detections.length : 0;
@@ -823,7 +838,11 @@ function renderDetections(detections) {
                     tmpMatrix2.multiplyMatrices(tmpMatrix, correction);
                     tmpMatrix2.multiply(tpl.localMatrix);
                     inst.setMatrixAt(i, tmpMatrix2);
-                    const colorToApply = detColor || getFallbackVehicleColor(det, i) || tpl.baseColor || defaultVehicleColor;
+                    // const colorToApply = detColor || getFallbackVehicleColor(det, i) || tpl.baseColor || defaultVehicleColor; //이게 기존코드 나중에 살려요
+                    const adminHex = adminState.enabled ? getAdminColorHex(det) : null;
+                    const colorToApply = adminState.enabled
+                        ? (adminHex ? tmpColor.set(adminHex) : adminDefaultColor)
+                        : (detColor || getFallbackVehicleColor(det, i) || tpl.baseColor || defaultVehicleColor);
                     if (inst.setColorAt) {
                         inst.setColorAt(i, colorToApply);
                     }
@@ -2723,19 +2742,6 @@ function updateDetectionFollowPose(detections) {
     camera.up.set(0, 0, 1);
     camera.lookAt(controls.target);
     follow.lastCenter = center;
-    // 충돌코드?
-    const colorInfo = getDetectionColorInfo(det);
-    if (colorInfo) {
-        const { label, hex } = colorInfo;
-        const colorText = label && hex
-            ? `${label} (${hex})`
-            : (label || hex);
-        if (colorText) {
-            tags.push(`color ${colorText}`);
-        }
-    }
-    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
-    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
 
 function matchesAdminHotkey(evt) {
@@ -3164,6 +3170,7 @@ function renderAdminTracks(tracks) {
     if (!listEl) {
         return;
     }
+    state.adminColorLookup.clear();
     listEl.innerHTML = "";
     const rows = Array.isArray(tracks) ? tracks.slice() : [];
     if (!rows.length) {
@@ -3175,6 +3182,22 @@ function renderAdminTracks(tracks) {
     }
     rows.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
     rows.forEach((t) => {
+        const colorInfo = getDetectionColorInfo(t);
+        const trackId = t.id ?? t.track_id;
+        if (trackId != null && colorInfo) {
+            let derivedHex = colorInfo.hex;
+            if (!derivedHex && colorInfo.label) {
+                try {
+                    tmpColor.set(colorInfo.label);
+                    derivedHex = `#${tmpColor.getHexString()}`;
+                } catch {
+                    derivedHex = null;
+                }
+            }
+            if (derivedHex) {
+                state.adminColorLookup.set(String(trackId), derivedHex);
+            }
+        }
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "admin-track";
