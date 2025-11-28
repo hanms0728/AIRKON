@@ -1417,7 +1417,7 @@ class RealtimeFusionServer:
         color = color_counts.most_common(1)[0][0] if color_counts else None # 투표
         hex_candidates = [normalize_color_hex(d.get("color_hex")) for d in subset if d.get("color_hex")]
         hex_candidates = [h for h in hex_candidates if h]
-        color_hex = random.choice(hex_candidates) if hex_candidates else color_label_to_hex(color)
+        color_hex = random.choice(hex_candidates) if hex_candidates else None
         # fused_box: [cx, cy, L, W, yaw]
         if fused_box is not None and len(fused_box) >= 4:
             cx_rep = float(fused_box[0])
@@ -1474,13 +1474,9 @@ class RealtimeFusionServer:
                 color = normalize_color_label(det.get("color"))
                 if color:
                     meta["color"] = color
-                    hex_color = color_label_to_hex(color)
-                    if hex_color:
-                        meta["color_hex"] = hex_color
-                elif det.get("color_hex"):
-                    hex_color = normalize_color_hex(det.get("color_hex"))
-                    if hex_color:
-                        meta["color_hex"] = hex_color
+                hex_color = normalize_color_hex(det.get("color_hex"))
+                if hex_color:
+                    meta["color_hex"] = hex_color
             votes = det.get("color_votes")
             if votes:
                 meta["color_votes"] = dict(votes)
@@ -1516,10 +1512,9 @@ class RealtimeFusionServer:
             vis["cy"] = cy_val
             vis["cz"] = cz_val
             color = normalize_color_label(det.get("color"))
-            color_hex = normalize_color_hex(det.get("color_hex"))
             if color:
                 vis["color"] = color
-                color_hex = color_hex or color_label_to_hex(color)
+            color_hex = normalize_color_hex(det.get("color_hex"))
             if color_hex:
                 vis["color_hex"] = color_hex
             payload.append(vis)
@@ -1550,10 +1545,9 @@ class RealtimeFusionServer:
             vis["cy"] = cy_val
             vis["cz"] = cz_val
             color = normalize_color_label(det.get("color"))
-            color_hex = normalize_color_hex(det.get("color_hex"))
             if color:
                 vis["color"] = color
-                color_hex = color_hex or color_label_to_hex(color)
+            color_hex = normalize_color_hex(det.get("color_hex"))
             if color_hex:
                 vis["color_hex"] = color_hex
             votes = det.get("color_votes")
@@ -1591,10 +1585,9 @@ class RealtimeFusionServer:
             vis["cy"] = cy
             vis["cz"] = cz_val
             color = normalize_color_label(extra.get("color"))
-            hex_color = normalize_color_hex(extra.get("color_hex"))
             if color:
                 vis["color"] = color
-                hex_color = hex_color or color_label_to_hex(color)
+            hex_color = normalize_color_hex(extra.get("color_hex"))
             if hex_color:
                 vis["color_hex"] = hex_color
             if "color_confidence" in extra:
