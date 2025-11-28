@@ -10,9 +10,9 @@
       "width": 1536,
       "height": 864,
       "force_tcp": true,
-      "lut": "outputs_new/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_pixel2world_lut_floor.npz",
+      "lut": "outputs_new/cam0_x-0.23_y-0.86_z10.50_yaw-91.30_pit-38.55_rol-0.40_f90.25_pixel2world_lut_floor.npz",
       "undistort": "realtime/disto/cam30_calibration_results_params.npz",
-      "visible_ply": "modify_ply/cam0_x0.18_y-1.65_z10.40_yaw-90.80_pit-36.95_rol0.00_f90.25_crop.ply",
+      "visible_ply": "modify_ply/cam0_x-0.23_y-0.86_z10.50_yaw-91.30_pit-38.55_rol-0.40_f90.25_crop.ply",
       "conf": 0.8
     },
     {
