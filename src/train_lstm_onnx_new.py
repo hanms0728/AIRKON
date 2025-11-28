@@ -1003,7 +1003,7 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
 
     # 저장 경로 & CSV
-    parser.add_argument("--save-dir", type=str, default="./runs/2_5d_lstm")
+    parser.add_argument("--save-dir", type=str, default="./runs/2_5d_lstm_real_cohsow_v5")
     parser.add_argument("--log-csv", type=str, default=None)  # None이면 save-dir 내부에 자동 생성
 
     # ───────── Temporal 옵션 ─────────
@@ -1183,22 +1183,34 @@ def main():
     print(f"[Save] base='{model_stem}', save_dir='{save_dir}'")
 
     def run_epoch(loader, train=True, epoch_idx=0, eval_cfg=None, val_mode="metrics"):
+        # ----- p0 가중치 워밍업 -----
         warmup_ep = 5
         w = 0.5 + 0.5 * min(epoch_idx, warmup_ep-1) / (warmup_ep-1)
         criterion.set_p0_weight(w)
 
+        # ----- temporal consistency / temporal smoothness 스케줄 (teacher forcing 느낌) -----
+        # 초반엔 순수 detection 위주로 학습하고, 에폭이 진행될수록 temporal constraint를 강하게 거는 구조
+        tf_warmup_ep = max(3, EPOCHS // 4)  # 전체의 1/4 정도까지는 서서히 키움
+        tf_ratio = min(1.0, epoch_idx / max(1, tf_warmup_ep))  # 0 → 1
+        lambda_cons_eff = args.lambda_consistency * tf_ratio
+        lambda_temp_eff = args.lambda_temp_objcls * tf_ratio
+
         if train:
-            if epoch_idx < args.freeze_bb_epochs: set_requires_grad(model.backbone_neck, False)
-            else: set_requires_grad(model.backbone_neck, True)
+            if epoch_idx < args.freeze_bb_epochs:
+                set_requires_grad(model.backbone_neck, False)
+            else:
+                set_requires_grad(model.backbone_neck, True)
 
         model.train(mode=train)
         collect_metrics = (not train) and (eval_cfg is not None)
-        metric_records = []; total_gt = 0
+        metric_records = []
+        total_gt = 0
 
         tot = treg = tobj = tcls = tpos = tp0 = tp12 = tcons = 0.0
-        nb = 0; batches_seen = 0
+        nb = 0
+        batches_seen = 0
 
-        pbar = tqdm(loader, desc=f"{'Train' if train else 'Val'} {epoch_idx+1}/{EPOCHS} (p0_w={w:.2f})")
+        pbar = tqdm(loader, desc=f"{'Train' if train else 'Val'} {epoch_idx+1}/{EPOCHS} (p0_w={w:.2f}, tf={tf_ratio:.2f})")
         for batch in pbar:
             # --- 배치 시작 시 state 처리 ---
             if args.temporal != "none":
@@ -1208,20 +1220,26 @@ def main():
                     else:
                         model.detach_temporal()
                 else:
+                    # 평가 때는 항상 시퀀스 단위로 깨끗하게
                     model.reset_temporal()
             # -------------------------------
 
             if args.seq_len >= 2:
+                # ===== 시퀀스 경로 =====
                 imgs_bt, tgts_bt, names_bt, vids_bt, T = batch   # imgs: (B,T,3,H,W)
                 B = imgs_bt.size(0)
 
                 if train:
-                    opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
+                    opt_bb.zero_grad(set_to_none=True)
+                    opt_hd.zero_grad(set_to_none=True)
 
-                logs_accum = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,
-                              "loss_p0":0,"loss_p12":0,"loss_cons":0,"pos":0,"neg":0}
+                logs_accum = {
+                    "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
+                    "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
+                }
 
                 bad_batch = False
+                accum_full_loss = torch.tensor(0.0, device=DEVICE)
 
                 # temporal supervisory / consistency용 이전 step 출력
                 prev_reg_last = None
@@ -1231,7 +1249,10 @@ def main():
                 for tstep in range(T):
                     imgs = imgs_bt[:, tstep].to(DEVICE, non_blocking=True)
                     targets_cpu = [tgts_bt[b][tstep] for b in range(B)]
-                    targets_dev = [{"points": t["points"].to(DEVICE), "labels": t["labels"].to(DEVICE)} for t in targets_cpu]
+                    targets_dev = [{
+                        "points": t["points"].to(DEVICE),
+                        "labels": t["labels"].to(DEVICE)
+                    } for t in targets_cpu]
 
                     if train:
                         with amp_autocast():
@@ -1243,58 +1264,58 @@ def main():
                             last_reg, last_obj, last_cls = outs[-1]  # (B,6,H,W), (B,1,H,W), (B,C,H,W)
 
                             # (1) reg consistency: 연속 frame의 reg 맵을 부드럽게 만들기
-                            if args.lambda_consistency > 0.0 and prev_reg_last is not None:
-                                cons_loss = cons_loss + args.lambda_consistency * F.smooth_l1_loss(
+                            if lambda_cons_eff > 0.0 and prev_reg_last is not None:
+                                cons_loss = cons_loss + lambda_cons_eff * F.smooth_l1_loss(
                                     last_reg, prev_reg_last.detach()
                                 )
 
                             # (2) obj / cls temporal smoothness
-                            if args.lambda_temp_objcls > 0.0 and prev_obj_last is not None and prev_cls_last is not None:
-                                cons_loss = cons_loss + args.lambda_temp_objcls * (
+                            if lambda_temp_eff > 0.0 and prev_obj_last is not None and prev_cls_last is not None:
+                                cons_loss = cons_loss + lambda_temp_eff * (
                                     F.mse_loss(last_obj, prev_obj_last.detach()) +
                                     F.mse_loss(last_cls, prev_cls_last.detach())
                                 )
 
-                            # 다음 step을 위한 이전값 업데이트 (graph 분리)
+                            # 다음 step을 위한 이전값 업데이트 (graph 분리 → self-teacher forcing 느낌)
                             prev_reg_last = last_reg.detach()
                             prev_obj_last = last_obj.detach()
                             prev_cls_last = last_cls.detach()
 
-                            full_loss = base_loss + cons_loss
-                        # ------------------------------------------------------------------- #
+                            full_loss_t = base_loss + cons_loss
 
-                        if not torch.isfinite(full_loss):
+                        if not torch.isfinite(full_loss_t):
                             bad_batch = True
                             break
 
-                        # TBPTT 옵션: step마다 hidden detach (이미 state 쪽 detach_temporal로 제어)
-                        scaler.scale(full_loss / T).backward()
-                        if args.tbptt_detach and args.temporal != "none":
-                            model.detach_temporal()
+                        # --- 시퀀스 전체를 한 번에 backward 하기 위해 누적 ---
+                        accum_full_loss = accum_full_loss + full_loss_t / T
 
-                        # 로그에 consistency 항까지 포함해서 기록
-                        logs["loss_total"] = logs.get("loss_total", 0.0) + float(cons_loss.detach().item())
+                        # 로그: consistency까지 포함
+                        logs["loss_total"] = float(base_loss.detach().item() + cons_loss.detach().item())
                         logs["loss_cons"] = float(cons_loss.detach().item())
-
                     else:
                         if val_mode == "loss":
                             with torch.inference_mode():
                                 outs = model(imgs, use_temporal=True)
                                 base_loss, logs = criterion(outs, targets_dev, model.strides)
-                            # 검증 시에는 consistency를 별도로 최적화에 쓰지 않고, 로그도 base loss만 사용
                             logs["loss_cons"] = 0.0
                         else:
                             with torch.inference_mode(), amp_autocast():
                                 outs = model(imgs, use_temporal=True)
                             base_loss = torch.tensor(0., device=imgs.device)
-                            logs = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,
-                                    "loss_p0":0,"loss_p12":0,"loss_cons":0,"pos":0,"neg":0}
+                            logs = {
+                                "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
+                                "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
+                            }
 
+                        # 검증 시에는 full_loss를 backward 안 하므로 accum_full_loss는 사용 X
+
+                    # 로그 누적
                     for k in logs_accum.keys():
                         logs_accum[k] += logs.get(k, 0.0)
 
                     # 메트릭: 시퀀스 마지막 step만 평가
-                    if collect_metrics and (tstep == T-1):
+                    if collect_metrics and (tstep == T - 1):
                         decoded = decode_predictions(
                             outs, model.strides,
                             clip_cells=eval_cfg.get("clip_cells", None),
@@ -1308,12 +1329,28 @@ def main():
                         for dets_img, tgt_cpu in zip(decoded, [tgts_bt[b][tstep] for b in range(B)]):
                             gt_tri = tgt_cpu["points"].cpu().numpy()
                             records, _ = evaluate_single_image(dets_img, gt_tri, iou_thr=eval_cfg.get("iou_thr", 0.5))
-                            metric_records.extend(records); total_gt += gt_tri.shape[0]
+                            metric_records.extend(records)
+                            total_gt += gt_tri.shape[0]
 
+                    # TBPTT 모드면 time-step마다 hidden detach (긴 시퀀스에서 폭주 방지)
+                    if args.tbptt_detach and args.temporal != "none":
+                        model.detach_temporal()
+
+                # ---- 시퀀스 끝, 이제 한 번만 backward ----
                 if train:
                     if bad_batch and args.skip_bad_batch:
-                        # 배치 스킵: grad 초기화 후 상태 리셋
-                        opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
+                        opt_bb.zero_grad(set_to_none=True)
+                        opt_hd.zero_grad(set_to_none=True)
+                        if args.temporal != "none":
+                            model.reset_temporal()
+                        pbar.set_postfix_str("skip bad batch (NaN/Inf)")
+                        continue
+
+                    if torch.isfinite(accum_full_loss):
+                        scaler.scale(accum_full_loss).backward()
+                    elif args.skip_bad_batch:
+                        opt_bb.zero_grad(set_to_none=True)
+                        opt_hd.zero_grad(set_to_none=True)
                         if args.temporal != "none":
                             model.reset_temporal()
                         pbar.set_postfix_str("skip bad batch (NaN/Inf)")
@@ -1323,20 +1360,24 @@ def main():
                     has_bb = _opt_has_grad(opt_bb)
                     has_hd = _opt_has_grad(opt_hd)
 
-                    if has_bb: scaler.unscale_(opt_bb)
-                    if has_hd: scaler.unscale_(opt_hd)
+                    if has_bb:
+                        scaler.unscale_(opt_bb)
+                    if has_hd:
+                        scaler.unscale_(opt_hd)
 
-                    # 비정상 grad 제거 + norm clip
                     _sanitize_grads(model)
                     nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
 
-                    if has_bb: scaler.step(opt_bb)
-                    if has_hd: scaler.step(opt_hd)
+                    if has_bb:
+                        scaler.step(opt_bb)
+                    if has_hd:
+                        scaler.step(opt_hd)
                     scaler.update()
                     # -------------------------------------------
 
                 # 평균 로그로 표시
-                logs_mean = {k:(v/ T if isinstance(v,(int,float,float)) else v) for k,v in logs_accum.items()}
+                logs_mean = {k: (v / max(1, T) if isinstance(v, (int, float, float)) else v)
+                             for k, v in logs_accum.items()}
                 tot  += logs_mean["loss_total"]
                 treg += logs_mean["loss_reg"]
                 tobj += logs_mean["loss_obj"]
@@ -1348,17 +1389,21 @@ def main():
                 nb   += 1
 
             else:
-                # 단일 프레임 경로
+                # ===== 단일 프레임 경로 =====
                 imgs, targets_cpu, _ = batch
                 imgs = imgs.to(DEVICE, non_blocking=True)
-                targets_dev = [{"points": t["points"].to(DEVICE), "labels": t["labels"].to(DEVICE)} for t in targets_cpu]
+                targets_dev = [{
+                    "points": t["points"].to(DEVICE),
+                    "labels": t["labels"].to(DEVICE)
+                } for t in targets_cpu]
 
                 if train:
-                    opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
+                    opt_bb.zero_grad(set_to_none=True)
+                    opt_hd.zero_grad(set_to_none=True)
                     with amp_autocast():
                         outs = model(imgs, use_temporal=True)
                         loss, logs = criterion(outs, targets_dev, model.strides)
-                    # seq_len==1 이면 consistency loss는 적용 안 함 (정의 자체가 T>1 전제)
+                    # seq_len==1 이면 consistency는 정의 불가 → 0
                     logs["loss_cons"] = 0.0
 
                     if torch.isfinite(loss):
@@ -1367,21 +1412,22 @@ def main():
                         pbar.set_postfix_str("skip bad batch (NaN/Inf)")
                         continue
 
-                    # ---- GradScaler 안전 스텝 (freeze 대응) ----
                     has_bb = _opt_has_grad(opt_bb)
                     has_hd = _opt_has_grad(opt_hd)
 
-                    if has_bb: scaler.unscale_(opt_bb)
-                    if has_hd: scaler.unscale_(opt_hd)
+                    if has_bb:
+                        scaler.unscale_(opt_bb)
+                    if has_hd:
+                        scaler.unscale_(opt_hd)
 
                     _sanitize_grads(model)
-                    nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm=args.max_grad_norm)
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
 
-                    if has_bb: scaler.step(opt_bb)
-                    if has_hd: scaler.step(opt_hd)
+                    if has_bb:
+                        scaler.step(opt_bb)
+                    if has_hd:
+                        scaler.step(opt_hd)
                     scaler.update()
-                    # -------------------------------------------
-
                 else:
                     if val_mode == "loss":
                         with torch.inference_mode():
@@ -1392,20 +1438,34 @@ def main():
                         with torch.inference_mode(), amp_autocast():
                             outs = model(imgs, use_temporal=True)
                         loss = torch.tensor(0., device=imgs.device)
-                        logs = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,
-                                "loss_p0":0,"loss_p12":0,"loss_cons":0,"pos":0,"neg":0}
+                        logs = {
+                            "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
+                            "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
+                        }
 
-                tot+=logs["loss_total"]; treg+=logs["loss_reg"]; tobj+=logs["loss_obj"]
-                tcls+=logs["loss_cls"]; tp0+=logs["loss_p0"]; tp12+=logs["loss_p12"]
-                tcons+=logs.get("loss_cons", 0.0)
-                tpos+=logs["pos"]; nb+=1
+                tot  += logs["loss_total"]
+                treg += logs["loss_reg"]
+                tobj += logs["loss_obj"]
+                tcls += logs["loss_cls"]
+                tp0  += logs["loss_p0"]
+                tp12 += logs["loss_p12"]
+                tcons+= logs.get("loss_cons", 0.0)
+                tpos += logs["pos"]
+                nb   += 1
 
-            lr_bb = opt_bb.param_groups[0]['lr']; lr_hd = opt_hd.param_groups[0]['lr']
-            pbar.set_postfix(loss=(tot/nb if nb>0 else 0), reg=(treg/nb if nb>0 else 0),
-                             obj=(tobj/nb if nb>0 else 0), p0=(tp0/nb if nb>0 else 0),
-                             p12=(tp12/nb if nb>0 else 0), cons=(tcons/nb if nb>0 else 0),
-                             cls=(tcls/nb if nb>0 else 0),
-                             pos=(tpos/nb if nb>0 else 0), lr_bb=lr_bb, lr_hd=lr_hd)
+            lr_bb = opt_bb.param_groups[0]['lr']
+            lr_hd = opt_hd.param_groups[0]['lr']
+            pbar.set_postfix(
+                loss=(tot/nb if nb>0 else 0),
+                reg=(treg/nb if nb>0 else 0),
+                obj=(tobj/nb if nb>0 else 0),
+                p0=(tp0/nb if nb>0 else 0),
+                p12=(tp12/nb if nb>0 else 0),
+                cons=(tcons/nb if nb>0 else 0),
+                cls=(tcls/nb if nb>0 else 0),
+                pos=(tpos/nb if nb>0 else 0),
+                lr_bb=lr_bb, lr_hd=lr_hd
+            )
 
             batches_seen += 1
             if (not train) and args.val_max_batches is not None and batches_seen >= args.val_max_batches:
@@ -1503,9 +1563,12 @@ if __name__ == "__main__":
 
 
 """
-python train_lstm_onnx.py \
+python train_lstm_onnx_new.py \
   --train-root ./output_all \
-  --seq-len 4 --temporal gru \
+  --weights ./runs/yolo11m_2_5d_real_coshow_v3.pth \
+  --start-epoch 5 --batch 6 \
+  --seq-len 4 --temporal lstm \
   --lambda-consistency 0.1 \
-  --lambda-temp-objcls 0.01
+  --lambda-temp-objcls 0.01   --img-h 864 --img-w 1536
+
 """
