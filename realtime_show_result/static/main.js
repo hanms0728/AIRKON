@@ -2742,19 +2742,6 @@ function updateDetectionFollowPose(detections) {
     camera.up.set(0, 0, 1);
     camera.lookAt(controls.target);
     follow.lastCenter = center;
-    // 충돌코드?
-    const colorInfo = getDetectionColorInfo(det);
-    if (colorInfo) {
-        const { label, hex } = colorInfo;
-        const colorText = label && hex
-            ? `${label} (${hex})`
-            : (label || hex);
-        if (colorText) {
-            tags.push(`color ${colorText}`);
-        }
-    }
-    const tagText = tags.join(" | ") || `class ${det.class_id ?? "-"}`;
-    return `#${idx + 1} | ${tagText} | x ${center[0].toFixed(2)} | y ${center[1].toFixed(2)} | z ${center[2].toFixed(2)} | yaw ${Number(yaw).toFixed(1)}°`;
 }
 
 function matchesAdminHotkey(evt) {
