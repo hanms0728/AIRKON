@@ -626,9 +626,25 @@ def main():
     csv_path = Path(args.log_csv) if args.log_csv else (save_dir / f"{model_stem}_train_log.csv")
     need_header = (not csv_path.exists())
 
-    # 데이터 경로
-    train_img_dir = os.path.join(args.train_root, "images")
-    train_label_dir = os.path.join(args.train_root, "labels")
+    # 데이터 경로 및 Dataset 생성
+    # Detect flat vs multi-folder mode
+    flat_img = os.path.join(args.train_root, "images")
+    flat_lab = os.path.join(args.train_root, "labels")
+
+    if os.path.isdir(flat_img) and os.path.isdir(flat_lab):
+        # Flat mode
+        train_dataset = ParallelogramDataset(
+            img_dir=flat_img,
+            label_dir=flat_lab,
+            target_size=IMG_SIZE
+        )
+    else:
+        # Multi-folder mode (root contains multiple cam folders)
+        train_dataset = ParallelogramDataset(
+            img_dir=args.train_root,
+            label_dir=args.train_root,
+            target_size=IMG_SIZE
+        )
 
     if args.val_mode != "none":
         val_root = args.val_root or args.train_root
@@ -661,7 +677,6 @@ def main():
     # --------------------------
     # Dataset / DataLoader
     # --------------------------
-    train_dataset = ParallelogramDataset(train_img_dir, train_label_dir, target_size=IMG_SIZE)
     if len(train_dataset) == 0:
         print("No training data. Exit.")
         return
