@@ -547,7 +547,7 @@ def main():
     parser.add_argument("--train-root", type=str, default="./output_all")
     parser.add_argument("--val-root", type=str, default=None)
     parser.add_argument("--val-mode", choices=["none","loss","metrics"], default="metrics")
-    parser.add_argument("--val-interval", type=int, default=10)
+    parser.add_argument("--val-interval", type=int, default=1)
     parser.add_argument("--val-batch", type=int, default=4)
     parser.add_argument("--val-max-batches", type=int, default=None)
 
@@ -975,7 +975,7 @@ if __name__ == "__main__":
 """
 python -m src.train --train-root /home/ubuntu24/code/new_start/data/clean/ \
  --val-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1/cam12_37_5 \
- --weights onnx/base_pth/yolo11m_2_5d_real_coshow_v3.pth \
+ --weights runs/yolo11_2_5d_real_coshow_v5/pth/yolo11m_2_5d_epoch_008.pth \
  --export-onnx --save-dir ./runs/yolo11_2_5d_real_coshow_v5 \
- --start-epoch 5
+ --start-epoch 9
 """
