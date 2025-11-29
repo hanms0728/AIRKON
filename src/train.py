@@ -19,9 +19,9 @@ from torch.utils.data import Dataset, DataLoader
 from ultralytics import YOLO
 from tqdm import tqdm
 
-from geometry_utils import parallelogram_from_triangle as _para
-from geometry_utils import aabb_of_poly4, iou_aabb_xywh
-from evaluation_utils import decode_predictions, evaluate_single_image, compute_detection_metrics
+from src.geometry_utils import parallelogram_from_triangle as _para
+from src.geometry_utils import aabb_of_poly4, iou_aabb_xywh
+from src.evaluation_utils import decode_predictions, evaluate_single_image, compute_detection_metrics
 
 torch.backends.cudnn.benchmark = True
 
@@ -135,26 +135,28 @@ class ParallelogramDataset(Dataset):
                     ))
 
         else:
-            # multi-folder 구조
+            # multi-folder 구조 (각 subfolder 아래 images/, labels/ 존재)
             for sub in sorted(os.listdir(self.img_dir)):
-                sub_img = os.path.join(self.img_dir, sub)
-                sub_lab = os.path.join(self.label_dir, sub)
-                if not os.path.isdir(sub_img): 
+                sub_root = os.path.join(self.img_dir, sub)
+                if not os.path.isdir(sub_root):
                     continue
-                if not os.path.isdir(sub_lab):
+
+                sub_img = os.path.join(sub_root, "images")
+                sub_lab = os.path.join(sub_root, "labels")
+                if (not os.path.isdir(sub_img)) or (not os.path.isdir(sub_lab)):
                     continue
                 if not has_image_files(sub_img):
                     continue
 
                 image_filenames = sorted([
                     f for f in os.listdir(sub_img)
-                    if f.lower().endswith(('.jpg','.jpeg','.png'))
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))
                 ])
+
                 for fname in image_filenames:
                     stem = os.path.splitext(fname)[0]
                     lab_path = os.path.join(sub_lab, stem + '.txt')
                     if os.path.exists(lab_path):
-                        # prefix filenames to avoid collision
                         out_name = f"{sub}__{fname}"
                         collected.append((
                             os.path.join(sub_img, fname),
@@ -469,15 +471,12 @@ class Strict2_5DLoss(nn.Module):
 # ================================================
 # 8. Checkpoint & ONNX Export 유틸
 # ================================================
-def save_ckpt(path, epoch, model, opt_bb, opt_hd,
-              sched_bb, sched_hd, scaler, best_val, extra: dict = None):
+def save_ckpt(path, epoch, model, opt_all, sched_all ,scaler, best_val, extra: dict = None):
     ckpt = {
         "epoch": epoch,
         "model": model.state_dict(),
-        "opt_bb": opt_bb.state_dict(),
-        "opt_hd": opt_hd.state_dict(),
-        "sched_bb": sched_bb.state_dict(),
-        "sched_hd": sched_hd.state_dict(),
+        "opt_all": opt_all.state_dict(),
+        "sched_all": sched_all.state_dict(),
         "scaler": scaler.state_dict(),
         "best_val": best_val,
     }
@@ -486,21 +485,13 @@ def save_ckpt(path, epoch, model, opt_bb, opt_hd,
     torch.save(ckpt, path)
 
 
-def load_ckpt(path, device, model, opt_bb, opt_hd,
-              sched_bb, sched_hd, scaler):
+def load_ckpt(path, device, model, opt_all, sched_all, scaler):
     ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"], strict=True)
-    opt_bb.load_state_dict(ckpt["opt_bb"])
-    opt_hd.load_state_dict(ckpt["opt_hd"])
-    if "sched_bb" in ckpt:
-        sched_bb.load_state_dict(ckpt["sched_bb"])
-    if "sched_hd" in ckpt:
-        sched_hd.load_state_dict(ckpt["sched_hd"])
-    if "scaler" in ckpt:
-        scaler.load_state_dict(ckpt["scaler"])
-    epoch = ckpt.get("epoch", 0)
-    best_val = ckpt.get("best_val", -1.0)
-    return epoch, best_val
+    model.load_state_dict(ckpt["model"])
+    opt_all.load_state_dict(ckpt["opt_all"])
+    sched_all.load_state_dict(ckpt["sched_all"])
+    scaler.load_state_dict(ckpt["scaler"])
+    return ckpt["epoch"], ckpt.get("best_val", 0)
 
 
 def export_onnx(model, onnx_path: Path, img_size, device, opset=12):
@@ -605,6 +596,13 @@ def main():
 
     args = parser.parse_args()
 
+    IMG_SIZE = (args.img_h, args.img_w)
+    TRAIN_BATCH = args.batch
+    EPOCHS = args.epochs
+    LR_MIN = args.lr_min
+    WD = args.wd
+    NUM_CLASSES = 1
+
     # --------------------------
     # 경로 설정
     # --------------------------
@@ -653,12 +651,6 @@ def main():
     else:
         val_img_dir = val_label_dir = None
 
-    IMG_SIZE = (args.img_h, args.img_w)
-    TRAIN_BATCH = args.batch
-    EPOCHS = args.epochs
-    LR_MIN = args.lr_min
-    WD = args.wd
-    NUM_CLASSES = 1
 
     # 평가 config
     eval_cfg = None
@@ -730,25 +722,15 @@ def main():
     head_params = list(model.heads.parameters())
     bb_params = [p for n,p in model.named_parameters() if not n.startswith("heads.")]
 
-    opt_bb = optim.SGD(
-        bb_params,
-        lr=args.lr_bb,
-        momentum=0.9,
-        weight_decay=WD,
-        nesterov=True
-    )
-    opt_hd = optim.AdamW(
-        head_params,
+    opt_all = optim.AdamW(
+        model.parameters(),
         lr=args.lr_hd,
         betas=(0.9, 0.999),
         weight_decay=WD
     )
 
-    sched_bb = optim.lr_scheduler.CosineAnnealingLR(
-        opt_bb, T_max=EPOCHS, eta_min=LR_MIN
-    )
-    sched_hd = optim.lr_scheduler.CosineAnnealingLR(
-        opt_hd, T_max=EPOCHS, eta_min=LR_MIN
+    sched_all = optim.lr_scheduler.CosineAnnealingLR(
+        opt_all, T_max=EPOCHS, eta_min=LR_MIN
     )
 
     scaler = GradScaler(enabled=(DEVICE == "cuda"))
@@ -764,7 +746,7 @@ def main():
             writer.writerow([
                 "epoch","train_loss","val_loss",
                 "precision","recall","map50","mAOE_deg",
-                "lr_bb","lr_hd","best_map"
+                "lr_all","best_map"
             ])
 
     # best 값 초기화
@@ -775,7 +757,7 @@ def main():
     if args.resume is not None:
         start_ep, best_val = load_ckpt(
             args.resume, DEVICE, model,
-            opt_bb, opt_hd, sched_bb, sched_hd, scaler
+            opt_all, scaler
         )
         print(f"[Resume] {args.resume} -> start_ep={start_ep}, best_val={best_val:.4f}")
     elif args.weights is not None:
@@ -824,15 +806,14 @@ def main():
             ]
 
             if train:
-                opt_bb.zero_grad(set_to_none=True)
-                opt_hd.zero_grad(set_to_none=True)
+                opt_all.zero_grad(set_to_none=True)
+
                 with amp_autocast():
                     outs = model(imgs)
                     loss, logs = criterion(outs, targets_dev, model.strides)
                 scaler.scale(loss).backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-                scaler.step(opt_bb)
-                scaler.step(opt_hd)
+                scaler.step(opt_all)
                 scaler.update()
             else:
                 if val_mode == "loss":
@@ -857,8 +838,7 @@ def main():
             tpos += logs["pos"]
             nb   += 1
 
-            lr_bb = opt_bb.param_groups[0]["lr"]
-            lr_hd = opt_hd.param_groups[0]["lr"]
+            lr_all = opt_all.param_groups[0]["lr"]
             pbar.set_postfix(
                 loss=(tot/nb if nb>0 else 0),
                 reg=(treg/nb if nb>0 else 0),
@@ -867,8 +847,7 @@ def main():
                 p12=(tp12/nb if nb>0 else 0),
                 cls=(tcls/nb if nb>0 else 0),
                 pos=(tpos/nb if nb>0 else 0),
-                lr_bb=lr_bb,
-                lr_hd=lr_hd,
+                lr_bb=lr_all,
             )
 
             if collect_metrics:
@@ -958,8 +937,7 @@ def main():
                         export_onnx(model, best_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
 
         # 스케줄러
-        sched_bb.step()
-        sched_hd.step()
+        sched_all.step()
 
         # epoch별 pth & ckpt 저장
         pth_path  = pth_dir  / f"{model_stem}_2_5d_epoch_{ep+1:03d}.pth"
@@ -967,15 +945,13 @@ def main():
         torch.save(model.state_dict(), pth_path)
         save_ckpt(
             ckpt_path, epoch=ep+1, model=model,
-            opt_bb=opt_bb, opt_hd=opt_hd,
-            sched_bb=sched_bb, sched_hd=sched_hd,
+            opt_all=opt_all, sched_all=sched_all,
             scaler=scaler, best_val=best_val
         )
         print(f"  -> saved {pth_path} and {ckpt_path}")
 
         # CSV 로깅
-        lr_bb = opt_bb.param_groups[0]["lr"]
-        lr_hd = opt_hd.param_groups[0]["lr"]
+        lr_all = opt_all.param_groups[0]["lr"]
         with open(csv_path, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -986,8 +962,7 @@ def main():
                 "" if curr_rec  is None else f"{curr_rec:.6f}",
                 "" if curr_map  is None else f"{curr_map:.6f}",
                 "" if curr_maoe is None else f"{curr_maoe:.6f}",
-                f"{lr_bb:.6e}",
-                f"{lr_hd:.6e}",
+                f"{lr_all:.6e}",
                 f"{best_val:.6f}" if isinstance(best_val,float) else best_val
             ])
 
@@ -996,3 +971,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python -m src.train --train-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1 \
+ --val-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1/cam12_37_5 \
+ --weights onnx/base_pth/yolo11m_2_5d_real_coshow_v3.pth \
+ --export-onnx --save-dir ./runs/yolo11_2_5d_real_coshow_v5 \
+ --start-epoch 5
+"""
