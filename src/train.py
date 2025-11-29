@@ -548,7 +548,7 @@ def main():
     parser.add_argument("--val-root", type=str, default=None)
     parser.add_argument("--val-mode", choices=["none","loss","metrics"], default="metrics")
     parser.add_argument("--val-interval", type=int, default=10)
-    parser.add_argument("--val-batch", type=int, default=16)
+    parser.add_argument("--val-batch", type=int, default=4)
     parser.add_argument("--val-max-batches", type=int, default=None)
 
     # 평가 하이퍼
@@ -577,7 +577,7 @@ def main():
     # 공통 하이퍼
     parser.add_argument("--img-h", type=int, default=864)
     parser.add_argument("--img-w", type=int, default=1536)
-    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--wd", type=float, default=1e-4)
     parser.add_argument("--lr-bb", type=float, default=2e-4)
@@ -973,7 +973,7 @@ if __name__ == "__main__":
     main()
 
 """
-python -m src.train --train-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1 \
+python -m src.train --train-root /home/ubuntu24/code/new_start/data/clean/ \
  --val-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1/cam12_37_5 \
  --weights onnx/base_pth/yolo11m_2_5d_real_coshow_v3.pth \
  --export-onnx --save-dir ./runs/yolo11_2_5d_real_coshow_v5 \
