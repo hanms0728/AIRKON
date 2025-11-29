@@ -105,22 +105,71 @@ class ParallelogramDataset(Dataset):
         self.label_dir = label_dir
         self.Ht, self.Wt = target_size
 
-        image_filenames = sorted([f for f in os.listdir(img_dir)
-            if f.lower().endswith(('.jpg','.jpeg','.png'))])
+        # Support both:
+        # ① root/images , root/labels     (flat mode)
+        # ② root/<seq1>/images , root/<seq1>/labels
+        #    root/<seq2>/images , root/<seq2>/labels   (multi-folder mode)
 
-        self.img_files = [
-            f for f in image_filenames
-            if os.path.exists(os.path.join(label_dir, os.path.splitext(f)[0] + '.txt'))
-        ]
+        def has_image_files(path):
+            return any(f.lower().endswith(('.jpg','.jpeg','.png')) for f in os.listdir(path))
 
-        print(f"[Dataset] matched pairs = {len(self.img_files)}")
+        # Detect flat mode
+        flat_mode = has_image_files(self.img_dir)
 
-    def __len__(self): return len(self.img_files)
+        collected = []  # list of (img_path , label_path , name)
+
+        if flat_mode:
+            # 기존 방식
+            image_filenames = sorted([
+                f for f in os.listdir(self.img_dir)
+                if f.lower().endswith(('.jpg','.jpeg','.png'))
+            ])
+            for fname in image_filenames:
+                stem = os.path.splitext(fname)[0]
+                lab_path = os.path.join(self.label_dir, stem + '.txt')
+                if os.path.exists(lab_path):
+                    collected.append((
+                        os.path.join(self.img_dir, fname),
+                        lab_path,
+                        fname
+                    ))
+
+        else:
+            # multi-folder 구조
+            for sub in sorted(os.listdir(self.img_dir)):
+                sub_img = os.path.join(self.img_dir, sub)
+                sub_lab = os.path.join(self.label_dir, sub)
+                if not os.path.isdir(sub_img): 
+                    continue
+                if not os.path.isdir(sub_lab):
+                    continue
+                if not has_image_files(sub_img):
+                    continue
+
+                image_filenames = sorted([
+                    f for f in os.listdir(sub_img)
+                    if f.lower().endswith(('.jpg','.jpeg','.png'))
+                ])
+                for fname in image_filenames:
+                    stem = os.path.splitext(fname)[0]
+                    lab_path = os.path.join(sub_lab, stem + '.txt')
+                    if os.path.exists(lab_path):
+                        # prefix filenames to avoid collision
+                        out_name = f"{sub}__{fname}"
+                        collected.append((
+                            os.path.join(sub_img, fname),
+                            lab_path,
+                            out_name
+                        ))
+
+        self.items = collected
+        print(f"[Dataset] matched pairs = {len(self.items)}")
+
+    def __len__(self):
+        return len(self.items)
 
     def __getitem__(self, idx):
-        name = self.img_files[idx]
-        img_path = os.path.join(self.img_dir, name)
-        lab_path = os.path.join(self.label_dir, os.path.splitext(name)[0] + ".txt")
+        img_path, lab_path, name = self.items[idx]
 
         img_bgr = cv2.imread(img_path)
         H0, W0 = img_bgr.shape[:2]
