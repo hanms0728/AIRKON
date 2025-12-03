@@ -114,18 +114,20 @@ def _decode_predictions_impl(
 
             # 점수 맵 만들기
             obj_map = torch.sigmoid(obj[b, 0])  # (Hs,Ws)
-            if cls.shape[1] == 1:
-                cls_map = torch.sigmoid(cls[b, 0])  # (Hs,Ws)
+            cls_logits = cls[b]
+            if cls_logits.shape[0] == 1:
+                cls_score_map = torch.sigmoid(cls_logits[0])
+                cls_id_map = torch.zeros_like(cls_score_map, dtype=torch.long)
             else:
-                # 멀티클래스 지원 필요 시 argmax 등 구현. 지금은 1-class 가정.
-                cls_map = torch.sigmoid(cls[b].max(dim=0).values)
+                cls_prob = torch.softmax(cls_logits, dim=0)
+                cls_score_map, cls_id_map = torch.max(cls_prob, dim=0)
 
             if score_mode == "obj":
                 score_map = obj_map
             elif score_mode == "cls":
-                score_map = cls_map
+                score_map = cls_score_map
             else:  # "obj*cls"
-                score_map = obj_map * cls_map
+                score_map = obj_map * cls_score_map
 
             thr = _resolve_conf_threshold(conf_th, cam_id)
             keep = score_map > thr
@@ -137,6 +139,8 @@ def _decode_predictions_impl(
             ys = keep_idx[:, 0].float()
             xs = keep_idx[:, 1].float()
             scores = score_map[keep]
+            cls_scores = cls_score_map[keep]
+            cls_ids = cls_id_map[keep]
 
             # 회귀 맵: (Hs,Ws,3,2)
             reg_map = reg[b].detach().permute(1, 2, 0).reshape(obj_map.shape[0], obj_map.shape[1], 3, 2)
@@ -154,9 +158,18 @@ def _decode_predictions_impl(
             # dets 작성 + NMS용 AABB 수집
             tri_np = pred_tri.cpu().numpy()
             scores_np = scores.detach().cpu().numpy()
-            for tri_pts, sc in zip(tri_np, scores_np):
+            cls_scores_np = cls_scores.detach().cpu().numpy()
+            cls_ids_np = cls_ids.detach().cpu().numpy()
+            for tri_pts, sc, cls_sc, cls_idx in zip(tri_np, scores_np, cls_scores_np, cls_ids_np):
                 poly4 = parallelogram_from_triangle(tri_pts[0], tri_pts[1], tri_pts[2])
-                dets.append({"score": float(sc), "poly4": poly4, "tri": tri_pts})
+                dets.append({
+                    "score": float(sc),
+                    "cls_score": float(cls_sc),
+                    "class_id": int(cls_idx),
+                    "cls": int(cls_idx),
+                    "poly4": poly4,
+                    "tri": tri_pts
+                })
                 # NMS용 xyxy
                 x0, y0 = poly4[:,0].min(), poly4[:,1].min()
                 x1, y1 = poly4[:,0].max(), poly4[:,1].max()
@@ -228,12 +241,16 @@ def decode_predictions(*args, **kwargs):
 
     return _decode_predictions_impl(cam_id, outputs, strides, **kwargs)
 
-def evaluate_single_image(preds, gt_tris, iou_thr=0.5):
+def evaluate_single_image(preds, gt_tris, gt_classes=None, iou_thr=0.5):
     gt_tris = np.asarray(gt_tris)
     num_gt = gt_tris.shape[0]
+    if gt_classes is not None:
+        gt_classes = np.asarray(gt_classes).reshape(-1)
+        if gt_classes.shape[0] != num_gt:
+            raise ValueError("gt_classes length must match gt_tris length")
     preds_sorted = sorted(preds, key=lambda d: d["score"], reverse=True)
     if num_gt == 0:
-        records = [(det["score"], 0, 0.0, None) for det in preds_sorted]
+        records = [(det["score"], 0, 0.0, None, int(det.get("class_id", det.get("cls", 0)))) for det in preds_sorted]
         return records, 0
 
     gt_boxes = [aabb_of_poly4(parallelogram_from_triangle(tri[0], tri[1], tri[2])) for tri in gt_tris]
@@ -242,10 +259,13 @@ def evaluate_single_image(preds, gt_tris, iou_thr=0.5):
 
     for det in preds_sorted:
         pred_box = aabb_of_poly4(det["poly4"])
+        det_cls = int(det.get("class_id", det.get("cls", 0)))
         best_iou = 0.0
         best_idx = -1
         for idx, gt_box in enumerate(gt_boxes):
             if matched[idx]:
+                continue
+            if gt_classes is not None and det_cls != int(gt_classes[idx]):
                 continue
             # aabb IoU
             ax0, ay0, aw, ah = pred_box
@@ -264,9 +284,9 @@ def evaluate_single_image(preds, gt_tris, iou_thr=0.5):
         if best_idx >= 0 and best_iou >= iou_thr:
             matched[best_idx] = True
             orient_err = orientation_error_deg(det["tri"], gt_tris[best_idx])
-            records.append((det["score"], 1, best_iou, orient_err))
+            records.append((det["score"], 1, best_iou, orient_err, det_cls))
         else:
-            records.append((det["score"], 0, best_iou, None))
+            records.append((det["score"], 0, best_iou, None, det_cls))
 
     return records, sum(matched)
 

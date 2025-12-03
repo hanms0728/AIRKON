@@ -10,6 +10,12 @@ import argparse
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple
+from collections import defaultdict
+
+try:
+    import albumentations as A
+except ImportError:
+    A = None
 
 import torch
 import torch.nn as nn
@@ -104,6 +110,7 @@ class ParallelogramDataset(Dataset):
         self.img_dir = img_dir
         self.label_dir = label_dir
         self.Ht, self.Wt = target_size
+        self.transform = transform
 
         # Support both:
         # ① root/images , root/labels     (flat mode)
@@ -178,26 +185,68 @@ class ParallelogramDataset(Dataset):
 
         img_bgr = cv2.resize(img_bgr, (self.Wt, self.Ht), interpolation=cv2.INTER_LINEAR)
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img = img_rgb.transpose(2,0,1) / 255.0
-        img = torch.from_numpy(img).float()
 
         points_list = []
+        label_list = []
         with open(lab_path, "r") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) != 7: continue
-                _, p0x, p0y, p1x, p1y, p2x, p2y = parts
+                if len(parts) != 7:
+                    continue
+                cls_id, p0x, p0y, p1x, p1y, p2x, p2y = parts
                 sX = self.Wt / W0
                 sY = self.Ht / H0
                 p0 = [float(p0x)*sX, float(p0y)*sY]
                 p1 = [float(p1x)*sX, float(p1y)*sY]
                 p2 = [float(p2x)*sX, float(p2y)*sY]
                 points_list.append([p0,p1,p2])
+                label_list.append(int(float(cls_id)))
 
-        targets = {"points": torch.tensor(points_list, dtype=torch.float32),
-                   "labels": torch.zeros(len(points_list), dtype=torch.long)}
+        targets = {
+            "points": torch.tensor(points_list, dtype=torch.float32),
+            "labels": torch.tensor(label_list, dtype=torch.long)
+        }
+
+        if self.transform is not None:
+            flat_points = [tuple(pt) for tri in points_list for pt in tri]
+            aug = self.transform(image=img_rgb, keypoints=flat_points)
+            img_rgb = aug["image"]
+            aug_pts = aug["keypoints"]
+            if aug_pts and len(aug_pts) == len(flat_points):
+                new_points = []
+                for i in range(0, len(aug_pts), 3):
+                    new_points.append([
+                        list(aug_pts[i + 0]),
+                        list(aug_pts[i + 1]),
+                        list(aug_pts[i + 2])
+                    ])
+                points_list = new_points
+                targets["points"] = torch.tensor(points_list, dtype=torch.float32)
+
+        img = img_rgb.transpose(2,0,1) / 255.0
+        img = torch.from_numpy(img).float()
 
         return img, targets, name
+
+
+def build_default_train_augment(target_size):
+    if A is None:
+        raise ImportError("Albumentations is required for --train-augment. Please install it via `pip install albumentations`.")
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.Affine(
+                scale=(0.9, 1.1),
+                translate_percent=(-0.02, 0.02),
+                rotate=(-5, 5),
+                shear=(-2, 2),
+                p=0.6
+            ),
+            A.GaussNoise(var_limit=(5.0, 30.0), p=0.3),
+        ],
+        keypoint_params=A.KeypointParams(format="xy", remove_invisible=False)
+    )
 
 
 def collate_fn(batch):
@@ -322,9 +371,42 @@ def chamfer_2pts(pred_2x2, gt_2x2):
     return (d1 + d2).mean()
 
 
+def focal_loss_binary(logits, targets, alpha=0.25, gamma=2.0):
+    prob = torch.sigmoid(logits)
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+    if alpha is not None:
+        alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+    else:
+        alpha_t = 1.0
+    loss = alpha_t * torch.pow(1.0 - p_t, gamma) * ce
+    return loss.sum()
+
+
+def focal_loss_multiclass(logits, targets, gamma=2.0, alpha=None):
+    if logits.numel() == 0:
+        return logits.sum()
+    log_probs = F.log_softmax(logits, dim=-1)
+    probs = log_probs.exp()
+    gather_indices = torch.arange(targets.shape[0], device=logits.device)
+    p_t = probs[gather_indices, targets]
+    ce = F.nll_loss(log_probs, targets, reduction="none")
+    modulating = torch.pow(1.0 - p_t, gamma)
+    loss = modulating * ce
+    if alpha is not None:
+        if isinstance(alpha, (list, tuple)):
+            alpha_tensor = logits.new_tensor(alpha)
+            alpha_factor = alpha_tensor[targets]
+        else:
+            alpha_factor = logits.new_full(targets.shape, float(alpha))
+        loss = loss * alpha_factor
+    return loss.sum()
+
+
 class Strict2_5DLoss(nn.Module):
     def __init__(self, num_classes=1, eta_px=3.0, obj_pos_weight=1.2,
-                 lambda_cd=1.0, k_pos_cap=96):
+                 lambda_cd=1.0, k_pos_cap=96,
+                 use_focal_cls=False, focal_gamma=2.0, focal_alpha=0.25):
         super().__init__()
         self.num_classes = num_classes
         self.eta_px = float(eta_px)
@@ -337,6 +419,9 @@ class Strict2_5DLoss(nn.Module):
 
         # p0(roof 중심)에 대한 가중치
         self.lambda_p0 = 1.0
+        self.use_focal_cls = bool(use_focal_cls)
+        self.focal_gamma = float(focal_gamma)
+        self.focal_alpha = None if focal_alpha is None else float(focal_alpha)
 
     def set_p0_weight(self, w: float):
         self.lambda_p0 = float(w)
@@ -362,8 +447,11 @@ class Strict2_5DLoss(nn.Module):
         neg_count = 0
 
         for b in range(B):
-            gt = targets[b]["points"].to(device)
-            Ng = gt.shape[0]
+            gt_pts = targets[b]["points"].to(device)
+            gt_lbl = targets[b].get("labels")
+            if gt_lbl is not None:
+                gt_lbl = gt_lbl.to(device)
+            Ng = gt_pts.shape[0]
 
             for l in range(L):
                 pred_reg, pred_obj, pred_cls = outputs[l]
@@ -380,7 +468,13 @@ class Strict2_5DLoss(nn.Module):
                 # (C=6, H, W) -> (H, W, 3, 2)
                 pred_off_full = pred_reg_i.permute(1,2,0).contiguous().view(Hs, Ws, 3, 2)
 
-                cls_pos_logit_list = []
+                if pred_cls_i.shape[0] == 1:
+                    cls_pos_logit_list = []
+                    cls_target_map = None
+                else:
+                    cls_pos_logit_list = None
+                    cls_target_map = torch.full((Hs, Ws), -1, dtype=torch.long, device=device)
+                    cls_target_dist = torch.full((Hs, Ws), float("inf"), dtype=torch.float32, device=device)
 
                 if Ng == 0:
                     obj_loss += F.binary_cross_entropy_with_logits(
@@ -390,7 +484,11 @@ class Strict2_5DLoss(nn.Module):
                     continue
 
                 for j in range(Ng):
-                    tri_px = gt[j]
+                    tri_px = gt_pts[j]
+                    if gt_lbl is not None and gt_lbl.shape[0] > j:
+                        cls_idx = int(gt_lbl[j].item())
+                    else:
+                        cls_idx = 0
 
                     inside = _point_in_triangle(centers[...,0], centers[...,1], tri_px)
                     dist_b = _point_to_triangle_dist(centers[...,0], centers[...,1], tri_px)
@@ -412,10 +510,17 @@ class Strict2_5DLoss(nn.Module):
 
                     obj_t[0, pos_mask] = 1.0
 
-                    if pred_cls_i.shape[0] == 1:
+                    if cls_target_map is not None:
+                        candidate_dist = dist_b[pos_mask]
+                        best_dist = cls_target_dist[pos_mask]
+                        better = candidate_dist < best_dist
+                        if bool(better.any()):
+                            mask_indices = torch.nonzero(pos_mask, as_tuple=False)
+                            chosen = mask_indices[better]
+                            cls_target_map[chosen[:,0], chosen[:,1]] = cls_idx
+                            cls_target_dist[chosen[:,0], chosen[:,1]] = candidate_dist[better]
+                    elif pred_cls_i.shape[0] == 1:
                         cls_pos_logit_list.append(pred_cls_i[0][pos_mask])
-                    else:
-                        raise NotImplementedError("multi-class pos-only not implemented")
 
                     anchor_xy = centers[pos_mask]
                     tri_rep   = tri_px[None,:,:].expand(anchor_xy.shape[0], -1, -1)
@@ -436,12 +541,36 @@ class Strict2_5DLoss(nn.Module):
                     pred_obj_i, obj_t, pos_weight=self.obj_pos_weight, reduction="sum"
                 )
 
-                if len(cls_pos_logit_list) > 0:
+                if cls_target_map is not None:
+                    pos_mask_all = obj_t[0] > 0.5
+                    if bool(pos_mask_all.any()):
+                        cls_targets = cls_target_map[pos_mask_all]
+                        valid_mask = cls_targets >= 0
+                        if bool(valid_mask.any()):
+                            logits = pred_cls_i[:, pos_mask_all].permute(1, 0).contiguous()
+                            logits = logits[valid_mask]
+                            targets_ce = cls_targets[valid_mask]
+                            if self.use_focal_cls:
+                                cls_loss += focal_loss_multiclass(
+                                    logits, targets_ce,
+                                    gamma=self.focal_gamma,
+                                    alpha=self.focal_alpha
+                                )
+                            else:
+                                cls_loss += F.cross_entropy(logits, targets_ce, reduction="sum")
+                elif cls_pos_logit_list and len(cls_pos_logit_list) > 0:
                     pred_cls_pos = torch.cat(cls_pos_logit_list, dim=0)
                     cls_pos_t = torch.ones_like(pred_cls_pos)
-                    cls_loss += F.binary_cross_entropy_with_logits(
-                        pred_cls_pos, cls_pos_t, reduction="sum"
-                    )
+                    if self.use_focal_cls:
+                        cls_loss += focal_loss_binary(
+                            pred_cls_pos, cls_pos_t,
+                            alpha=self.focal_alpha,
+                            gamma=self.focal_gamma
+                        )
+                    else:
+                        cls_loss += F.binary_cross_entropy_with_logits(
+                            pred_cls_pos, cls_pos_t, reduction="sum"
+                        )
 
                 neg_count += (Hs*Ws - int((obj_t > 0.5).sum().item()))
 
@@ -564,6 +693,12 @@ def main():
     parser.add_argument("--eta-px", type=float, default=3.0)
     parser.add_argument("--lambda-cd", type=float, default=1.0)
     parser.add_argument("--k-pos-cap", type=int, default=96)
+    parser.add_argument("--train-augment", action="store_true",
+                        help="Apply default Albumentations pipeline to training samples.")
+    parser.add_argument("--cls-focal", action="store_true",
+                        help="Use focal loss for the classification head.")
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--focal-alpha", type=float, default=0.25)
 
     # 백본 프리즈
     parser.add_argument("--freeze-bb-epochs", type=int, default=1)
@@ -583,6 +718,7 @@ def main():
     parser.add_argument("--lr-bb", type=float, default=2e-4)
     parser.add_argument("--lr-hd", type=float, default=1e-3)
     parser.add_argument("--lr-min", type=float, default=1e-4)
+    parser.add_argument("--num-classes", type=int, default=1)
 
     # 저장 경로 & CSV
     parser.add_argument("--save-dir", type=str, default="./runs/2p5d")
@@ -601,7 +737,7 @@ def main():
     EPOCHS = args.epochs
     LR_MIN = args.lr_min
     WD = args.wd
-    NUM_CLASSES = 1
+    NUM_CLASSES = max(1, int(args.num_classes))
 
     # --------------------------
     # 경로 설정
@@ -628,20 +764,29 @@ def main():
     # Detect flat vs multi-folder mode
     flat_img = os.path.join(args.train_root, "images")
     flat_lab = os.path.join(args.train_root, "labels")
+    train_transform = None
+    if args.train_augment:
+        try:
+            train_transform = build_default_train_augment(IMG_SIZE)
+            print("[Augment] Training augmentation pipeline enabled.")
+        except ImportError as exc:
+            raise RuntimeError("Albumentations is required for --train-augment but is not installed.") from exc
 
     if os.path.isdir(flat_img) and os.path.isdir(flat_lab):
         # Flat mode
         train_dataset = ParallelogramDataset(
             img_dir=flat_img,
             label_dir=flat_lab,
-            target_size=IMG_SIZE
+            target_size=IMG_SIZE,
+            transform=train_transform
         )
     else:
         # Multi-folder mode (root contains multiple cam folders)
         train_dataset = ParallelogramDataset(
             img_dir=args.train_root,
             label_dir=args.train_root,
-            target_size=IMG_SIZE
+            target_size=IMG_SIZE,
+            transform=train_transform
         )
 
     if args.val_mode != "none":
@@ -716,15 +861,20 @@ def main():
         eta_px=args.eta_px,
         obj_pos_weight=1.2,
         lambda_cd=args.lambda_cd,
-        k_pos_cap=args.k_pos_cap
+        k_pos_cap=args.k_pos_cap,
+        use_focal_cls=args.cls_focal,
+        focal_gamma=args.focal_gamma,
+        focal_alpha=args.focal_alpha
     ).to(DEVICE)
 
     head_params = list(model.heads.parameters())
     bb_params = [p for n,p in model.named_parameters() if not n.startswith("heads.")]
 
     opt_all = optim.AdamW(
-        model.parameters(),
-        lr=args.lr_hd,
+        [
+            {"params": bb_params, "lr": args.lr_bb},
+            {"params": head_params, "lr": args.lr_hd},
+        ],
         betas=(0.9, 0.999),
         weight_decay=WD
     )
@@ -757,7 +907,7 @@ def main():
     if args.resume is not None:
         start_ep, best_val = load_ckpt(
             args.resume, DEVICE, model,
-            opt_all, scaler
+            opt_all, sched_all, scaler
         )
         print(f"[Resume] {args.resume} -> start_ep={start_ep}, best_val={best_val:.4f}")
     elif args.weights is not None:
@@ -790,6 +940,8 @@ def main():
         model.train(mode=train)
         collect_metrics = (not train) and (eval_cfg is not None)
         metric_records = []
+        metric_records_by_cls = defaultdict(list)
+        gt_counts_by_cls = defaultdict(int)
         total_gt = 0
 
         tot = treg = tobj = tcls = tpos = tp0 = tp12 = 0.0
@@ -866,11 +1018,20 @@ def main():
                 ]
                 for dets_img, tgt_cpu in zip(decoded, targets_cpu):
                     gt_tri = tgt_cpu["points"].cpu().numpy()
+                    if "labels" in tgt_cpu:
+                        gt_cls = tgt_cpu["labels"].cpu().numpy()
+                    else:
+                        gt_cls = np.zeros((gt_tri.shape[0],), dtype=np.int64)
                     records, _ = evaluate_single_image(
-                        dets_img, gt_tri,
+                        dets_img, gt_tri, gt_cls,
                         iou_thr=eval_cfg.get("iou_thr", 0.5)
                     )
                     metric_records.extend(records)
+                    for rec in records:
+                        cls_id = rec[4] if len(rec) > 4 else 0
+                        metric_records_by_cls[cls_id].append(rec)
+                    for c in gt_cls:
+                        gt_counts_by_cls[int(c)] += 1
                     total_gt += gt_tri.shape[0]
 
             batches_seen += 1
@@ -878,7 +1039,18 @@ def main():
                 break
 
         avg_loss = float(tot/nb) if nb>0 else 0.0
-        metrics = compute_detection_metrics(metric_records, total_gt) if collect_metrics else None
+        metrics = None
+        if collect_metrics:
+            metrics = compute_detection_metrics(metric_records, total_gt)
+            per_class_metrics = {}
+            all_cls_ids = set(gt_counts_by_cls.keys()) | set(metric_records_by_cls.keys())
+            for cls_id in sorted(all_cls_ids):
+                recs = metric_records_by_cls.get(cls_id, [])
+                per_class_metrics[cls_id] = compute_detection_metrics(
+                    recs, gt_counts_by_cls.get(cls_id, 0)
+                )
+            metrics["per_class"] = per_class_metrics
+            metrics["gt_counts_by_cls"] = dict(gt_counts_by_cls)
         return avg_loss, metrics
 
     # ---------------------------------
@@ -909,11 +1081,16 @@ def main():
                 curr_rec  = float(val_metrics["recall"])
                 curr_map  = float(val_metrics["map50"])
                 curr_maoe = float(val_metrics["mAOE_deg"])
-                print(
-                    "  -> metrics P={:.4f} R={:.4f} mAP@50={:.4f} mAOE(deg)={:.2f}".format(
-                        curr_prec, curr_rec, curr_map, curr_maoe
-                    )
+                per_cls = val_metrics.get("per_class", {})
+                msg = "  -> metrics P={:.4f} R={:.4f} mAP@50={:.4f} mAOE(deg)={:.2f}".format(
+                    curr_prec, curr_rec, curr_map, curr_maoe
                 )
+                if per_cls:
+                    parts = []
+                    for cid, m in sorted(per_cls.items()):
+                        parts.append(f"[cls{cid}:P={m['precision']:.3f},R={m['recall']:.3f},mAP={m['map50']:.3f}]")
+                    msg += " " + " ".join(parts)
+                print(msg)
                 # mAP 기준 best 갱신
                 if curr_map > best_val:
                     best_val = curr_map
