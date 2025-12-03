@@ -210,18 +210,30 @@ class ParallelogramDataset(Dataset):
         if self.transform is not None:
             flat_points = [tuple(pt) for tri in points_list for pt in tri]
             aug = self.transform(image=img_rgb, keypoints=flat_points)
-            img_rgb = aug["image"]
             aug_pts = aug["keypoints"]
-            if aug_pts and len(aug_pts) == len(flat_points):
+            if len(flat_points) == 0 or (aug_pts and len(aug_pts) == len(flat_points)):
+                valid = True
                 new_points = []
-                for i in range(0, len(aug_pts), 3):
-                    new_points.append([
-                        list(aug_pts[i + 0]),
-                        list(aug_pts[i + 1]),
-                        list(aug_pts[i + 2])
-                    ])
-                points_list = new_points
-                targets["points"] = torch.tensor(points_list, dtype=torch.float32)
+                if len(flat_points) > 0:
+                    for i in range(0, len(aug_pts), 3):
+                        tri = []
+                        inside_flags = []
+                        for k in range(3):
+                            x, y = aug_pts[i + k]
+                            tri.append([float(x), float(y)])
+                            inside_flags.append((0.0 <= x < self.Wt) and (0.0 <= y < self.Ht))
+                        if not inside_flags[0]:
+                            valid = False
+                            break
+                        if sum(1 for flag in inside_flags if flag) < 2:
+                            valid = False
+                            break
+                        new_points.append(tri)
+                if valid:
+                    img_rgb = aug["image"]
+                    if len(flat_points) > 0:
+                        points_list = new_points
+                        targets["points"] = torch.tensor(points_list, dtype=torch.float32)
 
         img = img_rgb.transpose(2,0,1) / 255.0
         img = torch.from_numpy(img).float()
@@ -232,10 +244,13 @@ class ParallelogramDataset(Dataset):
 def build_default_train_augment(target_size):
     if A is None:
         raise ImportError("Albumentations is required for --train-augment. Please install it via `pip install albumentations`.")
+    Ht, Wt = target_size
     return A.Compose(
         [
+            A.RandomResizedCrop(height=Ht, width=Wt, scale=(0.85, 1.0), ratio=(0.8, 1.2), p=0.4),
             A.HorizontalFlip(p=0.5),
             A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.4),
             A.Affine(
                 scale=(0.9, 1.1),
                 translate_percent=(-0.02, 0.02),
@@ -243,6 +258,7 @@ def build_default_train_augment(target_size):
                 shear=(-2, 2),
                 p=0.6
             ),
+            A.Perspective(scale=(0.02, 0.05), keep_size=True, pad_mode=cv2.BORDER_REFLECT_101, p=0.3),
             A.GaussNoise(var_limit=(5.0, 30.0), p=0.3),
         ],
         keypoint_params=A.KeypointParams(format="xy", remove_invisible=False)
@@ -724,9 +740,6 @@ def main():
     parser.add_argument("--save-dir", type=str, default="./runs/2p5d")
     parser.add_argument("--log-csv", type=str, default=None)
 
-    # ONNX export 옵션
-    parser.add_argument("--export-onnx", action="store_true",
-                        help="best pth 갱신 시 ONNX도 같이 export")
     parser.add_argument("--onnx-dir", type=str, default=None)
     parser.add_argument("--onnx-opset", type=int, default=12)
 
@@ -750,11 +763,8 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # ONNX 디렉토리
-    if args.export_onnx:
-        onnx_dir = Path(args.onnx_dir) if args.onnx_dir else (save_dir / "onnx")
-        onnx_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        onnx_dir = None
+    onnx_dir = Path(args.onnx_dir) if args.onnx_dir else (save_dir / "onnx")
+    onnx_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV 경로
     csv_path = Path(args.log_csv) if args.log_csv else (save_dir / f"{model_stem}_train_log.csv")
@@ -1098,10 +1108,8 @@ def main():
                     torch.save(model.state_dict(), best_pth)
                     print(f"  -> best (mAP@50) updated to {best_val:.4f}, saved: {best_pth}")
 
-                    # ONNX export (옵션)
-                    if args.export_onnx and onnx_dir is not None:
-                        best_onnx = onnx_dir / f"{model_stem}_2_5d_best.onnx"
-                        export_onnx(model, best_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
+                    best_onnx = onnx_dir / f"{model_stem}_2_5d_best.onnx"
+                    export_onnx(model, best_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
             else:
                 # val_loss 기준 best
                 if (val_loss is not None) and (args.val_mode == "loss") and (val_loss < best_val):
@@ -1109,9 +1117,8 @@ def main():
                     best_pth = pth_dir / f"{model_stem}_2_5d_best.pth"
                     torch.save(model.state_dict(), best_pth)
                     print(f"  -> best (val_loss) updated {best_val:.4f}, saved: {best_pth}")
-                    if args.export_onnx and onnx_dir is not None:
-                        best_onnx = onnx_dir / f"{model_stem}_2_5d_best.onnx"
-                        export_onnx(model, best_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
+                    best_onnx = onnx_dir / f"{model_stem}_2_5d_best.onnx"
+                    export_onnx(model, best_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
 
         # 스케줄러
         sched_all.step()
@@ -1126,6 +1133,8 @@ def main():
             scaler=scaler, best_val=best_val
         )
         print(f"  -> saved {pth_path} and {ckpt_path}")
+        epoch_onnx = onnx_dir / f"{model_stem}_2_5d_epoch_{ep+1:03d}.onnx"
+        export_onnx(model, epoch_onnx, IMG_SIZE, DEVICE, opset=args.onnx_opset)
 
         # CSV 로깅
         lr_all = opt_all.param_groups[0]["lr"]
@@ -1150,9 +1159,28 @@ if __name__ == "__main__":
     main()
 
 """
-python -m src.train --train-root /home/ubuntu24/code/new_start/data/clean/ \
- --val-root /home/ubuntu24/다운로드/dataset_1125_undist_2_5d_conf_1/cam12_37_5 \
- --weights runs/yolo11_2_5d_real_coshow_v5/pth/yolo11m_2_5d_epoch_008.pth \
- --export-onnx --save-dir ./runs/yolo11_2_5d_real_coshow_v5 \
- --start-epoch 9
+증강을 하고 싶다면  --train-augment만 추가
+
+단일 클래스(차량 전용) 학습 예시
+
+python -m src.train \
+  --train-root /path/to/train_dataset \
+  --val-root /path/to/val_dataset \
+  --yolo-weights yolo11m.pt \
+  --save-dir ./runs/veh_only \
+  --epochs 60 --batch 4 --img-h 864 --img-w 1536
+
+  
+멀티 클래스(예: 차량/콘/박스) 학습 예시
+
+python -m src.train \
+  --train-root /path/to/train_dataset_multi \
+  --val-root /path/to/val_dataset_multi \
+  --yolo-weights yolo11m.pt \
+  --save-dir ./runs/multi_cls \
+  --num-classes 3 \
+  --cls-focal --focal-gamma 2.0 --focal-alpha 0.25 \
+  --train-augment \
+  --epochs 80 --batch 4 --img-h 864 --img-w 1536
+
 """

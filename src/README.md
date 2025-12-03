@@ -1,63 +1,109 @@
-# Temporal ONNX Inference (BEV 비교)
+# YOLO11 2.5D Polygon Trainer (`src/train.py`)
 
-`src/` 디렉터리에는 카메라 시퀀스에 ConvLSTM 기반 ONNX 모델을 적용하는 두 가지 진입점이 있습니다.  
-두 스크립트 모두 2D 감지 결과를 생성하지만 **BEV 투영 방식과 결과 라벨링**이 다릅니다.
+`src/train.py`는 Ultralytics YOLO11 백본 위에 삼각형 기반 2.5D 헤드를 얹어 차량 지붕/물체 평행사변형을 학습하는 스크립트입니다. 멀티 클래스, 혼합 정밀도, 자동 체크포인트/ONNX 내보내기, 선택적 데이터 증강과 Focal Loss 등을 모두 포함한 완전 버전입니다.
 
-## BEV 출력 차이 요약
+---
 
-| 구분 | `inference_lstm_onnx.py` | `inference_lstm_onnx_pointcloud.py` |
-| --- | --- | --- |
-| BEV 좌표 변환 | 프레임별 **3x3 Homography**(img→ground)를 곱해 2D 평면으로 투영 | 픽셀당 `(X,Y,Z)`를 담은 **pixel2world LUT(.npz)**를 bilinear 샘플링 |
-| 필수 추가 준비물 | `--calib-dir` 안에 이미지 이름과 매칭되는 `*.npy`/`*.txt`/`*.csv` Homography | `--lut-path`로 지정하는 `pixel2world_lut.npz` (필수 키: `X`, `Y`, `Z`, 선택 마스크 `ground_valid_mask` 등) |
-| GT BEV 변환 | GT 삼각형도 Homography로 투영 (3×3 행렬 유효 영역 내에서만) | GT 픽셀 좌표를 LUT로 변환, 유효 마스크에 맞춰 필터링 |
-| BEV 라벨 포맷 | `class cx cy length width yaw` (6개 값, 2D 평면) | 기본: `class cx cy cz length width yaw pitch roll` (9개 값, 3D) <br>옵션 `--bev-label-3d --no-bev-label-3d`로 6/9값 선택 |
-| 높이/기울기 추정 | 제공되지 않음 (cz/pitch/roll 항상 0) | LUT에서 얻은 Z로 차량 높이 중심(`cz`), pitch/roll 계산. `--use-roll`, `--pitch-clamp-deg` 등 제어 |
-| 비정상 박스 거르기 | Homography 결과에 대한 별도 필터 없음 | `_sane_dims`로 길이/너비/비율 범위(`--min-length` 등) 확인 후 제외 |
+## 1. 데이터 준비
 
-## 준비물 상세
+라벨 파일은 YOLO 스타일의 텍스트 (`class p0x p0y p1x p1y p2x p2y`) 형식이어야 하며, 아래 두 가지 디렉터리 구조 중 하나를 따르면 됩니다.
 
-- **Homography 방식 (`inference_lstm_onnx.py`)**
-  - `--calib-dir` 예시: `cam01_calib/` 폴더에 `frame_000123.txt` 형태 3x3 행렬 파일.
-  - Homography가 없으면 BEV 관련 아웃풋(`bev_labels`, `bev_images*`)은 생성되지 않습니다.
-
-- **LUT 방식 (`inference_lstm_onnx_pointcloud.py`)**
-- `pixel2world_lut.npz`는 최소 `X`, `Y`, `Z` 2D 배열이 있어야 하며, 유효 마스크(`ground_valid_mask`, `valid_mask`, `floor_mask`)가 없을 경우 `isfinite(X)&isfinite(Y)`로 자동 대체됩니다.
-  - LUT는 카메라별/해상도별로 상이하므로 입력 영상과 동일한 해상도 기준으로 생성해야 합니다.
-  - 모든 프레임에서 LUT 하나를 재사용하며, 투영 실패 픽셀은 자동으로 제외됩니다.
-
-## 출력 라벨 차이
-
-- `inference_lstm_onnx.py`
-  - `output_dir/bev_labels/<frame>.txt`
-  - 각 줄: `class cx cy length width yaw`
-  - `cx, cy`: BEV 평면 중심 (Homography로 축척된 단위), `yaw`: [-180,180) 도.
-
-- `inference_lstm_onnx_pointcloud.py`
-  - `output_dir/bev_labels/<frame>.txt`
-  - 기본(3D): `class cx cy cz length width yaw pitch roll`
-    - `cz`: LUT 기반 평균 높이, `pitch/roll`: LUT Z를 이용해 계산.
-  - `--no-bev-label-3d` 사용 시 2D 포맷으로 저장.
-
-## 실행 예시 (핵심 옵션만)
-
-```bash
-# Homography 기반 BEV
-python src/inference_lstm_onnx.py \
-  --input-dir data/cam01/frames \
-  --weights weights/model.onnx \
-  --calib-dir data/cam01/calib_img2ground \
-  --output-dir runs/onnx_homo
-
-# LUT 기반 3D BEV
-python src/inference_lstm_onnx_pointcloud.py \
-  --input-dir data/cam01/frames \
-  --weights weights/model.onnx \
-  --lut-path data/cam01/pixel2world_lut.npz \
-  --output-dir runs/onnx_lut \
-  --bev-label-3d \
-  --use-roll
+### A. Flat 구조
+```
+/dataset_root
+ ├── images/
+ │    ├── 0001.jpg
+ │    └── 0002.jpg
+ └── labels/
+      ├── 0001.txt   # class p0x p0y p1x p1y p2x p2y
+      └── 0002.txt
 ```
 
-더 자세한 실행 코드는 각각의 코드 마지막에 적혀있음.
+### B. 멀티 폴더 구조 (카메라/시퀀스별 서브폴더)
+```
+/dataset_root
+ ├── cam01/
+ │    ├── images/
+ │    └── labels/
+ ├── cam02/
+ │    ├── images/
+ │    └── labels/
+ └── ...
+```
 
-두 실행 모두 2D 검출 시각화는 동일하게 생성되지만, BEV 라벨과 시각화는 위와 같이 상이한 준비물과 좌표 정의에 따라 결과가 달라집니다.
+`--train-root`/`--val-root`를 각각 위 구조의 최상위 폴더로 넘기면 스크립트가 자동으로 감지합니다.
+
+---
+
+## 2. 주요 기능
+
+- **멀티 클래스**: 라벨 첫 열(class id)을 그대로 사용하며, `--num-classes`로 모델/손실을 설정합니다.
+- **커스텀 손실**: 삼각형 오프셋 + Chamfer distance 기반 `Strict2_5DLoss`, 선택적 분류 Focal Loss(`--cls-focal`).
+- **데이터 증강**: `--train-augment` 플래그를 켜면 Albumentations 기반 flip/brightness/crop/perspective/noise 를 적용합니다.
+- **검증/로깅**: mAP/precision/recall/mAOE + 클래스별 지표, epoch마다 PTH/CKPT/CSV 저장, 옵션에 따라 ONNX 내보내기.
+
+---
+
+## 3. 실행 예시
+
+### 3.1 단일 클래스 (차량만) 학습
+```bash
+python -m src.train \
+  --train-root /data/car_only/train \
+  --val-root /data/car_only/val \
+  --yolo-weights yolo11m.pt \
+  --save-dir ./runs/car_only \
+  --epochs 60 --batch 4 --img-h 864 --img-w 1536
+```
+- 기본값이 1클래스이므로 `--num-classes`를 줄 필요가 없습니다.
+- 증강을 쓰고 싶다면 `--train-augment`를 추가하세요.
+
+### 3.2 멀티 클래스 (예: 차량/콘/박스) 학습
+```bash
+python -m src.train \
+  --train-root /data/multi/train \
+  --val-root /data/multi/val \
+  --yolo-weights yolo11m.pt \
+  --save-dir ./runs/multi_cls \
+  --num-classes 3 \
+  --cls-focal --focal-gamma 2.0 --focal-alpha 0.25 \
+  --train-augment \
+  --epochs 80 --batch 4 --img-h 864 --img-w 1536
+```
+- 라벨의 클래스 ID 범위(0~2)에 맞춰 `--num-classes 3` 지정.
+- 소수 클래스 대응을 위해 Focal Loss를 권장합니다.
+
+---
+
+## 4. 주요 CLI 옵션
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--train-root`, `--val-root` | 데이터셋 경로 (Flat/멀티폴더 자동 감지). `--val-root`를 생략하면 train과 같은 경로에서 `images/labels` 사용 |
+| `--yolo-weights` | 초기 YOLO11 가중치 (`yolo11m.pt` 등) |
+| `--num-classes` | 클래스 수 (기본 1). 라벨의 최대 class id + 1과 일치시켜야 함 |
+| `--train-augment` | Albumentations 증강을 켭니다 (설치 필요) |
+| `--cls-focal`, `--focal-gamma`, `--focal-alpha` | 분류 헤드에 Focal Loss 적용 및 파라미터 조정 |
+| `--onnx-dir`, `--onnx-opset` | ONNX 저장 경로/OPSET 설정 (매 epoch + best 모델을 자동 저장) |
+| 기타 | 배치/에폭/러닝레이트/Freeze epoch 등은 기본 argparse 옵션 참조 |
+
+> **주의**: `--train-augment`를 사용할 경우 `pip install albumentations opencv-python`이 되어 있어야 합니다.
+
+---
+
+## 5. 결과물
+
+`--save-dir` (기본 `./runs/2p5d`) 아래에 다음이 생성됩니다.
+
+- `pth/`: 매 epoch마다 저장되는 PyTorch 가중치 + `*_best.pth`.
+- `ckpt/`: 옵티마/스케줄러/Scaler가 포함된 체크포인트.
+- `*.csv`: 에폭별 손실/지표 로그.
+- `onnx/`: 각 epoch 및 best 모델의 ONNX 내보내기 결과.
+
+---
+
+## 6. 기타 팁
+
+- 증강과 Focal Loss는 옵션이며, 켠/끈 버전을 각각 짧게 검증해 가장 안정적인 조합을 선택하세요.
+- 멀티 클래스일 때 검증 로그에 `[clsN: P=..., R=..., mAP=...]` 형태로 클래스별 지표가 출력되므로, 특정 클래스가 부족한지 쉽게 확인할 수 있습니다.
+- 라벨 포맷이 잘못되거나 짝이 맞지 않으면 스크립트가 자동으로 해당 샘플을 건너뜁니다. 로그를 통해 매칭된 샘플 수를 확인하세요.
