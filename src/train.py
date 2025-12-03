@@ -245,9 +245,14 @@ def build_default_train_augment(target_size):
     if A is None:
         raise ImportError("Albumentations is required for --train-augment. Please install it via `pip install albumentations`.")
     Ht, Wt = target_size
+    rrc_kwargs = dict(scale=(0.85, 1.0), ratio=(0.8, 1.2), p=0.4)
+    try:
+        rrc = A.RandomResizedCrop(height=Ht, width=Wt, **rrc_kwargs)
+    except (TypeError, ValueError):
+        rrc = A.RandomResizedCrop(size=(Ht, Wt), **rrc_kwargs)
     return A.Compose(
         [
-            A.RandomResizedCrop(height=Ht, width=Wt, scale=(0.85, 1.0), ratio=(0.8, 1.2), p=0.4),
+            rrc,
             A.HorizontalFlip(p=0.5),
             A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.4),
