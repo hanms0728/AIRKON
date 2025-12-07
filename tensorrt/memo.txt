@@ -1,0 +1,3 @@
+python -m src.live_depthai_inference --weight yolo11m_fp16.engine --img-size 864,1536 --camera-size 1536,864 --no-show-vis
+
+trtexec  --onnx=./onnx/yolo11m_2_5d_carla_coshow.onnx  --saveEngine=yolo11m_fp16.engine  --fp16  --memPoolSize=workspace:4096

@@ -1,31 +1,20 @@
-import depthai as dai
-import numpy as np
+#!/usr/bin/env python3
+
 import cv2
+import depthai as dai
+
 # Create pipeline
-pipeline = dai.Pipeline()
-# This might improve reducing the latency on some systems
-pipeline.setXLinkChunkSize(0)
+with dai.Pipeline() as pipeline:
+    # Define source and output
+    cam = pipeline.create(dai.node.Camera).build()
+    videoQueue = cam.requestOutput((1536,864)).createOutputQueue()
 
-# Define source and output
-camRgb = pipeline.create(dai.node.ColorCamera)
-camRgb.setFps(60)
-camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    # Connect to device and start pipeline
+    pipeline.start()
+    while pipeline.isRunning():
+        videoIn = videoQueue.get()
+        assert isinstance(videoIn, dai.ImgFrame)
+        cv2.imshow("video", videoIn.getCvFrame())
 
-xout = pipeline.create(dai.node.XLinkOut)
-xout.setStreamName("out")
-camRgb.isp.link(xout.input)
-
-# Connect to device and start pipeline
-with dai.Device(pipeline) as device:
-    print(device.getUsbSpeed())
-    q = device.getOutputQueue(name="out")
-    diffs = np.array([])
-    while True:
-        imgFrame = q.get()
-        # Latency in miliseconds 
-        latencyMs = (dai.Clock.now() - imgFrame.getTimestamp()).total_seconds() * 1000
-        diffs = np.append(diffs, latencyMs)
-        print('Latency: {:.2f} ms, Average latency: {:.2f} ms, Std: {:.2f}'.format(latencyMs, np.average(diffs), np.std(diffs)))
-        
-        # Not relevant for this example
-        cv2.imshow('frame', imgFrame.getCvFrame())
+        if cv2.waitKey(1) == ord("q"):
+            break
