@@ -1861,4 +1861,27 @@ python -m src.train_lstm_onnx \
   --save-dir runs/1206_lstm
 
 
+
+
+
+ python -m src.train_lstm_onnx \
+  --train-root /media/ubuntu24/T7/carla_dataset_lstm_1209/train \
+  --val-root   /media/ubuntu24/T7/carla_dataset_lstm_1209/val \
+  --data-layout auto \
+  --yolo-weights yolo11m.pt \
+  --weights onnx/base_pth/yolo11m_2_5d_epoch_005.pth \
+  --temporal lstm --temporal-hidden 256 --temporal-layers 1 --temporal-on-scales last \
+  --seq-len 6 --seq-stride 1 --seq-grouping by_subdir \
+  --batch 6 --val-batch 4 \
+  --no-seq-streaming --tbptt-detach --temporal-reset-per-batch \
+  --freeze-bb-epochs 2 \
+  --lr-bb 2e-4 --lr-hd 6e-4 --lr-min 1e-4 \
+  --num-classes 3 \
+  --score-mode obj --eval-conf 0.35 \
+  --train-augment --dsi \
+  --skip-bad-batch --max-grad-norm 10.0 \
+  --save-dir runs/carla_lstm_1209
+ 
+
+
 """
