@@ -40,11 +40,12 @@ import threading
 import queue
 import cv2
 
-VIEW_WIDTH   = 1920
-VIEW_HEIGHT  = 1080
-VIEW_FOV     = 88.8
+VIEW_WIDTH   = 1536
+VIEW_HEIGHT  = 864
+VIEW_FOV     = 95
 BB_COLOR     = (248, 64, 24)
 CENTER_COLOR = (64, 248, 24)
+FRONT_COLOR  = (24, 128, 248)
 TARGET_FPS   = int(10.0)
 FIXED_DT     = float(1.0 / float(TARGET_FPS))  # 30 FPS simulation
 MAX_DISTANCE = 100.0
@@ -57,6 +58,7 @@ CLASS_ID_TRAFFIC_CONE = 1
 
 TRAFFIC_CONE_BLUEPRINTS = [
     'static.prop.trafficcone01',
+    'static.prop.constructioncone'
 ]
 TRAFFIC_CONE_TYPE_IDS = {bp.casefold() for bp in TRAFFIC_CONE_BLUEPRINTS}
 
@@ -67,12 +69,13 @@ USE_SYNC_WORLD = True
 USE_TM_SYNC = True
 TM_PORT = 8000
 SPAWN_VEHICLES = True
-NUM_VEHICLES = 6
+NUM_VEHICLES = 4
 
 INCLUDE_VEHICLE_KEYWORDS = [
     # 이 목록에 포함된 키워드가 차량 블루프린트 ID(또는 카테고리)에
     # 매칭될 때만 스폰합니다. (대소문자 구분 없음)
-    'colored_xycar'
+    #'colored_xycar'
+    'TeslaM3', 'Audi'
 ]
 
 FRAME_COUNTER = 0
@@ -83,117 +86,117 @@ REGION_MAX = (65.0,10.0)
 
 CAMERA_SETUPS = [
     {
-        "name": "cam1", #cam2와 대응
+        "name": "cam1_-45_4", #cam2와 대응
         "transform": carla.Transform(
             carla.Location(x=10, y=7, z=10),
-            carla.Rotation(pitch=-30, yaw=-135, roll=0)
+            carla.Rotation(pitch=-45, yaw=-135, roll=0)
         ),
     },
     {
-        "name": "cam2", #cam1과 대응
+        "name": "cam2_-45_4", #cam1과 대응
         "transform": carla.Transform(
             carla.Location(x=-12, y=-14, z=10),
-            carla.Rotation(pitch=-30, yaw=25, roll=0)
+            carla.Rotation(pitch=-45, yaw=25, roll=0)
         ),
     },
-    {
-        "name": "cam3",  #cam7과 대응
-        "transform": carla.Transform(
-            carla.Location(x=-60, y=0, z=10),
-            carla.Rotation(pitch=-35, yaw=-45, roll=0)
-        ),
-    },
-    {   
-        "name": "cam4", #cam12와 대응
-        "transform": carla.Transform(
-            carla.Location(x=-60, y=-57, z=10),
-            carla.Rotation(pitch=-35, yaw=45, roll=0)
-        ),
-    },
-    {
-        "name": "cam5", #alone
-        "transform": carla.Transform(
-            carla.Location(x=0, y=-37, z=10),
-            carla.Rotation(pitch=-40, yaw=90, roll=0)
-        ),
-    },
-    {
-        "name": "cam6", #cam13과 대응
-        "transform": carla.Transform(
-            carla.Location(x=24, y=-56, z=10),
-            carla.Rotation(pitch=-35, yaw=45, roll=0)
-        ),
-    },
-    {
-        "name": "cam7", #cam3과 대응
-        "transform": carla.Transform(
-            carla.Location(x=60, y=0, z=10),
-            carla.Rotation(pitch=-35, yaw=-135, roll=0)
-        ),
-    },
-    {
-        "name": "cam8", #cam10과 대응
-        "transform": carla.Transform(
-            carla.Location(x=30, y=-10, z=10),
-            carla.Rotation(pitch=-35, yaw=125, roll=0)
-        ),
-    },
-    {
-        "name": "cam9", #cam11과 대응
-        "transform": carla.Transform(
-            carla.Location(x=30, y=2, z=10),
-            carla.Rotation(pitch=-35, yaw=-55, roll=0)
-        ),
-    },
-    {
-        "name": "cam10", #cam8과 대응
-        "transform": carla.Transform(
-            carla.Location(x=-30, y=-10, z=10),
-            carla.Rotation(pitch=-35, yaw=55, roll=0)
-        ),
-    },
-    {
-        "name": "cam11", #cam9과 대응
-        "transform": carla.Transform(
-            carla.Location(x=-30, y=2, z=10),
-            carla.Rotation(pitch=-35, yaw=-125, roll=0)
-        ),
-    },
-    {
-        "name": "cam12", #cam12와 대응
-        "transform": carla.Transform(
-            carla.Location(x=60, y=-57, z=10),
-            carla.Rotation(pitch=-35, yaw=135, roll=0)
-        ),
-    },
-    {
-        "name": "cam13", #cam6과 대응
-        "transform": carla.Transform(
-            carla.Location(x=-24, y=-56, z=10),
-            carla.Rotation(pitch=-35, yaw=135, roll=0)
-        ),
-    },
-    {
-        "name": "cam14", #cam15와 대응
-        "transform": carla.Transform(
-            carla.Location(x=-32, y=-22, z=10),
-            carla.Rotation(pitch=-35, yaw=-45, roll=0)
-        ),
-    },
-    {
-        "name": "cam15", #cam14 와 대응
-        "transform": carla.Transform(
-            carla.Location(x=32, y=-22, z=10),
-            carla.Rotation(pitch=-35, yaw=-125, roll=0)
-        ),
-    },
-    {
-        "name": "cam16", 
-        "transform": carla.Transform(
-            carla.Location(x=63, y=-30, z=10),
-            carla.Rotation(pitch=-45, yaw=180, roll=0)
-        ),
-    },
+    # {
+    #     "name": "cam3",  #cam7과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-60, y=0, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-45, roll=0)
+    #     ),
+    # },
+    # {   
+    #     "name": "cam4", #cam12와 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-60, y=-57, z=10),
+    #         carla.Rotation(pitch=-35, yaw=45, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam5", #alone
+    #     "transform": carla.Transform(
+    #         carla.Location(x=0, y=-37, z=10),
+    #         carla.Rotation(pitch=-40, yaw=90, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam6", #cam13과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=24, y=-56, z=10),
+    #         carla.Rotation(pitch=-35, yaw=45, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam7", #cam3과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=60, y=0, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-135, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam8", #cam10과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=30, y=-10, z=10),
+    #         carla.Rotation(pitch=-35, yaw=125, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam9", #cam11과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=30, y=2, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-55, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam10", #cam8과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-30, y=-10, z=10),
+    #         carla.Rotation(pitch=-35, yaw=55, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam11", #cam9과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-30, y=2, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-125, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam12", #cam12와 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=60, y=-57, z=10),
+    #         carla.Rotation(pitch=-35, yaw=135, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam13", #cam6과 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-24, y=-56, z=10),
+    #         carla.Rotation(pitch=-35, yaw=135, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam14", #cam15와 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=-32, y=-22, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-45, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam15", #cam14 와 대응
+    #     "transform": carla.Transform(
+    #         carla.Location(x=32, y=-22, z=10),
+    #         carla.Rotation(pitch=-35, yaw=-125, roll=0)
+    #     ),
+    # },
+    # {
+    #     "name": "cam16", 
+    #     "transform": carla.Transform(
+    #         carla.Location(x=63, y=-30, z=10),
+    #         carla.Rotation(pitch=-45, yaw=180, roll=0)
+    #     ),
+    # },
 ]   
 
 def compute_H_img_to_ground(
@@ -295,7 +298,7 @@ class ClientSideBoundingBoxes:
         return boxes, vehicles_in_box
 
     @staticmethod
-    def draw_ground_overlays(display, ground_polygons, ground_centers):
+    def draw_ground_overlays(display, ground_polygons, ground_centers, front_pairs=None):
         surf = pygame.Surface((VIEW_WIDTH, VIEW_HEIGHT))
         surf.set_colorkey((0, 0, 0))
         for poly in ground_polygons:
@@ -303,6 +306,11 @@ class ClientSideBoundingBoxes:
                 pygame.draw.polygon(surf, BB_COLOR, poly, 2)
         for c in ground_centers:
             pygame.draw.circle(surf, CENTER_COLOR, c, 4)
+        if front_pairs:
+            for left_pt, right_pt in front_pairs:
+                pygame.draw.circle(surf, FRONT_COLOR, left_pt, 4)
+                pygame.draw.circle(surf, FRONT_COLOR, right_pt, 4)
+                pygame.draw.line(surf, FRONT_COLOR, left_pt, right_pt, 2)
         display.blit(surf, (0, 0))
 
     @staticmethod
@@ -665,6 +673,7 @@ class FixedCameraClient:
                     annotations = []
                     ground_polygons = []
                     ground_centers = []
+                    front_markers = []
 
                     for bb, actor in zip(bbs, filtered_actors):
                         class_id = self._determine_class_id(actor)
@@ -702,9 +711,15 @@ class FixedCameraClient:
                         )
                         ground_polygons.append([(int(round(u)), int(round(v))) for (u, v) in ground_uv])
                         ground_centers.append((int(round(bottom_center_uv[0])), int(round(bottom_center_uv[1]))))
+                        front_markers.append(
+                            (
+                                (int(round(front_left_uv[0])), int(round(front_left_uv[1]))),
+                                (int(round(front_right_uv[0])), int(round(front_right_uv[1]))),
+                            )
+                        )
 
                     bbox_surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
-                    ClientSideBoundingBoxes.draw_ground_overlays(bbox_surf, ground_polygons, ground_centers)
+                    ClientSideBoundingBoxes.draw_ground_overlays(bbox_surf, ground_polygons, ground_centers, front_markers)
 
                     scaled_surface = pygame.transform.smoothscale(
                         bbox_surf, (self.scaled_width, self.scaled_height)
@@ -718,7 +733,7 @@ class FixedCameraClient:
                     pitch_tag_str = f"{cam_rotation.pitch:g}"
 
                     self.save_queue.put((self._save_frame, (rig, current_frame, frame_copy, pitch_tag_str)))
-                    #self.save_queue.put((self._save_overlay, (rig, current_frame, overlay_copy, pitch_tag_str)))
+                    self.save_queue.put((self._save_overlay, (rig, current_frame, overlay_copy, pitch_tag_str)))
                     self.save_queue.put((self._save_annotations, (rig, current_frame, list(annotations), pitch_tag_str)))
                     self.save_queue.put((self._save_calibration, (rig, current_frame, homography_img_to_ground.copy(), pitch_tag_str)))
 
