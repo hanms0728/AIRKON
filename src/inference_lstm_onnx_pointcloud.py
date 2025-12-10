@@ -41,22 +41,48 @@ except Exception:
 # =========================
 # I/O helpers (라벨/BEV/시각화)
 # =========================
-def load_gt_triangles(label_path: str) -> np.ndarray:
+_CLASS_COLOR_TABLE = [
+    (0, 255, 0),    # green
+    (0, 165, 255),  # orange
+    (255, 0, 0),    # blue
+    (255, 0, 255),  # magenta
+    (0, 215, 255),  # gold
+]
+
+
+def _class_color(cls_id: Optional[int]):
+    if cls_id is None:
+        return (0, 255, 0)
+    idx = int(cls_id) % len(_CLASS_COLOR_TABLE)
+    return _CLASS_COLOR_TABLE[idx]
+def load_gt_triangles(label_path: str, return_cls: bool = False):
     if not os.path.isfile(label_path):
-        return np.zeros((0,3,2), dtype=np.float32)
+        empty_tris = np.zeros((0, 3, 2), dtype=np.float32)
+        if return_cls:
+            return empty_tris, np.zeros((0,), dtype=np.int64)
+        return empty_tris
     tris = []
+    cls_list = []
     with open(label_path, "r") as f:
         for line in f:
             p = line.strip().split()
             if len(p) != 7:
                 continue
-            _, p0x, p0y, p1x, p1y, p2x, p2y = p
+            cls_id, p0x, p0y, p1x, p1y, p2x, p2y = p
             tris.append([[float(p0x), float(p0y)],
                          [float(p1x), float(p1y)],
                          [float(p2x), float(p2y)]])
+            cls_list.append(int(float(cls_id)))
     if len(tris) == 0:
-        return np.zeros((0,3,2), dtype=np.float32)
-    return np.asarray(tris, dtype=np.float32)
+        empty_tris = np.zeros((0,3,2), dtype=np.float32)
+        if return_cls:
+            return empty_tris, np.zeros((0,), dtype=np.int64)
+        return empty_tris
+    tris_arr = np.asarray(tris, dtype=np.float32)
+    if not return_cls:
+        return tris_arr
+    cls_arr = np.asarray(cls_list, dtype=np.int64) if cls_list else np.zeros((0,), dtype=np.int64)
+    return tris_arr, cls_arr
 
 
 def poly_from_tri(tri: np.ndarray) -> np.ndarray:
@@ -105,18 +131,25 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
     for d in dets:
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
+        cls_id = int(d.get("class_id", d.get("cls", 0)))
+        color = _class_color(cls_id)
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
-        cv2.polylines(img, [poly4], isClosed=True, color=(0,255,0), thickness=2)
+        cv2.polylines(img, [poly4], isClosed=True, color=color, thickness=2)
+        for pt in tri.astype(int):
+            cv2.circle(img, (int(pt[0]), int(pt[1])), 3, color, -1)
         cx, cy = int(tri[0][0]), int(tri[0][1])
-        cv2.putText(img, f"{score:.2f}", (cx, max(0, cy-4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+        cv2.putText(img, f"{cls_id}:{score:.2f}", (cx, max(0, cy-4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         tri_orig = tri.copy()
         tri_orig[:, 0] *= sx
         tri_orig[:, 1] *= sy
         tri_orig_list.append(tri_orig.copy())
         p0o, p1o, p2o = tri_orig[0], tri_orig[1], tri_orig[2]
-        lines.append(f"0 {p0o[0]:.2f} {p0o[1]:.2f} {p1o[0]:.2f} {p1o[1]:.2f} {p2o[0]:.2f} {p2o[1]:.2f} {score:.4f}")
+        lines.append(
+            f"{cls_id} {p0o[0]:.2f} {p0o[1]:.2f} {p1o[0]:.2f} {p1o[1]:.2f} "
+            f"{p2o[0]:.2f} {p2o[1]:.2f} {score:.4f}"
+        )
 
     cv2.imwrite(save_path_img, img)
     with open(save_path_txt, "w") as f:
@@ -136,11 +169,15 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
     for d in dets:
         tri = np.asarray(d["tri"], dtype=np.float32)
         score = float(d["score"])
+        cls_id = int(d.get("class_id", d.get("cls", 0)))
+        color = _class_color(cls_id)
         poly4 = poly_from_tri(tri).astype(np.int32)
-        cv2.polylines(img, [poly4], True, (0,0,255), 2)
+        cv2.polylines(img, [poly4], True, color, 2)
+        for pt in tri.astype(int):
+            cv2.circle(img, (int(pt[0]), int(pt[1])), 3, color, -1)
         p0 = tri[0].astype(int)
-        cv2.putText(img, f"{score:.2f}", (int(p0[0]), max(0, int(p0[1])-4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+        cv2.putText(img, f"{cls_id}:{score:.2f}", (int(p0[0]), max(0, int(p0[1])-4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
     if gt_tris_resized.shape[0] > 0 and len(dets) > 0:
         det_idx_sorted = np.argsort([-float(d["score"]) for d in dets])
@@ -160,9 +197,11 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
             if best_j >= 0:
                 matched[best_j] = True
                 p0 = tri_d[0].astype(int)
+                cls_id = int(d.get("class_id", d.get("cls", 0)))
+                color = _class_color(cls_id)
                 cv2.putText(img, f"IoU {best_iou:.2f}",
                             (int(p0[0]), int(p0[1]) + 14),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     cv2.imwrite(save_path_img_mix, img)
 
 
@@ -460,6 +499,7 @@ def write_bev_labels(save_path: str, bev_dets: List[dict], write_3d: bool = True
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     lines = []
     for det in bev_dets:
+        cls_id = int(det.get("class_id", det.get("cls", 0)))
         cx, cy = det["center"]
         length = det["length"]
         width = det["width"]
@@ -468,9 +508,12 @@ def write_bev_labels(save_path: str, bev_dets: List[dict], write_3d: bool = True
             cz = det.get("cz", 0.0)
             pitch = det.get("pitch", 0.0)
             roll = det.get("roll", 0.0)
-            lines.append(f"0 {cx:.4f} {cy:.4f} {cz:.4f} {length:.4f} {width:.4f} {yaw:.2f} {pitch:.2f} {roll:.2f}")
+            lines.append(
+                f"{cls_id} {cx:.4f} {cy:.4f} {cz:.4f} {length:.4f} {width:.4f} "
+                f"{yaw:.2f} {pitch:.2f} {roll:.2f}"
+            )
         else:
-            lines.append(f"0 {cx:.4f} {cy:.4f} {length:.4f} {width:.4f} {yaw:.2f}")
+            lines.append(f"{cls_id} {cx:.4f} {cy:.4f} {length:.4f} {width:.4f} {yaw:.2f}")
     with open(save_path, "w") as f:
         f.write("\n".join(lines))
 
@@ -1028,10 +1071,11 @@ def main():
         # 2D Eval
         gt_for_eval = np.zeros((0, 3, 2), dtype=np.float32)
         gt_tri_orig_for_bev = np.zeros((0, 3, 2), dtype=np.float32)
+        gt_cls_eval = np.zeros((0,), dtype=np.int64)
 
         if do_eval_2d:
             lab_path = os.path.join(args.gt_label_dir, os.path.splitext(name)[0] + ".txt")
-            gt_tri_raw = load_gt_triangles(lab_path)
+            gt_tri_raw, gt_cls_raw = load_gt_triangles(lab_path, return_cls=True)
             if gt_tri_raw.shape[0] > 0:
                 if args.labels_are_original_size:
                     gt_tri_orig_for_bev = gt_tri_raw.astype(np.float32)
@@ -1043,12 +1087,15 @@ def main():
                     gt_tri_orig_for_bev = gt_tri_raw.copy()
                     gt_tri_orig_for_bev[:, :, 0] *= scale_to_orig_x
                     gt_tri_orig_for_bev[:, :, 1] *= scale_to_orig_y
+                gt_cls_eval = gt_cls_raw.astype(np.int64)
 
             save_img_mix = os.path.join(out_mix_dir, name)
             draw_pred_with_gt(img_bgr, dets, gt_for_eval, save_img_mix, iou_thr=args.eval_iou_thr)
 
             if gt_for_eval.shape[0] > 0:
-                records, _ = evaluate_single_image(dets, gt_for_eval, iou_thr=args.eval_iou_thr)
+                records, _ = evaluate_single_image(
+                    dets, gt_for_eval, gt_cls_eval, iou_thr=args.eval_iou_thr
+                )
                 metric_records.extend(records)
                 total_gt += gt_for_eval.shape[0]
 
@@ -1122,6 +1169,7 @@ def main():
                             "cz": cz,
                             "pitch": pitch_deg,
                             "roll": roll_deg if args.use_roll else 0.0,
+                            "class_id": int(det.get("class_id", det.get("cls", 0))),
                         }
                     )
 
