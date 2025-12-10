@@ -13,3 +13,4 @@ utils/color/yellow
 utils/color/white
 pointcloud/real_coshow_map.ply
 modify_ply/a.ply
+model_v2_half.onnx
