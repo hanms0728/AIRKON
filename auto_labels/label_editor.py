@@ -28,12 +28,59 @@ Controls
 import argparse
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import colors as mcolors
 from matplotlib.patches import Polygon
+
+
+# Use Korean-capable fonts if available and keep minus signs readable.
+plt.rcParams["font.family"] = [
+    "AppleGothic",
+    "Apple SD Gothic Neo",
+    "NanumGothic",
+    "Malgun Gothic",
+    "DejaVu Sans",
+]
+plt.rcParams["axes.unicode_minus"] = False
+
+# Remove Matplotlib's default fullscreen toggle so "f" stays bound to label flipping.
+fullscreen_keys = list(plt.rcParams.get("keymap.fullscreen", []))
+if fullscreen_keys:
+    plt.rcParams["keymap.fullscreen"] = [
+        key for key in fullscreen_keys if key.lower() not in {"f", "ctrl+f"}
+    ]
+
+
+CLASS_COLOR_PALETTE = (
+    "#ff1744",  # bright red
+    "#00e676",  # vivid green
+    "#2979ff",  # bold blue
+    "#ff9100",
+    "#9c27b0",
+    "#00bcd4",
+    "#d500f9",
+    "#aeea00",
+    "#ff6d00",
+    "#00bfa5",
+)
+
+
+def class_color(class_id: int) -> str:
+    idx = abs(int(class_id)) % len(CLASS_COLOR_PALETTE)
+    return CLASS_COLOR_PALETTE[idx]
+
+
+def lighten_color(color: str, amount: float = 0.3) -> str:
+    amount = max(0.0, min(1.0, amount))
+    r, g, b = mcolors.to_rgb(color)
+    r = 1 - (1 - r) * (1 - amount)
+    g = 1 - (1 - g) * (1 - amount)
+    b = 1 - (1 - b) * (1 - amount)
+    return mcolors.to_hex((r, g, b))
 
 
 def order_poly_ccw(poly4: np.ndarray) -> np.ndarray:
@@ -102,6 +149,18 @@ class LabelEntry:
         self.f1x, self.f1y = r1x, r1y
         self.f2x, self.f2y = r2x, r2y
 
+    def clone(self) -> "LabelEntry":
+        return LabelEntry(
+            class_id=self.class_id,
+            cx=self.cx,
+            cy=self.cy,
+            f1x=self.f1x,
+            f1y=self.f1y,
+            f2x=self.f2x,
+            f2y=self.f2y,
+            score=self.score,
+        )
+
 
 @dataclass
 class LabelSample:
@@ -132,6 +191,24 @@ def parse_image_dirs(image_dirs: str) -> Tuple[str, ...]:
     if "." not in cleaned:
         cleaned.append(".")
     return tuple(cleaned)
+
+
+def parse_class_choices(raw: str) -> Optional[List[int]]:
+    cleaned: List[int] = []
+    seen = set()
+    for token in (raw or "").split(","):
+        t = token.strip()
+        if not t:
+            continue
+        try:
+            value = int(t)
+        except ValueError:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned or None
 
 
 def load_labels(label_path: str) -> List[LabelEntry]:
@@ -239,6 +316,7 @@ class LabelEditorApp:
         root_dir: str,
         start_index: int = 0,
         default_class: int = 0,
+        class_choices: Optional[Sequence[int]] = None,
     ) -> None:
         if not samples:
             raise ValueError("라벨 파일을 찾을 수 없습니다.")
@@ -246,12 +324,30 @@ class LabelEditorApp:
         self.root_dir = os.path.abspath(root_dir)
         self.idx = max(0, min(start_index, len(self.samples) - 1))
         self.default_class = default_class
+        if class_choices:
+            unique: List[int] = []
+            seen: set[int] = set()
+            for c in class_choices:
+                ic = int(c)
+                if ic in seen:
+                    continue
+                seen.add(ic)
+                unique.append(ic)
+            self.class_choices = unique or None
+        else:
+            self.class_choices = None
+        self.current_class = self.default_class
+        if self.class_choices and self.current_class not in self.class_choices:
+            self.current_class = self.class_choices[0]
 
         self.entries: List[LabelEntry] = []
         self.selected_idx: Optional[int] = None
         self.mode = "idle"
         self.add_points: List[Tuple[float, float]] = []
         self.dirty = False
+        self.drag_state: Optional[dict] = None
+        self.copy_mark_indices: Set[int] = set()
+        self.pending_copies: List[LabelEntry] = []
 
         self.fig, self.ax = plt.subplots(figsize=(12, 7))
         self.ax.axis("off")
@@ -264,7 +360,7 @@ class LabelEditorApp:
         self.help_text = self.fig.text(
             0.5,
             0.015,
-            "n/p(or ←/→): prev/next · a: add · esc: cancel add · del: remove · f: flip dir · s: save · q: quit",
+            "n/p(or ←/→): prev/next · a: add · esc: cancel add · d: delete · f: flip dir · drag point: move · y: toggle copy · u: clear copy · s: save · 0-9: set class (selected/new) · q: quit",
             ha="center",
             va="bottom",
             fontsize=9,
@@ -291,8 +387,21 @@ class LabelEditorApp:
             color="#ffffff",
             bbox=dict(facecolor="black", alpha=0.4, pad=4),
         )
+        self.labels_text = self.fig.text(
+            0.99,
+            0.93,
+            "",
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="#d1ffff",
+            fontfamily="monospace",
+            bbox=dict(facecolor="black", alpha=0.35, pad=6),
+        )
 
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
+        self.fig.canvas.mpl_connect("button_release_event", self.on_release)
+        self.fig.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
         self.fig.canvas.mpl_connect("close_event", self.on_close)
 
@@ -315,9 +424,12 @@ class LabelEditorApp:
         sample = self.samples[self.idx]
         rel_label = os.path.relpath(sample.label_path, self.root_dir)
         dirty_flag = " *" if self.dirty else ""
+        copy_text = (
+            f" · copy:{len(self.copy_mark_indices)}" if self.copy_mark_indices else ""
+        )
         self.info_text.set_text(
             f"{self.idx + 1}/{len(self.samples)}{dirty_flag} · {rel_label} · "
-            f"labels: {len(self.entries)}"
+            f"labels: {len(self.entries)} · new-class: {self.current_class}{copy_text}"
         )
 
     def refresh_patches(self) -> None:
@@ -330,14 +442,14 @@ class LabelEditorApp:
 
         for idx, entry in enumerate(self.entries):
             poly = parallelogram_from_pred_triangle(entry.to_triangle())
+            base_color = class_color(entry.class_id)
+            edge_color = "#ffeb3b" if idx == self.selected_idx else base_color
             patch = Polygon(
                 poly,
                 closed=True,
                 fill=False,
                 linewidth=2.2 if idx == self.selected_idx else 1.4,
-                edgecolor="#ffeb3b"
-                if idx == self.selected_idx
-                else "#ff5555",
+                edgecolor=edge_color,
             )
             self.ax.add_patch(patch)
             self.polygon_patches.append(patch)
@@ -345,11 +457,33 @@ class LabelEditorApp:
 
         self.fig.canvas.draw_idle()
         self.update_info()
+        self.update_label_text()
+
+    def update_label_text(self) -> None:
+        if not self.entries:
+            self.labels_text.set_text("(라벨 없음)")
+        else:
+            lines = []
+            for idx, entry in enumerate(self.entries, start=1):
+                is_sel = (idx - 1) == self.selected_idx
+                is_copy = (idx - 1) in self.copy_mark_indices
+                sel_marker = ">" if is_sel else " "
+                copy_marker = "*" if is_copy else " "
+                lines.append(f"{sel_marker}{copy_marker}{idx:02d}: {entry.to_line()}")
+            max_lines = 22
+            if len(lines) > max_lines:
+                head = max_lines // 2
+                tail = max_lines - head - 1
+                display = lines[:head] + ["..."] + lines[-tail:]
+            else:
+                display = lines
+            self.labels_text.set_text("\n".join(display))
 
     def _plot_entry_points(self, idx: int, entry: LabelEntry) -> List:
         """Draw front/center keypoints to help orientation checking."""
         markers = []
         is_sel = idx == self.selected_idx
+        base_color = class_color(entry.class_id)
         # 중심
         cx, cy = entry.center_point()
         (center_marker,) = self.ax.plot(
@@ -365,7 +499,7 @@ class LabelEditorApp:
         )
         markers.append(center_marker)
         # 앞쪽 두 포인트
-        front_color = "#00bcd4" if is_sel else "#4dd0e1"
+        front_color = lighten_color(base_color, 0.35 if is_sel else 0.55)
         for px, py in entry.front_points():
             (marker,) = self.ax.plot(
                 [px],
@@ -374,7 +508,7 @@ class LabelEditorApp:
                 linestyle="None",
                 markersize=8 if is_sel else 6,
                 markerfacecolor=front_color,
-                markeredgecolor="#00363a",
+                markeredgecolor=base_color,
                 markeredgewidth=1.0,
                 alpha=0.95,
             )
@@ -407,11 +541,13 @@ class LabelEditorApp:
                 self.set_status("변경 사항 자동 저장 완료.")
             except Exception as exc:  # noqa: BLE001
                 self.set_status(f"라벨 저장 실패: {exc}")
+        self.prepare_pending_copies()
         self.idx = max(0, min(new_idx, len(self.samples) - 1))
         self.selected_idx = None
         self.mode = "idle"
         self.add_points.clear()
         self.draw_add_markers()
+        self.drag_state = None
         self.load_current_sample()
 
     def load_current_sample(self) -> None:
@@ -427,8 +563,12 @@ class LabelEditorApp:
         self.ax.set_title(os.path.relpath(sample.image_path, self.root_dir))
         self.entries = load_labels(sample.label_path)
         self.dirty = False
+        copied = self.apply_pending_copies()
         self.refresh_patches()
-        self.set_status("이미지 로드 완료.")
+        if copied:
+            self.set_status("복사된 라벨을 추가했습니다. 위치를 조정하세요.")
+        else:
+            self.set_status("이미지 로드 완료.")
 
     def pick_entry(self, x: float, y: float, max_dist: float = 35.0) -> Optional[int]:
         best_idx = None
@@ -439,6 +579,133 @@ class LabelEditorApp:
                 best_dist = dist
                 best_idx = idx
         return best_idx
+
+    def pick_entry_point(
+        self, x: float, y: float, max_dist: float = 20.0
+    ) -> Optional[Tuple[int, str]]:
+        best: Optional[Tuple[int, str]] = None
+        best_dist = max_dist ** 2
+        for idx, entry in enumerate(self.entries):
+            candidates = [
+                ("center", entry.center_point()),
+                ("front1", entry.front_points()[0]),
+                ("front2", entry.front_points()[1]),
+            ]
+            for name, (px, py) in candidates:
+                dist = (px - x) ** 2 + (py - y) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best = (idx, name)
+        return best
+
+    def start_drag(self, entry_idx: int, point: str, x: float, y: float) -> None:
+        entry = self.entries[entry_idx]
+        if point == "center":
+            px, py = entry.center_point()
+        elif point == "front1":
+            (px, py) = entry.front_points()[0]
+        else:
+            (px, py) = entry.front_points()[1]
+        offset = (px - x, py - y)
+        self.drag_state = {
+            "entry_idx": entry_idx,
+            "point": point,
+            "offset": offset,
+            "start": {
+                "cx": entry.cx,
+                "cy": entry.cy,
+                "f1x": entry.f1x,
+                "f1y": entry.f1y,
+                "f2x": entry.f2x,
+                "f2y": entry.f2y,
+            },
+        }
+        self.selected_idx = entry_idx
+        self.refresh_patches()
+        self.set_status(
+            f"{point} 포인트 드래그 중... (클릭을 떼면 완료됩니다.)"
+        )
+
+    def update_drag(self, x: float, y: float) -> None:
+        if not self.drag_state:
+            return
+        entry = self.entries[self.drag_state["entry_idx"]]
+        offset_x, offset_y = self.drag_state["offset"]
+        px = x + offset_x
+        py = y + offset_y
+        start = self.drag_state["start"]
+        point = self.drag_state["point"]
+        if point == "center":
+            entry.cx = px
+            entry.cy = py
+        elif point == "front1":
+            entry.f1x = px
+            entry.f1y = py
+        else:
+            entry.f2x = px
+            entry.f2y = py
+        self.dirty = True
+        self.refresh_patches()
+
+    def finish_drag(self) -> None:
+        if not self.drag_state:
+            return
+        point = self.drag_state["point"]
+        self.drag_state = None
+        self.set_status(f"{point} 포인트 이동 완료.")
+
+    def toggle_copy_mark(self) -> None:
+        if self.selected_idx is None:
+            self.set_status("복사 표시할 라벨을 먼저 선택하세요.")
+            return
+        idx = self.selected_idx
+        if idx in self.copy_mark_indices:
+            self.copy_mark_indices.remove(idx)
+            self.set_status(f"라벨 #{idx + 1} 복사 표시를 해제했습니다.")
+        else:
+            self.copy_mark_indices.add(idx)
+            self.set_status(f"라벨 #{idx + 1}를 복사 대상에 추가했습니다.")
+        self.update_info()
+        self.update_label_text()
+
+    def clear_copy_marks(self) -> None:
+        if not self.copy_mark_indices:
+            self.set_status("복사 표시된 라벨이 없습니다.")
+            return
+        self.copy_mark_indices.clear()
+        self.pending_copies = []
+        self.update_info()
+        self.update_label_text()
+        self.set_status("모든 복사 표시를 해제했습니다.")
+
+    def prepare_pending_copies(self) -> None:
+        if not self.copy_mark_indices:
+            self.pending_copies = []
+            return
+        clones = [
+            self.entries[idx].clone()
+            for idx in sorted(self.copy_mark_indices)
+            if 0 <= idx < len(self.entries)
+        ]
+        self.pending_copies = clones
+
+    def apply_pending_copies(self) -> bool:
+        count = len(self.pending_copies)
+        if count == 0:
+            self.copy_mark_indices.clear()
+            return False
+        start_idx = len(self.entries)
+        for entry in self.pending_copies:
+            self.entries.append(entry.clone())
+        new_indices = set(range(start_idx, start_idx + count))
+        self.pending_copies = []
+        self.copy_mark_indices = new_indices
+        if new_indices:
+            self.selected_idx = max(new_indices)
+        self.dirty = True
+        self.update_info()
+        self.update_label_text()
+        return True
 
     def on_click(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -455,6 +722,13 @@ class LabelEditorApp:
                 self.set_status(f"추가 모드: {remaining}개의 포인트를 더 찍어주세요.")
             return
 
+        if event.button == 1:
+            picked_point = self.pick_entry_point(x, y)
+            if picked_point is not None:
+                entry_idx, point_name = picked_point
+                self.start_drag(entry_idx, point_name, x, y)
+                return
+
         picked = self.pick_entry(x, y)
         if picked is None:
             self.selected_idx = None
@@ -470,12 +744,26 @@ class LabelEditorApp:
         )
         self.set_status(f"라벨 #{picked + 1} 선택 (score={sc_text}).")
 
+    def on_motion(self, event) -> None:
+        if not self.drag_state or event.xdata is None or event.ydata is None:
+            return
+        if event.inaxes != self.ax:
+            return
+        self.update_drag(float(event.xdata), float(event.ydata))
+
+    def on_release(self, event) -> None:
+        if event.button != 1:
+            return
+        if self.drag_state is None:
+            return
+        self.finish_drag()
+
     def finish_add(self) -> None:
         if len(self.add_points) != 3:
             return
         (cx, cy), (f1x, f1y), (f2x, f2y) = self.add_points
         new_entry = LabelEntry(
-            class_id=self.default_class,
+            class_id=self.current_class,
             cx=cx,
             cy=cy,
             f1x=f1x,
@@ -490,14 +778,26 @@ class LabelEditorApp:
         self.add_points.clear()
         self.draw_add_markers()
         self.refresh_patches()
-        self.set_status("새 라벨이 추가되었습니다.")
+        self.set_status(
+            f"새 라벨이 추가되었습니다. (class={self.current_class})"
+        )
 
     def delete_selected(self) -> None:
         if self.selected_idx is None:
             self.set_status("삭제할 라벨을 먼저 선택하세요.")
             return
         removed = self.entries.pop(self.selected_idx)
+        removed_idx = self.selected_idx
         self.selected_idx = None
+        if removed_idx in self.copy_mark_indices:
+            self.copy_mark_indices.remove(removed_idx)
+        updated_marks: Set[int] = set()
+        for idx in self.copy_mark_indices:
+            if idx > removed_idx:
+                updated_marks.add(idx - 1)
+            elif idx < removed_idx:
+                updated_marks.add(idx)
+        self.copy_mark_indices = updated_marks
         self.dirty = True
         self.refresh_patches()
         self.set_status(
@@ -521,10 +821,46 @@ class LabelEditorApp:
             self.draw_add_markers()
             self.set_status("추가 모드 취소.")
         else:
+            if self.drag_state is not None:
+                self.drag_state = None
             self.mode = "add"
             self.add_points.clear()
             self.draw_add_markers()
-            self.set_status("추가 모드: 센터/포인트1/포인트2 순으로 클릭하세요.")
+            self.set_status(
+                f"추가 모드: 센터/포인트1/포인트2 순으로 클릭하세요. (class={self.current_class})"
+            )
+
+    def set_current_class(self, new_class: int) -> None:
+        if self.class_choices and new_class not in self.class_choices:
+            allowed = ", ".join(map(str, self.class_choices))
+            self.set_status(f"허용된 클래스는 [{allowed}] 입니다.")
+            return
+        new_class = int(new_class)
+        if self.current_class == new_class:
+            self.set_status(f"현재 클래스는 {self.current_class} 입니다.")
+            return
+        self.current_class = new_class
+        self.update_info()
+        self.set_status(f"새 라벨 클래스가 {self.current_class} 로 설정되었습니다.")
+
+    def set_selected_class(self, new_class: int) -> None:
+        if self.selected_idx is None:
+            self.set_status("클래스를 변경할 라벨을 먼저 선택하세요.")
+            return
+        if self.class_choices and new_class not in self.class_choices:
+            allowed = ", ".join(map(str, self.class_choices))
+            self.set_status(f"허용된 클래스는 [{allowed}] 입니다.")
+            return
+        entry = self.entries[self.selected_idx]
+        if entry.class_id == new_class:
+            self.set_status(f"라벨 #{self.selected_idx + 1} 는 이미 클래스 {new_class} 입니다.")
+            return
+        entry.class_id = int(new_class)
+        self.dirty = True
+        self.refresh_patches()
+        self.set_status(
+            f"라벨 #{self.selected_idx + 1} 의 클래스를 {entry.class_id} 로 변경했습니다."
+        )
 
     def on_key(self, event) -> None:
         key = (event.key or "").lower()
@@ -540,12 +876,22 @@ class LabelEditorApp:
                 self.set_status("수동 저장 완료.")
             except Exception as exc:  # noqa: BLE001
                 self.set_status(f"라벨 저장 실패: {exc}")
-        elif key in ("delete", "backspace", "d"):
+        elif key == "d":
             self.delete_selected()
         elif key == "f":
             self.flip_selected()
         elif key == "a":
             self.toggle_add_mode()
+        elif key == "y":
+            self.toggle_copy_mark()
+        elif key == "u":
+            self.clear_copy_marks()
+        elif len(key) == 1 and key.isdigit():
+            digit = int(key)
+            if self.selected_idx is not None:
+                self.set_selected_class(digit)
+            else:
+                self.set_current_class(digit)
         elif key == "escape":
             if self.mode == "add":
                 self.toggle_add_mode()
@@ -592,10 +938,17 @@ def main() -> None:
         default=0,
         help="새 라벨 추가 시 사용할 클래스 ID",
     )
+    parser.add_argument(
+        "--class-choices",
+        type=str,
+        default="",
+        help="새 라벨 추가 시 순환할 클래스 ID 목록 (콤마 구분)",
+    )
     args = parser.parse_args()
 
     img_exts = parse_exts(args.img_exts)
     image_dirs = parse_image_dirs(args.image_dirs)
+    class_choices = parse_class_choices(args.class_choices)
     samples = collect_label_samples(args.root, img_exts, image_dirs)
     if not samples:
         raise SystemExit("[Error] 사용할 라벨 파일을 찾지 못했습니다.")
@@ -605,6 +958,7 @@ def main() -> None:
         root_dir=args.root,
         start_index=args.start_index,
         default_class=args.default_class,
+        class_choices=class_choices,
     )
     app.run()
 
