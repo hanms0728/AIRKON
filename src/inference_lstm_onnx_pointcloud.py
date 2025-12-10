@@ -136,7 +136,7 @@ def draw_pred_only(image_bgr, dets, save_path_img, save_path_txt, W, H, W0, H0):
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
         cv2.polylines(img, [poly4], isClosed=True, color=color, thickness=2)
         for pt in tri.astype(int):
-            cv2.circle(img, (int(pt[0]), int(pt[1])), 3, color, -1)
+            cv2.circle(img, (int(pt[0]), int(pt[1])), 4, (0, 0, 0), -1)
         cx, cy = int(tri[0][0]), int(tri[0][1])
         cv2.putText(img, f"{cls_id}:{score:.2f}", (cx, max(0, cy-4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
@@ -174,7 +174,7 @@ def draw_pred_with_gt(image_bgr_resized, dets, gt_tris_resized, save_path_img_mi
         poly4 = poly_from_tri(tri).astype(np.int32)
         cv2.polylines(img, [poly4], True, color, 2)
         for pt in tri.astype(int):
-            cv2.circle(img, (int(pt[0]), int(pt[1])), 3, color, -1)
+            cv2.circle(img, (int(pt[0]), int(pt[1])), 4, (0, 0, 0), -1)
         p0 = tri[0].astype(int)
         cv2.putText(img, f"{cls_id}:{score:.2f}", (int(p0[0]), max(0, int(p0[1])-4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
