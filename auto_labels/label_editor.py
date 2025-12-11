@@ -34,7 +34,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import colors as mcolors
-from matplotlib.patches import Polygon
+from matplotlib.patches import Polygon, Rectangle
 
 
 # Use Korean-capable fonts if available and keep minus signs readable.
@@ -348,6 +348,12 @@ class LabelEditorApp:
         self.drag_state: Optional[dict] = None
         self.copy_mark_indices: Set[int] = set()
         self.pending_copies: List[LabelEntry] = []
+        self.roi_mode = False
+        self.roi_points: List[Tuple[float, float]] = []
+        self.delete_roi_rect: Optional[Tuple[float, float, float, float]] = None
+        self.roi_patch: Optional[Rectangle] = None
+        self.undo_stack: List[dict] = []
+        self.max_undo = 50
 
         self.fig, self.ax = plt.subplots(figsize=(12, 7))
         self.ax.axis("off")
@@ -360,7 +366,7 @@ class LabelEditorApp:
         self.help_text = self.fig.text(
             0.5,
             0.015,
-            "n/p(or ←/→): prev/next · a: add · esc: cancel add · d: delete · f: flip dir · drag point: move · y: toggle copy · u: clear copy · s: save · 0-9: set class (selected/new) · q: quit",
+            "n/p(or ←/→): prev/next · a: add · esc: cancel add · d: delete · f: flip dir · drag point: move · r: toggle delete ROI · y: toggle copy · u: clear copy · ctrl+z: undo · s: save · 0-9: set class (selected/new) · q: quit",
             ha="center",
             va="bottom",
             fontsize=9,
@@ -427,9 +433,10 @@ class LabelEditorApp:
         copy_text = (
             f" · copy:{len(self.copy_mark_indices)}" if self.copy_mark_indices else ""
         )
+        roi_text = " · ROI" if self.delete_roi_rect else ""
         self.info_text.set_text(
             f"{self.idx + 1}/{len(self.samples)}{dirty_flag} · {rel_label} · "
-            f"labels: {len(self.entries)} · new-class: {self.current_class}{copy_text}"
+            f"labels: {len(self.entries)} · new-class: {self.current_class}{copy_text}{roi_text}"
         )
 
     def refresh_patches(self) -> None:
@@ -458,6 +465,7 @@ class LabelEditorApp:
         self.fig.canvas.draw_idle()
         self.update_info()
         self.update_label_text()
+        self.update_roi_patch()
 
     def update_label_text(self) -> None:
         if not self.entries:
@@ -548,9 +556,13 @@ class LabelEditorApp:
         self.add_points.clear()
         self.draw_add_markers()
         self.drag_state = None
+        if self.roi_mode:
+            self.roi_mode = False
+            self.roi_points.clear()
         self.load_current_sample()
 
     def load_current_sample(self) -> None:
+        self.undo_stack.clear()
         sample = self.samples[self.idx]
         img_bgr = cv2.imread(sample.image_path, cv2.IMREAD_COLOR)
         if img_bgr is None:
@@ -564,9 +576,16 @@ class LabelEditorApp:
         self.entries = load_labels(sample.label_path)
         self.dirty = False
         copied = self.apply_pending_copies()
+        removed = self.remove_labels_in_roi(update_view=False, announce=False)
         self.refresh_patches()
-        if copied:
+        if copied and removed:
+            self.set_status(
+                f"복사된 라벨을 추가하고 삭제 영역에서 {removed}개를 제거했습니다."
+            )
+        elif copied:
             self.set_status("복사된 라벨을 추가했습니다. 위치를 조정하세요.")
+        elif removed:
+            self.set_status(f"삭제 영역에서 {removed}개의 라벨을 제거했습니다.")
         else:
             self.set_status("이미지 로드 완료.")
 
@@ -620,6 +639,7 @@ class LabelEditorApp:
                 "f2y": entry.f2y,
             },
         }
+        self.push_undo()
         self.selected_idx = entry_idx
         self.refresh_patches()
         self.set_status(
@@ -654,6 +674,51 @@ class LabelEditorApp:
         self.drag_state = None
         self.set_status(f"{point} 포인트 이동 완료.")
 
+    def push_undo(self) -> None:
+        snapshot = {
+            "entries": [entry.clone() for entry in self.entries],
+            "selected_idx": self.selected_idx,
+            "copy_marks": set(self.copy_mark_indices),
+            "dirty": self.dirty,
+        }
+        self.undo_stack.append(snapshot)
+        if len(self.undo_stack) > self.max_undo:
+            self.undo_stack.pop(0)
+
+    def undo(self) -> None:
+        if not self.undo_stack:
+            self.set_status("실행 취소할 작업이 없습니다.")
+            return
+        snapshot = self.undo_stack.pop()
+        self.entries = [entry.clone() for entry in snapshot["entries"]]
+        self.selected_idx = snapshot["selected_idx"]
+        self.copy_mark_indices = set(snapshot["copy_marks"])
+        self.dirty = snapshot["dirty"]
+        self.pending_copies = []
+        self.refresh_patches()
+        self.set_status("마지막 작업을 취소했습니다.")
+
+    def update_roi_patch(self) -> None:
+        if self.roi_patch is not None:
+            self.roi_patch.remove()
+            self.roi_patch = None
+        if not self.delete_roi_rect:
+            return
+        x1, y1, x2, y2 = self.delete_roi_rect
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        patch = Rectangle(
+            (x1, y1),
+            width,
+            height,
+            linewidth=1.8,
+            edgecolor="#00ffc3",
+            facecolor="none",
+            linestyle="--",
+        )
+        self.ax.add_patch(patch)
+        self.roi_patch = patch
+
     def toggle_copy_mark(self) -> None:
         if self.selected_idx is None:
             self.set_status("복사 표시할 라벨을 먼저 선택하세요.")
@@ -667,6 +732,52 @@ class LabelEditorApp:
             self.set_status(f"라벨 #{idx + 1}를 복사 대상에 추가했습니다.")
         self.update_info()
         self.update_label_text()
+
+    def toggle_roi_mode(self) -> None:
+        if self.roi_mode:
+            self.roi_mode = False
+            self.roi_points.clear()
+            self.set_status("삭제 영역 지정을 취소했습니다.")
+            return
+        if self.delete_roi_rect:
+            self.clear_roi()
+            return
+        if self.mode == "add":
+            self.toggle_add_mode()
+        self.roi_mode = True
+        self.roi_points.clear()
+        self.set_status("삭제 영역 지정: 첫 번째 코너를 클릭하세요.")
+
+    def clear_roi(self) -> None:
+        if not self.delete_roi_rect:
+            self.set_status("활성화된 삭제 영역이 없습니다.")
+            return
+        self.delete_roi_rect = None
+        self.update_roi_patch()
+        self.set_status("삭제 영역을 해제했습니다.")
+        self.update_info()
+
+    def finalize_roi(self) -> None:
+        if len(self.roi_points) < 2:
+            return
+        (x1, y1), (x2, y2) = self.roi_points[:2]
+        if x1 == x2 or y1 == y2:
+            self.set_status("삭제 영역이 너무 작습니다. 다시 지정하세요.")
+            self.roi_points.clear()
+            self.roi_mode = False
+            return
+        xmin, xmax = sorted([x1, x2])
+        ymin, ymax = sorted([y1, y2])
+        self.delete_roi_rect = (xmin, ymin, xmax, ymax)
+        self.roi_mode = False
+        self.roi_points.clear()
+        removed = self.remove_labels_in_roi(record_undo=True)
+        self.update_roi_patch()
+        if removed:
+            self.set_status(f"삭제 영역 설정 완료. {removed}개의 라벨을 제거했습니다.")
+        else:
+            self.set_status("삭제 영역 설정 완료. 해당 영역에 라벨이 없습니다.")
+        self.update_info()
 
     def clear_copy_marks(self) -> None:
         if not self.copy_mark_indices:
@@ -707,10 +818,59 @@ class LabelEditorApp:
         self.update_label_text()
         return True
 
+    def remove_labels_in_roi(
+        self,
+        update_view: bool = True,
+        announce: bool = False,
+        record_undo: bool = False,
+    ) -> int:
+        if not self.delete_roi_rect:
+            return 0
+        x1, y1, x2, y2 = self.delete_roi_rect
+        old_entries = self.entries
+        new_entries: List[LabelEntry] = []
+        new_marks: Set[int] = set()
+        removed = 0
+        new_selected: Optional[int] = None
+        selected_idx = self.selected_idx
+        for idx, entry in enumerate(old_entries):
+            cx, cy = entry.center_point()
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                removed += 1
+                continue
+            new_entries.append(entry)
+            if idx in self.copy_mark_indices:
+                new_marks.add(len(new_entries) - 1)
+            if selected_idx is not None and idx == selected_idx:
+                new_selected = len(new_entries) - 1
+        if removed:
+            if record_undo:
+                self.push_undo()
+            self.entries = new_entries
+            self.copy_mark_indices = new_marks
+            self.selected_idx = new_selected
+            self.dirty = True
+            if update_view:
+                self.refresh_patches()
+            else:
+                self.update_info()
+                self.update_label_text()
+            if announce:
+                self.set_status(f"선택한 영역에서 {removed}개의 라벨을 삭제했습니다.")
+        return removed
+
     def on_click(self, event) -> None:
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
             return
         x, y = float(event.xdata), float(event.ydata)
+
+        if self.roi_mode:
+            self.roi_points.append((x, y))
+            if len(self.roi_points) >= 2:
+                self.finalize_roi()
+            else:
+                self.set_status("삭제 영역 지정: 두 번째 코너를 클릭하세요.")
+            return
 
         if self.mode == "add":
             self.add_points.append((x, y))
@@ -761,6 +921,7 @@ class LabelEditorApp:
     def finish_add(self) -> None:
         if len(self.add_points) != 3:
             return
+        self.push_undo()
         (cx, cy), (f1x, f1y), (f2x, f2y) = self.add_points
         new_entry = LabelEntry(
             class_id=self.current_class,
@@ -786,6 +947,7 @@ class LabelEditorApp:
         if self.selected_idx is None:
             self.set_status("삭제할 라벨을 먼저 선택하세요.")
             return
+        self.push_undo()
         removed = self.entries.pop(self.selected_idx)
         removed_idx = self.selected_idx
         self.selected_idx = None
@@ -808,6 +970,7 @@ class LabelEditorApp:
         if self.selected_idx is None:
             self.set_status("뒤집을 라벨을 먼저 선택하세요.")
             return
+        self.push_undo()
         entry = self.entries[self.selected_idx]
         entry.flip_front_back()
         self.dirty = True
@@ -855,6 +1018,7 @@ class LabelEditorApp:
         if entry.class_id == new_class:
             self.set_status(f"라벨 #{self.selected_idx + 1} 는 이미 클래스 {new_class} 입니다.")
             return
+        self.push_undo()
         entry.class_id = int(new_class)
         self.dirty = True
         self.refresh_patches()
@@ -886,6 +1050,10 @@ class LabelEditorApp:
             self.toggle_copy_mark()
         elif key == "u":
             self.clear_copy_marks()
+        elif key == "r":
+            self.toggle_roi_mode()
+        elif key == "ctrl+z":
+            self.undo()
         elif len(key) == 1 and key.isdigit():
             digit = int(key)
             if self.selected_idx is not None:
