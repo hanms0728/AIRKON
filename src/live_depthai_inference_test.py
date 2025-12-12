@@ -4,7 +4,9 @@ import argparse
 import json
 import math
 import os
+import queue
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -166,6 +168,67 @@ def _class_color(class_id: Optional[int]) -> Tuple[int, int, int]:
     if class_id is None:
         return (0, 255, 0)
     return CLASS_COLOR_TABLE.get(int(class_id), (0, 200, 255))
+
+
+class VisualizationWorker(threading.Thread):
+    def __init__(self, show_window: bool):
+        super().__init__(daemon=True)
+        self.queue: queue.Queue = queue.Queue(maxsize=2)
+        self.show_window = show_window
+        self.stop_evt = threading.Event()
+        self._last_key = -1
+
+    def submit(self, payload):
+        try:
+            self.queue.put_nowait(payload)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.queue.put_nowait(payload)
+            except queue.Full:
+                pass
+
+    def get_key(self) -> int:
+        key = self._last_key
+        self._last_key = -1
+        return key
+
+    def stop(self):
+        self.stop_evt.set()
+
+    def run(self):
+        while not self.stop_evt.is_set():
+            try:
+                frame_bgr, tri_records, dets, sx, sy, infer_ms, save_path = self.queue.get(timeout=0.01)
+            except queue.Empty:
+                if self.show_window:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key != 255:
+                        self._last_key = key
+                continue
+
+            vis_frame = None
+            if tri_records:
+                vis_frame = draw_pred_pseudo3d(frame_bgr, tri_records)
+            if vis_frame is None:
+                vis_frame = overlay_detections(frame_bgr, dets, sx, sy)
+            cv2.putText(vis_frame, f"Infer {infer_ms:.1f} ms | dets {len(dets)}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+
+            if save_path:
+                try:
+                    cv2.imwrite(save_path, vis_frame)
+                except Exception as exc:
+                    print(f"[VisWorker] WARN: failed to save {save_path}: {exc}")
+
+            if self.show_window:
+                cv2.imshow("DepthAI TRT Live", vis_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key != 255:
+                    self._last_key = key
 
 
 def extract_tris_and_colors(dets,
@@ -425,6 +488,11 @@ def run_live_inference(args) -> None:
                 raise ValueError(f"Unsupported resize mode: {args.resize_mode}")
             resize_mode = getattr(dai.ImgResizeMode, mode_key)
 
+    vis_worker = None
+    if args.show_vis or save_dir is not None:
+        vis_worker = VisualizationWorker(show_window=args.show_vis)
+        vis_worker.start()
+
     with dai.Pipeline() as pipeline:
         cam = pipeline.create(dai.node.Camera).build()
         request_kwargs = {}
@@ -487,35 +555,30 @@ def run_live_inference(args) -> None:
                 t_vis0 = time.time()
                 vis_ms = 0.0
                 key = -1
-                vis_frame = None
-                if args.show_vis or save_dir is not None:
-                    if tri_records:
-                        vis_frame = draw_pred_pseudo3d(
-                            prep["orig_bgr"],
-                            tri_records
-                        )
-                    if vis_frame is None:
-                        vis_frame = overlay_detections(
-                            prep["orig_bgr"],
-                            dets,
-                            prep["scale_to_orig_x"],
-                            prep["scale_to_orig_y"]
-                        )
-                    cv2.putText(vis_frame, f"Infer {infer_ms:.1f} ms | dets {len(dets)}",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
-
-                if args.show_vis and vis_frame is not None:
-                    cv2.imshow("DepthAI TRT Live", vis_frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    vis_ms = (time.time() - t_vis0) * 1000.0
+                vis_save_path = None
+                if save_dir is not None:
+                    vis_save_path = os.path.join(save_dir, f"frame_{frame_idx:06d}.jpg")
+                if vis_worker is not None and (args.show_vis or vis_save_path is not None):
+                    vis_payload = (
+                        prep["orig_bgr"].copy(),
+                        tri_records,
+                        dets,
+                        prep["scale_to_orig_x"],
+                        prep["scale_to_orig_y"],
+                        infer_ms,
+                        vis_save_path,
+                    )
+                    vis_worker.submit(vis_payload)
+                elif vis_save_path is not None:
+                    try:
+                        cv2.imwrite(vis_save_path, prep["orig_bgr"])
+                    except Exception as exc:
+                        print(f"[Vis] WARN: failed to save {vis_save_path}: {exc}")
+                if vis_worker is not None and args.show_vis:
+                    key = vis_worker.get_key()
                 else:
                     key = cv2.waitKey(1) & 0xFF
-                    vis_ms = (time.time() - t_vis0) * 1000.0
-
-                if save_dir is not None:
-                    filename = os.path.join(save_dir, f"frame_{frame_idx:06d}.jpg")
-                    frame_to_save = vis_frame if vis_frame is not None else prep["orig_bgr"]
-                    cv2.imwrite(filename, frame_to_save)
+                vis_ms = (time.time() - t_vis0) * 1000.0
                 frame_idx += 1
 
                 capture_ts = None
@@ -551,6 +614,9 @@ def run_live_inference(args) -> None:
                     print("[Info] State reset requested.")
                     runner.reset()
         finally:
+            if vis_worker is not None:
+                vis_worker.stop()
+                vis_worker.join(timeout=1.0)
             cv2.destroyAllWindows()
             if udp_sender is not None:
                 udp_sender.close()
