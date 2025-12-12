@@ -48,103 +48,105 @@ def overlay_detections(frame_bgr: np.ndarray,
         tri[:, 0] *= scale_to_orig_x
         tri[:, 1] *= scale_to_orig_y
         poly = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.int32)
-        cv2.polylines(vis, [poly], isClosed=True, color=(0, 255, 0), thickness=2)
+        class_id = det.get("class_id", det.get("cls"))
+        color = _class_color(class_id)
+        cv2.polylines(vis, [poly], isClosed=True, color=color, thickness=2)
         cx, cy = int(tri[0][0]), int(tri[0][1])
-        cv2.putText(vis, f"{det['score']:.2f}", (cx, max(0, cy - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        score = float(det.get("score", 0.0))
+        cls_text = f"C{int(class_id)}" if class_id is not None else "C?"
+        text = f"{cls_text} {score:.2f}"
+        cv2.putText(vis, text, (cx, max(0, cy - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return vis
 
 
 def draw_pred_pseudo3d(
     image_bgr: np.ndarray,
-    tris_orig: List[np.ndarray],
+    tri_records: List[dict],
     *,
-    color_infos: Optional[List[Optional[dict]]] = None,
     dy: Optional[int] = None,
     height_scale: float = 0.5,
     min_dy: int = 8,
     max_dy: int = 80,
 ) -> Optional[np.ndarray]:
     """
-    원본 이미지 좌표계의 삼각형(tris_orig)을 이용해 pseudo-3D 박스를 생성한다.
+    tri_records: [{\"tri\": (3,2) np.ndarray, \"color_info\": dict|None, \"class_id\": int|None, \"score\": float}, ...]
     """
-    if not tris_orig:
+    if not tri_records:
         return None
 
     img = image_bgr.copy()
     H, W = image_bgr.shape[:2]
 
-    records: List[Tuple[np.ndarray, Optional[dict]]] = []
-    for idx, tri in enumerate(tris_orig):
-        tri = np.asarray(tri, dtype=np.float32)
+    records: List[Tuple[np.ndarray, Optional[dict], Optional[int], float]] = []
+    for rec in tri_records:
+        tri = np.asarray(rec.get("tri"), dtype=np.float32)
         if tri.shape != (3, 2) or not np.all(np.isfinite(tri)):
             continue
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.float32)
-        info = None
-        if color_infos is not None and idx < len(color_infos):
-            info = color_infos[idx]
-        records.append((poly4, info))
+        color_info = rec.get("color_info")
+        class_id = rec.get("class_id")
+        score = float(rec.get("score", 0.0))
+        records.append((poly4, color_info, class_id, score))
 
     if not records:
         return None
 
     records.sort(key=lambda rec: rec[0][:, 1].max())
 
-    for poly, color_info in records:
+    for poly, color_info, class_id, score in records:
         x_min, x_max = poly[:, 0].min(), poly[:, 0].max()
         y_min, y_max = poly[:, 1].min(), poly[:, 1].max()
         w = max(1.0, float(x_max - x_min))
         h = max(1.0, float(y_max - y_min))
         diag = math.sqrt(w * w + h * h)
 
-        if dy is not None:
-            off = int(dy)
-        else:
-            off = int(np.clip(height_scale * diag, min_dy, max_dy))
+        off = int(np.clip(height_scale * diag, min_dy, max_dy)) if dy is None else int(dy)
 
         base = poly.astype(int)
         top = base.copy()
         top[:, 1] -= off
 
-        mask = np.zeros((H, W), dtype=np.uint8)
-        cv2.fillPoly(mask, [base], 1)
-        cv2.fillPoly(mask, [top], 1)
-        n = len(base)
-        for i in range(n):
-            j = (i + 1) % n
-            quad = np.array([base[i], base[j], top[j], top[i]], dtype=np.int32)
-            cv2.fillPoly(mask, [quad], 1)
-
         overlay = img.copy()
+        base_color = _class_color(class_id)
         cv2.fillPoly(overlay, [top], (0, 200, 255))
-        cv2.fillPoly(overlay, [base], (0, 170, 240))
+        cv2.fillPoly(overlay, [base], base_color)
         cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
 
-        for i in range(n):
-            cv2.line(img, tuple(base[i]), tuple(top[i]), (0, 255, 255), 2)
-        cv2.polylines(img, [base], True, (0, 255, 255), 2)
-        cv2.polylines(img, [top], True, (0, 255, 255), 2)
+        for i in range(len(base)):
+            cv2.line(img, tuple(base[i]), tuple(top[i]), base_color, 2)
+        cv2.polylines(img, [base], True, base_color, 2)
+        cv2.polylines(img, [top], True, base_color, 2)
 
-        if color_info:
-            bgr = color_info.get("bgr")
-            if bgr:
-                b, g, r = [int(np.clip(v, 0, 255)) for v in bgr]
-                x_center = int(base[:, 0].mean())
-                y_top_min = int(top[:, 1].min())
-                cy = y_top_min - 12
-                patch_w, patch_h = 18, 18
-                x1 = max(0, min(W - patch_w, x_center - patch_w // 2))
-                y1 = max(0, min(H - patch_h, cy - patch_h // 2))
-                x2 = min(W - 1, x1 + patch_w)
-                y2 = min(H - 1, y1 + patch_h)
-                cv2.rectangle(img, (x1, y1), (x2, y2), (b, g, r), thickness=-1)
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
-                color_label = color_info.get("label") or color_info.get("hex")
-                if color_label:
-                    text = str(color_label).upper()
-                    text_org = (x1, max(0, y1 - 6))
-                    cv2.putText(img, text, text_org, cv2.FONT_HERSHEY_SIMPLEX,
-                                0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        cls_text = f"C{int(class_id)}" if class_id is not None else "C?"
+        score_text = f"{score:.2f}"
+        if color_info and color_info.get("bgr"):
+            b, g, r = [int(np.clip(v, 0, 255)) for v in color_info["bgr"]]
+            x_center = int(base[:, 0].mean())
+            y_top_min = int(top[:, 1].min())
+            cy = y_top_min - 12
+            patch_w, patch_h = 18, 18
+            x1 = max(0, min(W - patch_w, x_center - patch_w // 2))
+            y1 = max(0, min(H - patch_h, cy - patch_h // 2))
+            x2 = min(W - 1, x1 + patch_w)
+            y2 = min(H - 1, y1 + patch_h)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (b, g, r), thickness=-1)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
+            color_label = color_info.get("label") or color_info.get("hex")
+            text_lines = []
+            if color_label:
+                text_lines.append(str(color_label).upper())
+            text_lines.append(f"{cls_text} {score_text}")
+            for i, line in enumerate(text_lines):
+                text_org = (x1, max(0, y1 - 6 - i * 12))
+                cv2.putText(img, line, text_org, cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        else:
+            x_center = int(base[:, 0].mean())
+            y_top_min = int(top[:, 1].min())
+            text_org = (x_center, max(0, y_top_min - 6))
+            cv2.putText(img, f"{cls_text} {score_text}", text_org,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
     return img
 
@@ -228,21 +230,20 @@ def _classify_hex_color_strict(hex_color: Optional[str]):
 def extract_tris_and_colors(dets,
                             orig_bgr: np.ndarray,
                             scale_to_orig_x: float,
-                            scale_to_orig_y: float) -> Tuple[List[np.ndarray], List[Optional[dict]], List[Optional[dict]]]:
-    tris_orig: List[np.ndarray] = []
-    tris_color_infos: List[Optional[dict]] = []
+                            scale_to_orig_y: float) -> Tuple[List[dict], List[Optional[dict]]]:
+    tri_records: List[dict] = []
     det_color_infos: List[Optional[dict]] = []
     Hc, Wc = orig_bgr.shape[:2]
     for det in dets:
         tri = det.get("tri")
         color_info: Optional[dict] = None
+        tri_orig = None
         if tri is not None:
             tri = np.asarray(tri, dtype=np.float32)
             if tri.shape == (3, 2):
                 tri_orig = tri.copy()
                 tri_orig[:, 0] *= scale_to_orig_x
                 tri_orig[:, 1] *= scale_to_orig_y
-                tris_orig.append(tri_orig)
 
                 poly = parallelogram_from_triangle(tri_orig[0], tri_orig[1], tri_orig[2]).astype(np.int32)
                 mask = np.zeros((Hc, Wc), dtype=np.uint8)
@@ -261,13 +262,15 @@ def extract_tris_and_colors(dets,
                         "confidence": float(confidence),
                         "bgr": (mb, mg, mr),
                     }
-                else:
-                    color_info = None
-                tris_color_infos.append(color_info)
-            else:
-                color_info = None
         det_color_infos.append(color_info)
-    return tris_orig, tris_color_infos, det_color_infos
+        if tri_orig is not None:
+            tri_records.append({
+                "tri": tri_orig,
+                "color_info": color_info,
+                "class_id": det.get("class_id", det.get("cls")),
+                "score": float(det.get("score", 0.0)),
+            })
+    return tri_records, det_color_infos
 def load_homography_matrix(path: Optional[str]) -> Optional[np.ndarray]:
     if not path:
         return None
@@ -343,13 +346,14 @@ def dets_to_bev_entries(dets,
             continue
         yaw = math.degrees(math.atan2(forward_vec[1], forward_vec[0]))
         yaw = (yaw + 180.0) % 360.0 - 180.0
+        cls_raw = det.get("class_id", det.get("cls"))
         entry = {
             "center": [float(center[0]), float(center[1])],
             "length": float(length_half * 2.0),
             "width": float(width),
             "yaw": float(yaw),
             "score": float(det.get("score", 0.0)),
-            "class_id": int(det.get("class_id", det.get("cls", -1))),
+            "class_id": int(cls_raw) if cls_raw is not None else -1,
         }
         if color_infos is not None and idx < len(color_infos):
             color_info = color_infos[idx]
@@ -425,6 +429,10 @@ class UDPSender:
         bev_list = bev_dets or []
         if self.fmt == "json":
             payload = self._pack_json(cam_id, ts, bev_list, capture_ts)
+            try:
+                print(f"[UDP] {payload.decode('utf-8')}")
+            except Exception:
+                print(f"[UDP] bytes={payload[:200]}{'...' if len(payload) > 200 else ''}")
         else:
             raise ValueError(f"Unsupported UDP payload fmt: {self.fmt}")
         if len(payload) <= self.max_bytes:
@@ -516,9 +524,9 @@ def run_live_inference(args) -> None:
                     use_gpu_nms=True
                 )[0]
                 dets = tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
-                tris_orig, tris_color_infos, det_color_infos = [], [], []
+                tri_records, det_color_infos = [], []
                 if dets:
-                    tris_orig, tris_color_infos, det_color_infos = extract_tris_and_colors(
+                    tri_records, det_color_infos = extract_tris_and_colors(
                         dets,
                         prep["orig_bgr"],
                         prep["scale_to_orig_x"],
@@ -532,11 +540,10 @@ def run_live_inference(args) -> None:
                 key = -1
                 vis_frame = None
                 if args.show_vis or save_dir is not None:
-                    if tris_orig:
+                    if tri_records:
                         vis_frame = draw_pred_pseudo3d(
                             prep["orig_bgr"],
-                            tris_orig,
-                            color_infos=tris_color_infos
+                            tri_records
                         )
                     if vis_frame is None:
                         vis_frame = overlay_detections(
