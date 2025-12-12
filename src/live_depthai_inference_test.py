@@ -59,6 +59,7 @@ def draw_pred_pseudo3d(
     image_bgr: np.ndarray,
     tris_orig: List[np.ndarray],
     *,
+    color_infos: Optional[List[Optional[dict]]] = None,
     dy: Optional[int] = None,
     height_scale: float = 0.5,
     min_dy: int = 8,
@@ -73,20 +74,23 @@ def draw_pred_pseudo3d(
     img = image_bgr.copy()
     H, W = image_bgr.shape[:2]
 
-    polys: List[np.ndarray] = []
-    for tri in tris_orig:
+    records: List[Tuple[np.ndarray, Optional[dict]]] = []
+    for idx, tri in enumerate(tris_orig):
         tri = np.asarray(tri, dtype=np.float32)
         if tri.shape != (3, 2) or not np.all(np.isfinite(tri)):
             continue
         poly4 = parallelogram_from_triangle(tri[0], tri[1], tri[2]).astype(np.float32)
-        polys.append(poly4)
+        info = None
+        if color_infos is not None and idx < len(color_infos):
+            info = color_infos[idx]
+        records.append((poly4, info))
 
-    if not polys:
+    if not records:
         return None
 
-    polys.sort(key=lambda poly: poly[:, 1].max())
+    records.sort(key=lambda rec: rec[0][:, 1].max())
 
-    for poly in polys:
+    for poly, color_info in records:
         x_min, x_max = poly[:, 0].min(), poly[:, 0].max()
         y_min, y_max = poly[:, 1].min(), poly[:, 1].max()
         w = max(1.0, float(x_max - x_min))
@@ -121,6 +125,27 @@ def draw_pred_pseudo3d(
         cv2.polylines(img, [base], True, (0, 255, 255), 2)
         cv2.polylines(img, [top], True, (0, 255, 255), 2)
 
+        if color_info:
+            bgr = color_info.get("bgr")
+            if bgr:
+                b, g, r = [int(np.clip(v, 0, 255)) for v in bgr]
+                x_center = int(base[:, 0].mean())
+                y_top_min = int(top[:, 1].min())
+                cy = y_top_min - 12
+                patch_w, patch_h = 18, 18
+                x1 = max(0, min(W - patch_w, x_center - patch_w // 2))
+                y1 = max(0, min(H - patch_h, cy - patch_h // 2))
+                x2 = min(W - 1, x1 + patch_w)
+                y2 = min(H - 1, y1 + patch_h)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (b, g, r), thickness=-1)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
+                color_label = color_info.get("label") or color_info.get("hex")
+                if color_label:
+                    text = str(color_label).upper()
+                    text_org = (x1, max(0, y1 - 6))
+                    cv2.putText(img, text, text_org, cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
     return img
 
 
@@ -134,6 +159,20 @@ _COLOR_RGB_RULES = {
     "green": {"min": (39.0, 196.0, 141.0), "max": (127.0, 229.0, 232.0)},
     "yellow": {"min": (218.0, 203.0, 74.0), "max": (218.0, 203.0, 74.0)},
 }
+
+CLASS_COLOR_TABLE = {
+    0: (0, 255, 0),      # lime
+    1: (0, 255, 255),    # yellow
+    2: (255, 0, 0),      # blue (BGR)
+    3: (255, 0, 255),    # magenta
+    4: (0, 128, 255),    # orange
+}
+
+
+def _class_color(class_id: Optional[int]) -> Tuple[int, int, int]:
+    if class_id is None:
+        return (0, 255, 0)
+    return CLASS_COLOR_TABLE.get(int(class_id), (0, 200, 255))
 
 
 def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
@@ -189,38 +228,46 @@ def _classify_hex_color_strict(hex_color: Optional[str]):
 def extract_tris_and_colors(dets,
                             orig_bgr: np.ndarray,
                             scale_to_orig_x: float,
-                            scale_to_orig_y: float) -> Tuple[List[np.ndarray], List[Optional[str]]]:
+                            scale_to_orig_y: float) -> Tuple[List[np.ndarray], List[Optional[dict]], List[Optional[dict]]]:
     tris_orig: List[np.ndarray] = []
-    color_hexes: List[Optional[str]] = []
+    tris_color_infos: List[Optional[dict]] = []
+    det_color_infos: List[Optional[dict]] = []
     Hc, Wc = orig_bgr.shape[:2]
     for det in dets:
         tri = det.get("tri")
-        if tri is None:
-            color_hexes.append(None)
-            continue
-        tri = np.asarray(tri, dtype=np.float32)
-        if tri.shape != (3, 2):
-            color_hexes.append(None)
-            continue
-        tri_orig = tri.copy()
-        tri_orig[:, 0] *= scale_to_orig_x
-        tri_orig[:, 1] *= scale_to_orig_y
-        tris_orig.append(tri_orig)
+        color_info: Optional[dict] = None
+        if tri is not None:
+            tri = np.asarray(tri, dtype=np.float32)
+            if tri.shape == (3, 2):
+                tri_orig = tri.copy()
+                tri_orig[:, 0] *= scale_to_orig_x
+                tri_orig[:, 1] *= scale_to_orig_y
+                tris_orig.append(tri_orig)
 
-        poly = parallelogram_from_triangle(tri_orig[0], tri_orig[1], tri_orig[2]).astype(np.int32)
-        mask = np.zeros((Hc, Wc), dtype=np.uint8)
-        cv2.fillPoly(mask, [poly], 1)
-        roi = orig_bgr[mask == 1]
-        if roi.size == 0:
-            color_hexes.append("000000")
-            continue
-        mean_bgr = roi.mean(axis=0)
-        mb = int(np.clip(mean_bgr[0], 0, 255))
-        mg = int(np.clip(mean_bgr[1], 0, 255))
-        mr = int(np.clip(mean_bgr[2], 0, 255))
-        hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
-        color_hexes.append(hexcol)
-    return tris_orig, color_hexes
+                poly = parallelogram_from_triangle(tri_orig[0], tri_orig[1], tri_orig[2]).astype(np.int32)
+                mask = np.zeros((Hc, Wc), dtype=np.uint8)
+                cv2.fillPoly(mask, [poly], 1)
+                roi = orig_bgr[mask == 1]
+                if roi.size > 0:
+                    mean_bgr = roi.mean(axis=0)
+                    mb = int(np.clip(mean_bgr[0], 0, 255))
+                    mg = int(np.clip(mean_bgr[1], 0, 255))
+                    mr = int(np.clip(mean_bgr[2], 0, 255))
+                    hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
+                    label, confidence, _ = _classify_hex_color_strict(hexcol)
+                    color_info = {
+                        "hex": hexcol,
+                        "label": label,
+                        "confidence": float(confidence),
+                        "bgr": (mb, mg, mr),
+                    }
+                else:
+                    color_info = None
+                tris_color_infos.append(color_info)
+            else:
+                color_info = None
+        det_color_infos.append(color_info)
+    return tris_orig, tris_color_infos, det_color_infos
 def load_homography_matrix(path: Optional[str]) -> Optional[np.ndarray]:
     if not path:
         return None
@@ -268,7 +315,7 @@ def apply_homography(points: np.ndarray, H: np.ndarray) -> np.ndarray:
 
 def dets_to_bev_entries(dets,
                         homography: Optional[np.ndarray],
-                        color_hex: Optional[List[Optional[str]]] = None) -> List[dict]:
+                        color_infos: Optional[List[Optional[dict]]] = None) -> List[dict]:
     if homography is None:
         return []
     entries: List[dict] = []
@@ -302,15 +349,20 @@ def dets_to_bev_entries(dets,
             "width": float(width),
             "yaw": float(yaw),
             "score": float(det.get("score", 0.0)),
+            "class_id": int(det.get("class_id", det.get("cls", -1))),
         }
-        if color_hex is not None and idx < len(color_hex):
-            color_value = color_hex[idx]
-            if color_value:
-                entry["color_hex"] = color_value
-                label, confidence, _ = _classify_hex_color_strict(color_value)
+        if color_infos is not None and idx < len(color_infos):
+            color_info = color_infos[idx]
+            if color_info:
+                color_value = color_info.get("hex")
+                if color_value:
+                    entry["color_hex"] = color_value
+                label = color_info.get("label")
                 if label:
                     entry["color"] = label
-                    entry["color_confidence"] = float(confidence)
+                    conf = color_info.get("confidence")
+                    if conf is not None:
+                        entry["color_confidence"] = float(conf)
         entries.append(entry)
     return entries
 
@@ -349,6 +401,7 @@ class UDPSender:
                 "width": float(width),
                 "yaw": float(d["yaw"]),
                 "score": float(d["score"]),
+                "class_id": int(d.get("class_id", -1)),
             })
             color_hex = d.get("color_hex")
             if color_hex:
@@ -463,15 +516,15 @@ def run_live_inference(args) -> None:
                     use_gpu_nms=True
                 )[0]
                 dets = tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
-                tris_orig, color_hex_list = [], []
+                tris_orig, tris_color_infos, det_color_infos = [], [], []
                 if dets:
-                    tris_orig, color_hex_list = extract_tris_and_colors(
+                    tris_orig, tris_color_infos, det_color_infos = extract_tris_and_colors(
                         dets,
                         prep["orig_bgr"],
                         prep["scale_to_orig_x"],
                         prep["scale_to_orig_y"]
                     )
-                bev_entries = dets_to_bev_entries(dets, homography, color_hex_list)
+                bev_entries = dets_to_bev_entries(dets, homography, det_color_infos)
                 post_ms = (time.time() - t_post0) * 1000.0
 
                 t_vis0 = time.time()
@@ -482,7 +535,8 @@ def run_live_inference(args) -> None:
                     if tris_orig:
                         vis_frame = draw_pred_pseudo3d(
                             prep["orig_bgr"],
-                            tris_orig
+                            tris_orig,
+                            color_infos=tris_color_infos
                         )
                     if vis_frame is None:
                         vis_frame = overlay_detections(
