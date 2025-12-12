@@ -442,6 +442,8 @@ def run_live_inference(args) -> None:
         print("[Info] Press 'q' to quit, 'r' to reset temporal state.")
 
         frame_idx = 0
+        last_fps_ts = time.time()
+        fps = 0.0
         try:
             while pipeline.isRunning():
                 img_packet = video_queue.tryGet()
@@ -533,9 +535,14 @@ def run_live_inference(args) -> None:
                         print(f"[UDP] send error: {exc}")
 
                 total_ms = cam_latency_ms + infer_ms + post_ms + vis_ms
+                now = time.time()
+                dt = now - last_fps_ts
+                if dt > 0:
+                    fps = 1.0 / dt
+                last_fps_ts = now
                 print(
                     f"[Timing] cam {cam_latency_ms:.1f} ms | infer {infer_ms:.1f} ms | "
-                    f"post {post_ms:.1f} ms | vis {vis_ms:.1f} ms | total {total_ms:.1f} ms"
+                    f"post {post_ms:.1f} ms | vis {vis_ms:.1f} ms | total {total_ms:.1f} ms | fps {fps:.1f}"
                 )
 
                 if key == ord("q"):
