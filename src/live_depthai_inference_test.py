@@ -120,6 +120,9 @@ def draw_pred_pseudo3d(
 
         cls_text = f"C{int(class_id)}" if class_id is not None else "C?"
         score_text = f"{score:.2f}"
+        color_hex = None
+        if color_info:
+            color_hex = color_info.get("hex")
         if color_info and color_info.get("bgr"):
             b, g, r = [int(np.clip(v, 0, 255)) for v in color_info["bgr"]]
             x_center = int(base[:, 0].mean())
@@ -132,10 +135,9 @@ def draw_pred_pseudo3d(
             y2 = min(H - 1, y1 + patch_h)
             cv2.rectangle(img, (x1, y1), (x2, y2), (b, g, r), thickness=-1)
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), thickness=1)
-            color_label = color_info.get("label") or color_info.get("hex")
             text_lines = []
-            if color_label:
-                text_lines.append(str(color_label).upper())
+            if color_hex:
+                text_lines.append(color_hex.upper())
             text_lines.append(f"{cls_text} {score_text}")
             for i, line in enumerate(text_lines):
                 text_org = (x1, max(0, y1 - 6 - i * 12))
@@ -151,17 +153,6 @@ def draw_pred_pseudo3d(
     return img
 
 
-COLOR_LABELS = ("red", "pink", "green", "white", "yellow", "purple")
-_COLOR_LABEL_TO_INDEX = {label: idx for idx, label in enumerate(COLOR_LABELS)}
-_COLOR_RGB_RULES = {
-    "purple": {"min": (120.0, 46.0, 184.0), "max": (174.0, 133.0, 237.0)},
-    "white": {"min": (218.0, 200.0, 223.0), "max": (218.0, 200.0, 223.0)},
-    "red": {"min": (72.0, 27.0, 20.0), "max": (197.0, 67.0, 49.0)},
-    "pink": {"min": (199.0, 135.0, 192.0), "max": (237.0, 189.0, 239.0)},
-    "green": {"min": (39.0, 196.0, 141.0), "max": (127.0, 229.0, 232.0)},
-    "yellow": {"min": (218.0, 203.0, 74.0), "max": (218.0, 203.0, 74.0)},
-}
-
 CLASS_COLOR_TABLE = {
     0: (0, 255, 0),      # lime
     1: (0, 255, 255),    # yellow
@@ -175,56 +166,6 @@ def _class_color(class_id: Optional[int]) -> Tuple[int, int, int]:
     if class_id is None:
         return (0, 255, 0)
     return CLASS_COLOR_TABLE.get(int(class_id), (0, 200, 255))
-
-
-def _hex_to_rgb_unit(hex_color: Optional[str]) -> Optional[Tuple[float, float, float]]:
-    if not hex_color:
-        return None
-    hex_color = hex_color.strip().lstrip("#")
-    if len(hex_color) != 6:
-        return None
-    try:
-        r = int(hex_color[0:2], 16)
-        g = int(hex_color[2:4], 16)
-        b = int(hex_color[4:6], 16)
-    except ValueError:
-        return None
-    return r / 255.0, g / 255.0, b / 255.0
-
-
-def _channel_score(value: float, low: float, high: float) -> float:
-    if value < low or value > high:
-        return 0.0
-    span = max(high - low, 1e-3)
-    mid = (low + high) * 0.5
-    return max(0.0, 1.0 - abs(value - mid) / (0.5 * span))
-
-
-def _classify_hex_color_strict(hex_color: Optional[str]):
-    rgb = _hex_to_rgb_unit(hex_color)
-    if rgb is None:
-        return None, 0.0, None
-
-    max_rgb = max(rgb)
-    min_rgb = min(rgb)
-    candidates = []
-
-    if min_rgb >= 0.7 and (max_rgb - min_rgb) <= 0.2:
-        candidates.append("white")
-
-    for label, rule in _COLOR_RGB_RULES.items():
-        mins = rule["min"]
-        maxs = rule["max"]
-        if all(lo <= v <= hi for v, lo, hi in zip(rgb, mins, maxs)):
-            candidates.append(label)
-
-    if len(candidates) != 1:
-        return None, 0.0, None
-
-    label = candidates[0]
-    embedding = [0.0] * len(COLOR_LABELS)
-    embedding[_COLOR_LABEL_TO_INDEX[label]] = 1.0
-    return label, 1.0, embedding
 
 
 def extract_tris_and_colors(dets,
@@ -265,11 +206,8 @@ def extract_tris_and_colors(dets,
                         mg = int(np.clip(mean_bgr[1], 0, 255))
                         mr = int(np.clip(mean_bgr[2], 0, 255))
                         hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
-                        label, confidence, _ = _classify_hex_color_strict(hexcol)
                         color_info = {
                             "hex": hexcol,
-                            "label": label,
-                            "confidence": float(confidence),
                             "bgr": (mb, mg, mr),
                         }
         det_color_infos.append(color_info)
@@ -382,12 +320,6 @@ def dets_to_bev_entries(dets,
                 color_value = color_info.get("hex")
                 if color_value:
                     entry["color_hex"] = color_value
-                label = color_info.get("label")
-                if label:
-                    entry["color"] = label
-                    conf = color_info.get("confidence")
-                    if conf is not None:
-                        entry["color_confidence"] = float(conf)
         entries.append(entry)
     return entries
 
@@ -431,12 +363,6 @@ class UDPSender:
             color_hex = d.get("color_hex")
             if color_hex:
                 items[-1]["color_hex"] = color_hex
-            color_label = d.get("color")
-            if color_label:
-                items[-1]["color"] = color_label
-            color_conf = d.get("color_confidence")
-            if color_conf is not None:
-                items[-1]["color_confidence"] = float(color_conf)
         msg = {
             "type": "bev_labels",
             "camera_id": cam_id,
