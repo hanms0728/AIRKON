@@ -245,23 +245,33 @@ def extract_tris_and_colors(dets,
                 tri_orig[:, 0] *= scale_to_orig_x
                 tri_orig[:, 1] *= scale_to_orig_y
 
-                poly = parallelogram_from_triangle(tri_orig[0], tri_orig[1], tri_orig[2]).astype(np.int32)
-                mask = np.zeros((Hc, Wc), dtype=np.uint8)
-                cv2.fillPoly(mask, [poly], 1)
-                roi = orig_bgr[mask == 1]
-                if roi.size > 0:
-                    mean_bgr = roi.mean(axis=0)
-                    mb = int(np.clip(mean_bgr[0], 0, 255))
-                    mg = int(np.clip(mean_bgr[1], 0, 255))
-                    mr = int(np.clip(mean_bgr[2], 0, 255))
-                    hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
-                    label, confidence, _ = _classify_hex_color_strict(hexcol)
-                    color_info = {
-                        "hex": hexcol,
-                        "label": label,
-                        "confidence": float(confidence),
-                        "bgr": (mb, mg, mr),
-                    }
+                poly = parallelogram_from_triangle(tri_orig[0], tri_orig[1], tri_orig[2]).astype(np.float32)
+                poly_int = np.round(poly).astype(np.int32)
+                x, y, w, h = cv2.boundingRect(poly_int)
+                if w > 0 and h > 0:
+                    x0 = max(0, x)
+                    y0 = max(0, y)
+                    x1 = min(Wc, x0 + w)
+                    y1 = min(Hc, y0 + h)
+                    if x1 > x0 and y1 > y0:
+                        roi_img = orig_bgr[y0:y1, x0:x1]
+                        local_poly = (poly_int - np.array([x0, y0], dtype=np.int32))
+                        local_poly[:, 0] = np.clip(local_poly[:, 0], 0, x1 - x0 - 1)
+                        local_poly[:, 1] = np.clip(local_poly[:, 1], 0, y1 - y0 - 1)
+                        mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+                        cv2.fillConvexPoly(mask, local_poly, 255)
+                        mean_bgr = cv2.mean(roi_img, mask=mask)
+                        mb = int(np.clip(mean_bgr[0], 0, 255))
+                        mg = int(np.clip(mean_bgr[1], 0, 255))
+                        mr = int(np.clip(mean_bgr[2], 0, 255))
+                        hexcol = f"{mr:02x}{mg:02x}{mb:02x}"
+                        label, confidence, _ = _classify_hex_color_strict(hexcol)
+                        color_info = {
+                            "hex": hexcol,
+                            "label": label,
+                            "confidence": float(confidence),
+                            "bgr": (mb, mg, mr),
+                        }
         det_color_infos.append(color_info)
         if tri_orig is not None:
             tri_records.append({
@@ -321,18 +331,28 @@ def dets_to_bev_entries(dets,
                         color_infos: Optional[List[Optional[dict]]] = None) -> List[dict]:
     if homography is None:
         return []
-    entries: List[dict] = []
+    tri_list: List[np.ndarray] = []
+    det_indices: List[int] = []
     for idx, det in enumerate(dets):
         tri = det.get("tri")
         if tri is None:
             continue
-        tri = np.asarray(tri, dtype=np.float64)
-        if tri.shape != (3, 2):
+        tri_np = np.asarray(tri, dtype=np.float64)
+        if tri_np.shape != (3, 2):
             continue
-        try:
-            tri_world = apply_homography(tri, homography)
-        except cv2.error:
-            continue
+        tri_list.append(tri_np)
+        det_indices.append(idx)
+
+    if not tri_list:
+        return []
+
+    tri_stack = np.stack(tri_list, axis=0)
+    pts = tri_stack.reshape(-1, 1, 2)
+    tri_world_all = cv2.perspectiveTransform(pts, homography.astype(np.float64))
+    tri_world_all = tri_world_all.reshape(-1, 3, 2)
+
+    entries: List[dict] = []
+    for tri_world, det_idx in zip(tri_world_all, det_indices):
         if not np.all(np.isfinite(tri_world)):
             continue
         center = tri_world[0]
@@ -346,6 +366,7 @@ def dets_to_bev_entries(dets,
             continue
         yaw = math.degrees(math.atan2(forward_vec[1], forward_vec[0]))
         yaw = (yaw + 180.0) % 360.0 - 180.0
+        det = dets[det_idx]
         cls_raw = det.get("class_id", det.get("cls"))
         entry = {
             "center": [float(center[0]), float(center[1])],
@@ -355,8 +376,8 @@ def dets_to_bev_entries(dets,
             "score": float(det.get("score", 0.0)),
             "class_id": int(cls_raw) if cls_raw is not None else -1,
         }
-        if color_infos is not None and idx < len(color_infos):
-            color_info = color_infos[idx]
+        if color_infos is not None and det_idx < len(color_infos):
+            color_info = color_infos[det_idx]
             if color_info:
                 color_value = color_info.get("hex")
                 if color_value:
