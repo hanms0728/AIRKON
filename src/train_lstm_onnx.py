@@ -252,25 +252,6 @@ class ParallelogramDataset(Dataset):
             "points": torch.tensor(points_list, dtype=torch.float32),
             "labels": torch.tensor(labels_list, dtype=torch.long)
         }
-        if self.transform is not None and len(points_list) > 0:
-            flat_points = [tuple(pt) for tri in points_list for pt in tri]
-            aug = self.transform(image=img.numpy().transpose(1,2,0), keypoints=flat_points)
-            aug_pts = aug["keypoints"]
-            if aug_pts and len(aug_pts) == len(flat_points):
-                new_points = []
-                for i in range(0, len(aug_pts), 3):
-                    tri = []
-                    inside_flags = []
-                    for k in range(3):
-                        x, y = aug_pts[i + k]
-                        tri.append([float(x), float(y)])
-                        inside_flags.append((0.0 <= x < self.Wt) and (0.0 <= y < self.Ht))
-                    if sum(inside_flags) >= 2:
-                        new_points.append(tri)
-                if len(new_points) == len(points_list):
-                    img = torch.from_numpy(aug["image"].transpose(2,0,1)).float() / 255.0
-                    points_list = new_points
-                    targets["points"] = torch.tensor(points_list, dtype=torch.float32)
         name = rel
         return img, targets, name
 
