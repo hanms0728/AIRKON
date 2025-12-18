@@ -13,9 +13,7 @@ def orientation_from_triangle(tri: np.ndarray) -> float:
     tri = np.asarray(tri)
     if tri.shape[0] < 3:
         return 0.0
-    vec = tri[2] - tri[1]
-    if np.linalg.norm(vec) < 1e-6:
-        vec = tri[1] - tri[0]
+    vec = _orientation_vec(tri)
     if np.linalg.norm(vec) < 1e-6:
         return 0.0
     angle = math.atan2(float(vec[1]), float(vec[0]))
@@ -80,6 +78,167 @@ def _resolve_conf_threshold(conf_cfg, cam_id) -> float:
             return float(next(iter(conf_cfg.values())))
         raise ValueError("conf_th dictionary is empty")
     return float(conf_cfg)
+
+
+# ---------------------------
+# Temporal smoothing helpers
+# ---------------------------
+def _orientation_vec(tri: np.ndarray) -> np.ndarray:
+    """
+    차량 방향 벡터.
+    - p0: 바닥 중심
+    - p1, p2: 앞쪽 두 꼭짓점
+    -> p0에서 p1/p2 중점으로 향하는 벡터를 사용, 길이가 너무 짧으면 p1->p2로 대체.
+    """
+    mid = 0.5 * (tri[1] + tri[2])
+    v = mid - tri[0]
+    if np.linalg.norm(v) < 1e-6:
+        v = tri[2] - tri[1]
+    return v
+
+
+def normalize_triangle(tri: np.ndarray, ref_dir: np.ndarray = None):
+    """
+    삼각형 순서를 시계/반시계 한쪽으로 통일하고, ref_dir과 반대면 p1/p2를 스왑해 뒤집힘을 교정.
+    반환: (정규화 tri, 업데이트된 ref_dir)
+    """
+    tri = np.asarray(tri, dtype=np.float32).copy()
+    if tri.shape != (3, 2):
+        raise ValueError(f"tri shape must be (3,2), got {tri.shape}")
+
+    area = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+    if area < 0:
+        tri[[1, 2]] = tri[[2, 1]]
+
+    if ref_dir is not None:
+        v = _orientation_vec(tri)
+        if np.dot(v, ref_dir) < 0:
+            tri[[1, 2]] = tri[[2, 1]]
+            v = -v
+        ref_dir = v
+    else:
+        ref_dir = _orientation_vec(tri)
+    return tri, ref_dir
+
+
+class EMATracker:
+    """
+    IoU 그리디 매칭 + EMA 스무딩 기반 간단 트래커.
+    det는 tri 또는 poly4를 포함해야 하며, 출력에 track_id/스무딩된 tri/poly4를 추가한다.
+    """
+    def __init__(self, iou_thresh: float = 0.3, alpha: float = 0.7, max_miss: int = 5):
+        self.iou_thresh = float(iou_thresh)
+        self.alpha = float(alpha)
+        self.max_miss = int(max_miss)
+        self.tracks = {}
+        self.next_id = 1
+
+    def reset(self):
+        self.tracks.clear()
+        self.next_id = 1
+
+    def _poly4_iou(self, poly_a: np.ndarray, poly_b: np.ndarray) -> float:
+        xa, ya, wa, ha = aabb_of_poly4(poly_a)
+        xb, yb, wb, hb = aabb_of_poly4(poly_b)
+        return float(iou_aabb_xywh((xa, ya, wa, ha), (xb, yb, wb, hb)))
+
+    def _get_poly(self, det: dict) -> np.ndarray:
+        if "poly4" in det:
+            return np.asarray(det["poly4"], dtype=np.float32)
+        if "tri" in det:
+            tri = np.asarray(det["tri"], dtype=np.float32)
+            return parallelogram_from_triangle(tri[0], tri[1], tri[2])
+        raise ValueError("det must contain 'poly4' or 'tri'")
+
+    def update(self, dets: list) -> list:
+        det_polys = [self._get_poly(d) for d in dets]
+        det_tris = []
+        for d in dets:
+            tri = np.asarray(d["tri"], dtype=np.float32) if "tri" in d else None
+            det_tris.append(tri)
+
+        track_ids = list(self.tracks.keys())
+        iou_mat = np.zeros((len(track_ids), len(dets)), dtype=np.float32)
+        for i, tid in enumerate(track_ids):
+            poly_t = self.tracks[tid]["poly4"]
+            for j, poly_d in enumerate(det_polys):
+                iou_mat[i, j] = self._poly4_iou(poly_t, poly_d)
+
+        matched_det = set()
+        matched_track = set()
+        pairs = []
+        while True:
+            if iou_mat.size == 0:
+                break
+            i, j = np.unravel_index(np.argmax(iou_mat), iou_mat.shape)
+            if iou_mat[i, j] < self.iou_thresh:
+                break
+            if track_ids[i] in matched_track or j in matched_det:
+                iou_mat[i, j] = -1
+                continue
+            pairs.append((track_ids[i], j))
+            matched_track.add(track_ids[i])
+            matched_det.add(j)
+            iou_mat[i, j] = -1
+
+        for tid, j in pairs:
+            tri_new = det_tris[j]
+            poly_new = det_polys[j]
+            track = self.tracks[tid]
+            if tri_new is not None:
+                tri_new, ref_dir = normalize_triangle(tri_new, track.get("ref_dir"))
+                track["ref_dir"] = ref_dir
+                tri_smoothed = self.alpha * track["tri"] + (1 - self.alpha) * tri_new
+                track["tri"] = tri_smoothed
+                track["poly4"] = parallelogram_from_triangle(tri_smoothed[0], tri_smoothed[1], tri_smoothed[2])
+            else:
+                track["poly4"] = self.alpha * track["poly4"] + (1 - self.alpha) * poly_new
+            track["miss"] = 0
+            track["last_score"] = float(dets[j].get("score", track.get("last_score", 0.0)))
+            track["last_cls"] = dets[j].get("class_id", dets[j].get("cls", track.get("last_cls", 0)))
+
+        for j, tri_new in enumerate(det_tris):
+            if j in matched_det:
+                continue
+            poly_new = det_polys[j]
+            if tri_new is not None:
+                tri_new, ref_dir = normalize_triangle(tri_new)
+                poly_new = parallelogram_from_triangle(tri_new[0], tri_new[1], tri_new[2])
+            else:
+                ref_dir = None
+            tid = self.next_id
+            self.next_id += 1
+            self.tracks[tid] = {
+                "tri": tri_new if tri_new is not None else None,
+                "poly4": poly_new,
+                "ref_dir": ref_dir,
+                "miss": 0,
+                "last_score": float(dets[j].get("score", 0.0)),
+                "last_cls": dets[j].get("class_id", dets[j].get("cls", 0)),
+            }
+
+        to_delete = []
+        for tid in self.tracks:
+            if tid in matched_track:
+                continue
+            self.tracks[tid]["miss"] += 1
+            if self.tracks[tid]["miss"] > self.max_miss:
+                to_delete.append(tid)
+        for tid in to_delete:
+            self.tracks.pop(tid, None)
+
+        out = []
+        for tid, tr in self.tracks.items():
+            d_out = {
+                "track_id": tid,
+                "poly4": tr["poly4"],
+                "score": tr.get("last_score", 0.0),
+                "class_id": tr.get("last_cls", 0),
+            }
+            if tr.get("tri") is not None:
+                d_out["tri"] = tr["tri"]
+            out.append(d_out)
+        return out
 
 
 def _decode_predictions_impl(

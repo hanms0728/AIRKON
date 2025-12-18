@@ -18,6 +18,11 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from ultralytics import YOLO
 from tqdm import tqdm
+import torchvision
+try:
+    import albumentations as A
+except ImportError:
+    A = None
 
 from src.geometry_utils import parallelogram_from_triangle as _para
 from src.geometry_utils import aabb_of_poly4, iou_aabb_xywh, tiny_filter_on_dets
@@ -216,15 +221,14 @@ class ParallelogramDataset(Dataset):
         H0, W0 = img_bgr.shape[:2]
 
         img_bgr = cv2.resize(img_bgr, (self.Wt, self.Ht), interpolation=cv2.INTER_LINEAR)
-        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).transpose(2,0,1) / 255.0
-        img = torch.from_numpy(img).float()
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
         points_list, labels_list = [], []
         with open(lab_path,'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) != 7: continue
-                _, p0x,p0y,p1x,p1y,p2x,p2y = parts
+                cls_id, p0x,p0y,p1x,p1y,p2x,p2y = parts
                 sX = self.Wt / W0; sY = self.Ht / H0
                 p0 = [float(p0x)*sX, float(p0y)*sY]
                 p1 = [float(p1x)*sX, float(p1y)*sY]
@@ -235,11 +239,18 @@ class ParallelogramDataset(Dataset):
                 # NaN 라벨 방어
                 if any([np.isnan(v) or np.isinf(v) for v in (*p0, *p1, *p2)]):
                     continue
-                points_list.append([p0,p1,p2]); labels_list.append(0)
+                points_list.append([p0,p1,p2])
+                try:
+                    cls_idx = int(float(cls_id))
+                except (ValueError, TypeError):
+                    cls_idx = 0
+                labels_list.append(cls_idx)
 
+        img_rgb, points_list = apply_transform_if_available(img_rgb, points_list, self.transform, self.Wt, self.Ht)
+        img = torch.from_numpy(img_rgb.transpose(2,0,1)).float() / 255.0
         targets = {
-            "points": torch.tensor(points_list, dtype=torch.float32),  # (N,3,2)
-            "labels": torch.tensor(labels_list, dtype=torch.long)      # (N,)
+            "points": torch.tensor(points_list, dtype=torch.float32),
+            "labels": torch.tensor(labels_list, dtype=torch.long)
         }
         name = rel
         return img, targets, name
@@ -333,22 +344,30 @@ class SeqWindowDataset(Dataset):
                 raise FileNotFoundError(img_abs)
             H0, W0 = img_bgr.shape[:2]
             img_bgr = cv2.resize(img_bgr, (self.base.Wt, self.base.Ht), interpolation=cv2.INTER_LINEAR)
-            img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).transpose(2,0,1) / 255.0
-            img = torch.from_numpy(img).float()
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
             points_list, labels_list = [], []
             with open(lab_abs,'r') as f:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) != 7: continue
-                    _, p0x,p0y,p1x,p1y,p2x,p2y = parts
+                    cls_id, p0x,p0y,p1x,p1y,p2x,p2y = parts
                     sX = self.base.Wt / W0; sY = self.base.Ht / H0
                     p0 = [float(p0x)*sX, float(p0y)*sY]
                     p1 = [float(p1x)*sX, float(p1y)*sY]
                     p2 = [float(p2x)*sX, float(p2y)*sY]
                     if any([np.isnan(v) or np.isinf(v) for v in (*p0, *p1, *p2)]):
                         continue
-                    points_list.append([p0,p1,p2]); labels_list.append(0)
+                    points_list.append([p0,p1,p2])
+                    try:
+                        cls_idx = int(float(cls_id))
+                    except (ValueError, TypeError):
+                        cls_idx = 0
+                    labels_list.append(cls_idx)
+            img_rgb, points_list = apply_transform_if_available(
+                img_rgb, points_list, self.base.transform, self.base.Wt, self.base.Ht
+            )
+            img = torch.from_numpy(img_rgb.transpose(2,0,1)).float() / 255.0
             targets = {
                 "points": torch.tensor(points_list, dtype=torch.float32),
                 "labels": torch.tensor(labels_list, dtype=torch.long)
@@ -366,6 +385,180 @@ def collate_seq_fn(batch):
     vids = [b[3] for b in batch]
     return imgs, tgts, names, vids, T
 
+
+def apply_transform_if_available(img_rgb: np.ndarray, points_list: List[List[List[float]]],
+                                 transform, Wt: int, Ht: int):
+    if transform is None:
+        return img_rgb, points_list
+    flat_points = [tuple(pt) for tri in points_list for pt in tri]
+    aug = transform(image=img_rgb, keypoints=flat_points)
+    aug_pts = aug["keypoints"]
+    if len(flat_points) == 0 or (aug_pts and len(aug_pts) == len(flat_points)):
+        valid = True
+        new_points = []
+        if len(flat_points) > 0:
+            for i in range(0, len(aug_pts), 3):
+                tri = []
+                inside = 0
+                for k in range(3):
+                    x, y = aug_pts[i + k]
+                    tri.append([float(x), float(y)])
+                    if 0.0 <= x < Wt and 0.0 <= y < Ht:
+                        inside += 1
+                if inside >= 2:
+                    new_points.append(tri)
+                else:
+                    valid = False
+                    break
+        if valid:
+            img_rgb = aug["image"]
+            if len(flat_points) > 0:
+                points_list = new_points
+    return img_rgb, points_list
+
+
+def build_default_train_augment(target_size):
+    if A is None:
+        raise ImportError("Albumentations is required for train augment. Install via `pip install albumentations`.")
+    Ht, Wt = target_size
+    rrc_kwargs = dict(scale=(0.85, 1.0), ratio=(0.8, 1.2), p=0.4)
+    try:
+        rrc = A.RandomResizedCrop(height=Ht, width=Wt, **rrc_kwargs)
+    except (TypeError, ValueError):
+        rrc = A.RandomResizedCrop(size=(Ht, Wt), **rrc_kwargs)
+    return A.Compose(
+        [
+            rrc,
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.02, p=0.4),
+            A.Affine(
+                scale=(0.9, 1.1),
+                translate_percent=(-0.02, 0.02),
+                rotate=(-5, 5),
+                shear=(-2, 2),
+                p=0.6
+            ),
+            A.Perspective(scale=(0.02, 0.05), keep_size=True, pad_mode=cv2.BORDER_REFLECT_101, p=0.3),
+            A.GaussNoise(var_limit=(5.0, 30.0), p=0.3),
+        ],
+        keypoint_params=A.KeypointParams(format="xy", remove_invisible=False)
+    )
+
+# ---------------------------
+# DSI (Vision Teacher Alignment)
+# ---------------------------
+class VisionTeacherWrapper(nn.Module):
+    SUPPORTED = {"vit_b_16", "vit_l_16"}
+
+    def __init__(self, arch="vit_b_16", pretrained=True, checkpoint=None,
+                 resize_hw=None, mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225), device="cpu"):
+        super().__init__()
+        arch = arch.lower()
+        if arch not in self.SUPPORTED:
+            raise ValueError(f"Unsupported teacher arch '{arch}'. Supported: {sorted(self.SUPPORTED)}")
+        self.resize_hw = resize_hw
+        self.teacher = self._build_teacher(arch, pretrained, checkpoint).to(device)
+        self.teacher.eval()
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
+        patch_embed = getattr(self.teacher, "conv_proj", None)
+        if patch_embed is None:
+            raise RuntimeError("Unable to locate patch embedding in teacher model.")
+        self.patch_size = patch_embed.kernel_size[0]
+        self.embed_dim = getattr(self.teacher, "hidden_dim", None)
+        if self.embed_dim is None:
+            self.embed_dim = getattr(self.teacher, "embed_dim", None)
+        if self.embed_dim is None:
+            raise RuntimeError("Unable to infer teacher embedding dimension.")
+
+        self.register_buffer("img_mean", torch.tensor(mean, dtype=torch.float32).view(1,3,1,1))
+        self.register_buffer("img_std", torch.tensor(std, dtype=torch.float32).view(1,3,1,1))
+
+    def _build_teacher(self, arch, pretrained, checkpoint):
+        if arch == "vit_b_16":
+            weights = torchvision.models.ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1 if pretrained else None
+            model = torchvision.models.vit_b_16(weights=weights)
+        elif arch == "vit_l_16":
+            weights = torchvision.models.ViT_L_16_Weights.IMAGENET1K_SWAG_E2E_V1 if pretrained else None
+            model = torchvision.models.vit_l_16(weights=weights)
+        else:
+            raise ValueError(f"Unsupported teacher arch '{arch}'")
+        if checkpoint:
+            ckpt = torch.load(checkpoint, map_location="cpu")
+            if isinstance(ckpt, dict) and "model" in ckpt:
+                ckpt = ckpt["model"]
+            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+            print(f"[DSI] Loaded teacher checkpoint (missing={len(missing)}, unexpected={len(unexpected)})")
+        return model
+
+    @torch.inference_mode()
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        x = images
+        target_hw = self.resize_hw if self.resize_hw is not None else (images.shape[2], images.shape[3])
+        if self.resize_hw is not None:
+            x = F.interpolate(x, size=self.resize_hw, mode="bilinear", align_corners=False)
+        x = (x - self.img_mean) / self.img_std
+        n = x.shape[0]
+        x = self.teacher._process_input(x)
+        batch_class_token = self.teacher.class_token.expand(n, -1, -1)
+        x = torch.cat((batch_class_token, x), dim=1)
+        x = self.teacher.encoder(x)
+        if hasattr(self.teacher, "ln"):
+            x = self.teacher.ln(x)
+        elif hasattr(self.teacher.encoder, "ln"):
+            x = self.teacher.encoder.ln(x)
+        elif hasattr(self.teacher, "norm"):
+            x = self.teacher.norm(x)
+        x = x[:, 1:, :]
+        grid_h = max(1, target_hw[0] // self.patch_size)
+        grid_w = max(1, target_hw[1] // self.patch_size)
+        if grid_h * grid_w != x.shape[1]:
+            side = int(x.shape[1] ** 0.5)
+            grid_h = grid_w = max(1, side)
+        x = x.permute(0, 2, 1).reshape(n, self.embed_dim, grid_h, grid_w)
+        return x
+
+
+class DeepSemanticInjector(nn.Module):
+    def __init__(self, student_channels, arch, pretrained, checkpoint,
+                 resize_hw, mean, std, device):
+        super().__init__()
+        self.teacher = VisionTeacherWrapper(
+            arch=arch,
+            pretrained=pretrained,
+            checkpoint=checkpoint,
+            resize_hw=resize_hw,
+            mean=mean,
+            std=std,
+            device=device
+        )
+        self.projector = nn.Sequential(
+            nn.Conv2d(student_channels, self.teacher.embed_dim, kernel_size=1),
+            nn.GroupNorm(num_groups=1, num_channels=self.teacher.embed_dim)
+        )
+        self.device = device
+
+    def forward(self, student_feat, images):
+        teacher_feat = self.teacher(images.to(self.device, non_blocking=True))
+        teacher_feat = F.interpolate(teacher_feat, size=student_feat.shape[-2:], mode="bilinear", align_corners=False)
+        proj_student = self.projector(student_feat)
+        stud_flat = F.normalize(proj_student.flatten(2).transpose(1, 2), dim=-1)
+        teach_flat = F.normalize(teacher_feat.flatten(2).transpose(1, 2), dim=-1)
+        cos = torch.sum(stud_flat * teach_flat, dim=-1)
+        loss = 1.0 - cos.mean()
+        return loss
+
+
+def module_grad_l1(module: nn.Module) -> float:
+    total = 0.0
+    for p in module.parameters():
+        if p.grad is None:
+            continue
+        total += float(p.grad.detach().abs().sum().item())
+    return total
+
 # ---------------------------
 # ConvRNN: ConvGRU / ConvLSTM (헤드 직전용)
 # ---------------------------
@@ -377,7 +570,7 @@ class ConvGRUCell(nn.Module):
         self.conv_h  = nn.Conv2d(in_ch + hid_ch, hid_ch, k, padding=p)
 
     def forward(self, x, h):
-        if h is None:
+        if h is None or h.shape[0] != x.size(0) or h.shape[2] != x.size(2) or h.shape[3] != x.size(3):
             h = x.new_zeros((x.size(0), self.conv_h.out_channels, x.size(2), x.size(3)))
         z_r = torch.sigmoid(self.conv_zr(torch.cat([x, h], dim=1)))
         z, r = torch.split(z_r, z_r.size(1)//2, dim=1)
@@ -394,7 +587,8 @@ class ConvLSTMCell(nn.Module):
 
     def forward(self, x, state):
         h, c = state if state is not None else (None, None)
-        if h is None:
+        if (h is None or c is None or
+            h.shape[0] != x.size(0) or h.shape[2] != x.size(2) or h.shape[3] != x.size(3)):
             h = x.new_zeros((x.size(0), self.hid_ch, x.size(2), x.size(3)))
             c = x.new_zeros((x.size(0), self.hid_ch, x.size(2), x.size(3)))
         gates = self.conv(torch.cat([x, h], dim=1))
@@ -476,49 +670,18 @@ class TemporalBlock(nn.Module):
 # Model
 # ---------------------------
 class TriHead(nn.Module):
-    """
-    - 기존 reg / obj / cls 헤드 유지
-    - 추가로 ReID 임베딩 브랜치(reid)를 붙여서 L2-normalized embedding 생성
-      (현재 forward 반환에는 포함하지 않고, self._last_reid에 저장만 함 → 외부 코드 호환 유지)
-    """
-    def __init__(self, in_ch, nc, prior_p=0.20, reid_dim=64):
+    def __init__(self, in_ch, nc, prior_p=0.20):
         super().__init__()
         self.reg = nn.Conv2d(in_ch, 6, 1, 1, 0)
         self.obj = nn.Conv2d(in_ch, 1, 1, 1, 0)
         self.cls = nn.Conv2d(in_ch, nc, 1, 1, 0)
-
-        # ReID branch
-        self.reid_dim = reid_dim
-        self.reid = nn.Conv2d(in_ch, reid_dim, 1, 1, 0)
-        self._last_reid: Optional[torch.Tensor] = None  # (B, D, H, W)
-
         prior_b = math.log(prior_p/(1-prior_p))
         nn.init.constant_(self.obj.bias, prior_b)
         nn.init.constant_(self.cls.bias, prior_b)
         nn.init.zeros_(self.reg.weight)
         nn.init.zeros_(self.reg.bias)
-
-        nn.init.kaiming_normal_(self.reid.weight, nonlinearity="linear")
-        nn.init.zeros_(self.reid.bias)
-
     def forward(self, x):
-        reg = self.reg(x)
-        obj = self.obj(x)
-        cls = self.cls(x)
-
-        # ReID feature (현재는 출력에는 포함시키지 않고, 내부에 저장만 함 → 기존 인터페이스 그대로)
-        reid_feat = self.reid(x)
-        reid_feat = F.normalize(reid_feat, dim=1)
-        self._last_reid = reid_feat
-
-        return reg, obj, cls
-
-    def get_last_reid(self):
-        """
-        최근 forward 시의 ReID feature 반환용 헬퍼.
-        shape: (B, reid_dim, H, W)
-        """
-        return self._last_reid
+        return self.reg(x), self.obj(x), self.cls(x)
 
 class YOLO11_2_5D(nn.Module):
     def __init__(self, yolo11_path='yolo11m.pt', num_classes=1, img_size=(1088,1920),
@@ -546,9 +709,10 @@ class YOLO11_2_5D(nn.Module):
             in_chs = [f.shape[1] for f in feat_list]
         self.backbone_neck.train()
 
-        # heads (ReID branch 포함 TriHead)
+        # heads
         self.heads = nn.ModuleList([TriHead(c, num_classes) for c in in_chs])
         self.num_classes = num_classes
+        self.deep_feature_channels = in_chs[-1]
 
         # temporal
         self.temporal_mode = temporal_mode
@@ -578,7 +742,7 @@ class YOLO11_2_5D(nn.Module):
             if t is not None: t.detach_state()
 
     # 내부상태 버전(학습/일반추론)
-    def forward(self, x, use_temporal=True):
+    def forward(self, x, use_temporal=True, return_deep_feature=False):
         feats_memory = []
         for m in self.backbone_neck:
             if m.f != -1:
@@ -599,8 +763,9 @@ class YOLO11_2_5D(nn.Module):
                 feat_new.append(f if tb is None else tb(f))
             feat_list = feat_new
 
+        deep_feat = feat_list[-1]
         outs = [head(f) for head,f in zip(self.heads, feat_list)]
-        return outs  # list of (reg,obj,cls)
+        return (outs, deep_feat) if return_deep_feature else outs  # list of (reg,obj,cls)
 
     # ── ONNX 대비: 외부 상태 입출력 버전 (last scale 전제)
     def forward_external(self, x, state_in: Optional[List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]]):
@@ -689,6 +854,9 @@ class Strict2_5DLoss(nn.Module):
 
         for b in range(B):
             gt = targets[b]['points'].to(dev, dtype=torch.float32)   # (Ng,3,2) GPU FP32
+            gt_lbl = targets[b].get("labels")
+            if gt_lbl is not None:
+                gt_lbl = gt_lbl.to(dev, dtype=torch.long)
             Ng = gt.shape[0]
 
             for l in range(L):
@@ -710,7 +878,8 @@ class Strict2_5DLoss(nn.Module):
                 # 폭주 방지용 클램프 (픽셀 단위 오프셋/stride 기준이므로 -64~64면 충분)
                 pred_off_full = torch.clamp(pred_off_full, -64.0, 64.0)
 
-                cls_pos_logits_gpu = []
+                cls_pos_logits_gpu = [] if pred_cls_i.shape[0] == 1 else None
+                cls_targets_all = None
 
                 if Ng == 0:
                     obj_loss += F.binary_cross_entropy_with_logits(
@@ -722,8 +891,13 @@ class Strict2_5DLoss(nn.Module):
                 # ====== CPU에서 모든 GT 처리 → (iy, ix) 모으기 ======
                 pos_list_cpu = []   # [(Np,2) CPU] accumulate
                 tri_list_gpu = []   # 매칭되는 GT 삼각형(GPU) (회귀에 필요)
+                cls_list = []
                 for j in range(Ng):
                     tri_px_cpu = gt[j].detach().to(cpu)              # (3,2) CPU float32
+                    if gt_lbl is not None and gt_lbl.shape[0] > j:
+                        cls_idx = int(gt_lbl[j].item())
+                    else:
+                        cls_idx = 0
 
                     inside = _point_in_triangle(centers_cpu[...,0], centers_cpu[...,1], tri_px_cpu)  # CPU bool
                     dist_b = _point_to_triangle_dist(centers_cpu[...,0], centers_cpu[...,1], tri_px_cpu)  # CPU float
@@ -744,6 +918,7 @@ class Strict2_5DLoss(nn.Module):
                         pos_list_cpu.append(torch.nonzero(pos_mask_cpu, as_tuple=False))
 
                     tri_list_gpu.append(gt[j])  # (3,2) on GPU, 같은 순서로 저장
+                    cls_list.append(cls_idx)
 
                 if len(pos_list_cpu) == 0:
                     # 모든 GT가 선택 픽셀이 없었음
@@ -761,23 +936,24 @@ class Strict2_5DLoss(nn.Module):
                 flat_idx_gpu = (pos_idx[:,0] * Ws + pos_idx[:,1]).long()
                 obj_t.view(-1).scatter_(0, flat_idx_gpu, 1.0)
 
-                # 분류(+만): GPU 인덱싱
-                if pred_cls_i.shape[0] == 1:
-                    cls_pos_logits_gpu.append(pred_cls_i[0][pos_idx[:,0], pos_idx[:,1]])
-                else:
-                    raise NotImplementedError("multi-class pos-only not implemented")
-
                 # ====== 회귀 손실(전부 GPU, FP32 강제) ======
                 ix = pos_idx[:,1].float()
                 iy = pos_idx[:,0].float()
                 anchor_xy = torch.stack(((ix + 0.5) * stride, (iy + 0.5) * stride), dim=1).to(torch.float32)
 
-                # 블록 길이 계산
+                # 블록 길이 계산 및 클래스 반복
                 lens = [p.shape[0] for p in pos_list_cpu]
+                cls_targets = []
                 tri_expanded = []
                 for tri, ln in zip(tri_list_gpu, lens):
                     tri_expanded.append(tri.unsqueeze(0).expand(ln, -1, -1))
+                for cls_idx, ln in zip(cls_list, lens):
+                    if ln <= 0:
+                        continue
+                    cls_targets.append(torch.full((ln,), cls_idx, dtype=torch.long, device=dev))
                 tri_rep = torch.cat(tri_expanded, dim=0).to(torch.float32)      # (Npos,3,2) GPU FP32
+                if len(cls_targets) > 0:
+                    cls_targets_all = torch.cat(cls_targets, dim=0)
 
                 anchor_rep = anchor_xy[:,None,:].expand(-1,3,-1)                 # (Npos,3,2)
                 gt_off_cells = (tri_rep - anchor_rep) / float(stride)            # (Npos,3,2) FP32
@@ -797,9 +973,16 @@ class Strict2_5DLoss(nn.Module):
                 obj_loss += F.binary_cross_entropy_with_logits(
                     pred_obj_i, obj_t, pos_weight=self.obj_pos_weight, reduction='sum'
                 )
-                if len(cls_pos_logits_gpu) > 0:
-                    logits = torch.cat(cls_pos_logits_gpu, dim=0)
-                    cls_loss += F.binary_cross_entropy_with_logits(logits, torch.ones_like(logits), reduction='sum')
+                if pred_cls_i.shape[0] == 1:
+                    if cls_pos_logits_gpu is not None and pos_idx.shape[0] > 0:
+                        cls_pos_logits_gpu.append(pred_cls_i[0][pos_idx[:,0], pos_idx[:,1]])
+                    if cls_pos_logits_gpu and len(cls_pos_logits_gpu) > 0:
+                        logits = torch.cat(cls_pos_logits_gpu, dim=0)
+                        cls_loss += F.binary_cross_entropy_with_logits(logits, torch.ones_like(logits), reduction='sum')
+                else:
+                    if cls_targets_all is not None and cls_targets_all.numel() > 0:
+                        logits = pred_cls_i[:, pos_idx[:,0], pos_idx[:,1]].permute(1,0).contiguous()
+                        cls_loss += F.cross_entropy(logits, cls_targets_all, reduction='sum')
 
                 pos_now = int((obj_t>0.5).sum().item())
                 neg_count += (Hs*Ws - pos_now)
@@ -961,12 +1144,12 @@ def main():
                         help="A: <root>/images & <root>/labels, B: <root>/<vid>/{images,labels}, auto: 자동판별")
 
     parser.add_argument("--val-mode", choices=["none", "loss", "metrics"], default="metrics")
-    parser.add_argument("--val-interval", type=int, default=10)
-    parser.add_argument("--val-batch", type=int, default=16)
+    parser.add_argument("--val-interval", type=int, default=1)
+    parser.add_argument("--val-batch", type=int, default=1)
     parser.add_argument("--val-max-batches", type=int, default=None)
 
     # 평가 하이퍼
-    parser.add_argument("--eval-conf", type=float, default=0.30)
+    parser.add_argument("--eval-conf", type=float, default=0.60)
     parser.add_argument("--eval-nms-iou", type=float, default=0.20)
     parser.add_argument("--eval-topk", type=int, default=100)
     parser.add_argument("--eval-iou-thr", type=float, default=0.5)
@@ -974,9 +1157,10 @@ def main():
     parser.add_argument("--clip-cells", type=float, default=4.0)
 
     # 라벨/손실 하이퍼
+    parser.add_argument("--num-classes", type=int, default=1)
     parser.add_argument("--eta-px", type=float, default=3.0)
     parser.add_argument("--lambda-cd", type=float, default=1.0)
-    parser.add_argument("--k-pos-cap", type=int, default=64)
+    parser.add_argument("--k-pos-cap", type=int, default=96)
 
     # 백본 프리즈
     parser.add_argument("--freeze-bb-epochs", type=int, default=1)
@@ -990,7 +1174,7 @@ def main():
     # 공통 하이퍼
     parser.add_argument("--img-h", type=int, default=864)
     parser.add_argument("--img-w", type=int, default=1536)
-    parser.add_argument("--batch", type=int, default=6)
+    parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--wd", type=float, default=1e-4)
     parser.add_argument("--lr-bb", type=float, default=2e-4)
@@ -1003,8 +1187,12 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
 
     # 저장 경로 & CSV
-    parser.add_argument("--save-dir", type=str, default="./runs/2_5d_lstm_real_cohsow_v5")
+    parser.add_argument("--save-dir", type=str, default="./runs/2p5d")
     parser.add_argument("--log-csv", type=str, default=None)  # None이면 save-dir 내부에 자동 생성
+    parser.add_argument("--train-augment", action="store_true", default=True,
+                        help="Albumentations 기반 학습 증강 사용")
+    parser.add_argument("--no-train-augment", action="store_false", dest="train_augment",
+                        help="증강 비활성화")
 
     # ───────── Temporal 옵션 ─────────
     parser.add_argument("--temporal", type=str, default="none",
@@ -1028,12 +1216,34 @@ def main():
                         help="영상 단위 그룹핑 방식: 하위폴더, 파일명 prefix, 또는 전부 하나(flat)")
     parser.add_argument("--tbptt-detach", action="store_true",
                         help="시퀀스 내부 time-step마다 hidden detach(폭주/메모리 방지)")
-
-    # ───────── Temporal supervisory / Consistency Loss 하이퍼 ─────────
-    parser.add_argument("--lambda-consistency", type=float, default=0.0,
-                        help="마지막 스케일 reg 맵에 대한 시계열 consistency loss 가중치")
-    parser.add_argument("--lambda-temp-objcls", type=float, default=0.0,
-                        help="마지막 스케일 obj/cls 맵에 대한 temporal smoothness loss 가중치")
+    parser.add_argument("--seq-streaming", action="store_true", default=True,
+                        help="윈도우를 섞지 않고 입력 순서를 유지하며 동일 vid에서는 hidden state를 이어감")
+    parser.add_argument("--no-seq-streaming", action="store_false", dest="seq_streaming",
+                        help="기존 방식처럼 윈도우 shuffle + 배치 단위 state 초기화")
+    # ───────── DSI / GAM 옵션 ─────────
+    parser.add_argument("--dsi", action="store_true", default=True,
+                        help="Vision-Teacher 기반 Deep Semantic Injection 사용")
+    parser.add_argument("--no-dsi", action="store_false", dest="dsi",
+                        help="DSI 비활성화")
+    parser.add_argument("--dsi-teacher-arch", type=str, default="vit_b_16",
+                        choices=["vit_b_16","vit_l_16"])
+    parser.add_argument("--dsi-teacher-checkpoint", type=str, default=None)
+    parser.add_argument("--dsi-teacher-resize", type=int, nargs=2, metavar=("H","W"), default=(384,384))
+    parser.add_argument("--dsi-weight", type=float, default=5.0)
+    parser.add_argument("--dsi-weight-min", type=float, default=1.0)
+    parser.add_argument("--dsi-weight-max", type=float, default=30.0)
+    parser.add_argument("--dsi-warmup-epochs", type=int, default=5)
+    parser.add_argument("--dsi-mean", type=float, nargs=3, default=(0.485,0.456,0.406))
+    parser.add_argument("--dsi-std", type=float, nargs=3, default=(0.229,0.224,0.225))
+    parser.add_argument("--dsi-pretrained-teacher", action="store_true", default=True)
+    parser.add_argument("--dsi-no-pretrained-teacher", action="store_false",
+                        dest="dsi_pretrained_teacher")
+    parser.add_argument("--dsi-gam", action="store_true", default=True,
+                        help="GAM 기반 dsi weight 자동 조절")
+    parser.add_argument("--no-dsi-gam", action="store_false", dest="dsi_gam",
+                        help="DSI GAM 비활성화")
+    parser.add_argument("--dsi-gam-rho", type=float, default=0.4)
+    parser.add_argument("--dsi-gam-delta", type=float, default=0.05)
 
     args = parser.parse_args()
 
@@ -1057,7 +1267,7 @@ def main():
     EPOCHS = args.epochs
     LR_MIN = args.lr_min
     WD = args.wd
-    NUM_CLASSES = 1
+    NUM_CLASSES = int(args.num_classes)
 
     eval_cfg = None
     if args.val_mode == "metrics":
@@ -1073,9 +1283,13 @@ def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ── Dataset / DataLoader (A/B 자동 판별)
+    train_transform = None
+    if args.train_augment:
+        train_transform = build_default_train_augment(IMG_SIZE)
     train_dataset = ParallelogramDataset(
         args.train_root,
         target_size=IMG_SIZE,
+        transform=train_transform,
         data_layout=args.data_layout
     )
     if len(train_dataset) == 0:
@@ -1085,11 +1299,13 @@ def main():
         train_seq = SeqWindowDataset(train_dataset,
                                      grouping=args.seq_grouping,
                                      seq_len=args.seq_len, seq_stride=args.seq_stride)
-        train_loader = DataLoader(train_seq, batch_size=TRAIN_BATCH, shuffle=True,
+        train_loader = DataLoader(train_seq, batch_size=TRAIN_BATCH,
+                                  shuffle=(not args.seq_streaming),
                                   collate_fn=collate_seq_fn, num_workers=4, pin_memory=True,
                                   persistent_workers=True)
     else:
-        train_loader = DataLoader(train_dataset, batch_size=TRAIN_BATCH, shuffle=True,
+        train_loader = DataLoader(train_dataset, batch_size=TRAIN_BATCH,
+                                  shuffle=(not args.seq_streaming),
                                   collate_fn=collate_fn, num_workers=4, pin_memory=True,
                                   persistent_workers=True)
 
@@ -1099,6 +1315,7 @@ def main():
         val_dataset = ParallelogramDataset(
             val_root,
             target_size=IMG_SIZE,
+            transform=None,
             data_layout=args.data_layout
         )
         if len(val_dataset) == 0:
@@ -1131,6 +1348,22 @@ def main():
     else:
         model.strides = [float(s) for s in model.strides]
 
+    dsi_helper = None
+    dsi_weight = float(args.dsi_weight)
+    teacher_resize = tuple(args.dsi_teacher_resize) if args.dsi_teacher_resize else None
+    if args.dsi:
+        dsi_helper = DeepSemanticInjector(
+            student_channels=model.deep_feature_channels,
+            arch=args.dsi_teacher_arch,
+            pretrained=(args.dsi_teacher_checkpoint is None) and args.dsi_pretrained_teacher,
+            checkpoint=args.dsi_teacher_checkpoint,
+            resize_hw=teacher_resize,
+            mean=tuple(args.dsi_mean),
+            std=tuple(args.dsi_std),
+            device=DEVICE
+        ).to(DEVICE)
+        print(f"[DSI] Enabled (teacher={args.dsi_teacher_arch}, resize={teacher_resize}, weight={dsi_weight})")
+
     criterion = Strict2_5DLoss(num_classes=NUM_CLASSES,
                                eta_px=args.eta_px,
                                obj_pos_weight=1.2,
@@ -1146,6 +1379,8 @@ def main():
 
     opt_bb = optim.SGD(bb_params, lr=args.lr_bb, momentum=0.9, weight_decay=WD, nesterov=True)
     opt_hd = optim.AdamW(list(head_params) + temporal_params, lr=args.lr_hd, betas=(0.9, 0.999), weight_decay=WD)
+    if dsi_helper is not None:
+        opt_hd.add_param_group({"params": dsi_helper.projector.parameters(), "lr": args.lr_hd})
 
     sched_bb = optim.lr_scheduler.CosineAnnealingLR(opt_bb, T_max=EPOCHS, eta_min=LR_MIN)
     sched_hd = optim.lr_scheduler.CosineAnnealingLR(opt_hd, T_max=EPOCHS, eta_min=LR_MIN)
@@ -1174,6 +1409,8 @@ def main():
         sd = torch.load(args.weights, map_location=DEVICE)
         if isinstance(sd, dict) and "model" in sd:
             sd = sd["model"]
+        if args.num_classes != 1:
+            sd = {k:v for k,v in sd.items() if not k.startswith("heads.") or (".cls." not in k)}
         missing, unexpected = model.load_state_dict(sd, strict=False)
         print(f"[Warm-start] {args.weights} (missing={len(missing)}, unexpected={len(unexpected)})")
         start_ep = int(args.start_epoch)
@@ -1183,139 +1420,141 @@ def main():
     print(f"[Save] base='{model_stem}', save_dir='{save_dir}'")
 
     def run_epoch(loader, train=True, epoch_idx=0, eval_cfg=None, val_mode="metrics"):
-        # ----- p0 가중치 워밍업 -----
+        nonlocal dsi_weight
         warmup_ep = 5
         w = 0.5 + 0.5 * min(epoch_idx, warmup_ep-1) / (warmup_ep-1)
         criterion.set_p0_weight(w)
 
-        # ----- temporal consistency / temporal smoothness 스케줄 (teacher forcing 느낌) -----
-        # 초반엔 순수 detection 위주로 학습하고, 에폭이 진행될수록 temporal constraint를 강하게 거는 구조
-        tf_warmup_ep = max(3, EPOCHS // 4)  # 전체의 1/4 정도까지는 서서히 키움
-        tf_ratio = min(1.0, epoch_idx / max(1, tf_warmup_ep))  # 0 → 1
-        lambda_cons_eff = args.lambda_consistency * tf_ratio
-        lambda_temp_eff = args.lambda_temp_objcls * tf_ratio
-
         if train:
-            if epoch_idx < args.freeze_bb_epochs:
-                set_requires_grad(model.backbone_neck, False)
-            else:
-                set_requires_grad(model.backbone_neck, True)
+            if epoch_idx < args.freeze_bb_epochs: set_requires_grad(model.backbone_neck, False)
+            else: set_requires_grad(model.backbone_neck, True)
 
         model.train(mode=train)
         collect_metrics = (not train) and (eval_cfg is not None)
-        metric_records = []
-        total_gt = 0
+        metric_records = []; total_gt = 0
 
-        tot = treg = tobj = tcls = tpos = tp0 = tp12 = tcons = 0.0
-        nb = 0
-        batches_seen = 0
+        tot = treg = tobj = tcls = tpos = tp0 = tp12 = 0.0
+        nb = 0; batches_seen = 0
+        total_loss_sum = 0.0
+        dsi_loss_sum = 0.0
+        use_dsi = train and (dsi_helper is not None)
+        if args.dsi_warmup_epochs > 0:
+            dsi_warm_factor = min(1.0, (epoch_idx + 1) / float(args.dsi_warmup_epochs))
+        else:
+            dsi_warm_factor = 1.0
+        grad_ratio_sum = 0.0
+        grad_ratio_count = 0
+        prev_stream_key = None
 
-        pbar = tqdm(loader, desc=f"{'Train' if train else 'Val'} {epoch_idx+1}/{EPOCHS} (p0_w={w:.2f}, tf={tf_ratio:.2f})")
-        for batch in pbar:
-            # --- 배치 시작 시 state 처리 ---
-            if args.temporal != "none":
+        def handle_temporal_state(batch_keys):
+            nonlocal prev_stream_key
+            if args.temporal == "none":
+                return
+            if not args.seq_streaming:
                 if train:
                     if args.temporal_reset_per_batch:
                         model.reset_temporal()
                     else:
                         model.detach_temporal()
                 else:
-                    # 평가 때는 항상 시퀀스 단위로 깨끗하게
                     model.reset_temporal()
-            # -------------------------------
+                return
 
+            key = None
+            same_key = True
+            if batch_keys:
+                key = batch_keys[0]
+                for k in batch_keys:
+                    if k != key:
+                        same_key = False
+                        break
+
+            if args.temporal_reset_per_batch:
+                model.reset_temporal()
+                prev_stream_key = key
+                return
+
+            if (not same_key) or key is None:
+                model.reset_temporal()
+                prev_stream_key = key
+                return
+
+            if prev_stream_key is None or key != prev_stream_key:
+                model.reset_temporal()
+            else:
+                model.detach_temporal()
+            prev_stream_key = key
+
+        pbar = tqdm(loader, desc=f"{'Train' if train else 'Val'} {epoch_idx+1}/{EPOCHS} (p0_w={w:.2f})")
+        for batch in pbar:
             if args.seq_len >= 2:
-                # ===== 시퀀스 경로 =====
                 imgs_bt, tgts_bt, names_bt, vids_bt, T = batch   # imgs: (B,T,3,H,W)
                 B = imgs_bt.size(0)
 
-                if train:
-                    opt_bb.zero_grad(set_to_none=True)
-                    opt_hd.zero_grad(set_to_none=True)
+                handle_temporal_state(vids_bt)
 
-                logs_accum = {
-                    "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
-                    "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
-                }
+                if train:
+                    opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
+
+                logs_accum = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,
+                              "loss_p0":0,"loss_p12":0,"pos":0,"neg":0}
 
                 bad_batch = False
-                accum_full_loss = torch.tensor(0.0, device=DEVICE)
-
-                # temporal supervisory / consistency용 이전 step 출력
-                prev_reg_last = None
-                prev_obj_last = None
-                prev_cls_last = None
+                loss_seq = None
+                steps_seq = 0
+                loss_batch_sum = 0.0
+                dsi_batch_sum = 0.0
 
                 for tstep in range(T):
                     imgs = imgs_bt[:, tstep].to(DEVICE, non_blocking=True)
                     targets_cpu = [tgts_bt[b][tstep] for b in range(B)]
-                    targets_dev = [{
-                        "points": t["points"].to(DEVICE),
-                        "labels": t["labels"].to(DEVICE)
-                    } for t in targets_cpu]
+                    targets_dev = [{"points": t["points"].to(DEVICE), "labels": t["labels"].to(DEVICE)} for t in targets_cpu]
 
                     if train:
                         with amp_autocast():
-                            outs = model(imgs, use_temporal=True)
-                            base_loss, logs = criterion(outs, targets_dev, model.strides)
-
-                            # ───────── Consistency / Temporal supervisory loss (last scale 기준) ─────────
-                            cons_loss = torch.tensor(0.0, device=imgs.device)
-                            last_reg, last_obj, last_cls = outs[-1]  # (B,6,H,W), (B,1,H,W), (B,C,H,W)
-
-                            # (1) reg consistency: 연속 frame의 reg 맵을 부드럽게 만들기
-                            if lambda_cons_eff > 0.0 and prev_reg_last is not None:
-                                cons_loss = cons_loss + lambda_cons_eff * F.smooth_l1_loss(
-                                    last_reg, prev_reg_last.detach()
-                                )
-
-                            # (2) obj / cls temporal smoothness
-                            if lambda_temp_eff > 0.0 and prev_obj_last is not None and prev_cls_last is not None:
-                                cons_loss = cons_loss + lambda_temp_eff * (
-                                    F.mse_loss(last_obj, prev_obj_last.detach()) +
-                                    F.mse_loss(last_cls, prev_cls_last.detach())
-                                )
-
-                            # 다음 step을 위한 이전값 업데이트 (graph 분리 → self-teacher forcing 느낌)
-                            prev_reg_last = last_reg.detach()
-                            prev_obj_last = last_obj.detach()
-                            prev_cls_last = last_cls.detach()
-
-                            full_loss_t = base_loss + cons_loss
-
-                        if not torch.isfinite(full_loss_t):
+                            if use_dsi:
+                                outs, deep_feat = model(imgs, use_temporal=True, return_deep_feature=True)
+                            else:
+                                outs = model(imgs, use_temporal=True)
+                                deep_feat = None
+                            det_loss, logs = criterion(outs, targets_dev, model.strides)
+                            dsi_loss = None
+                            loss = det_loss
+                            if use_dsi and deep_feat is not None:
+                                dsi_loss = dsi_helper(deep_feat, imgs)
+                                loss = loss + (dsi_weight * dsi_warm_factor) * dsi_loss
+                        if not torch.isfinite(loss):
                             bad_batch = True
                             break
-
-                        # --- 시퀀스 전체를 한 번에 backward 하기 위해 누적 ---
-                        accum_full_loss = accum_full_loss + full_loss_t / T
-
-                        # 로그: consistency까지 포함
-                        logs["loss_total"] = float(base_loss.detach().item() + cons_loss.detach().item())
-                        logs["loss_cons"] = float(cons_loss.detach().item())
+                        steps_seq += 1
+                        if args.tbptt_detach and args.temporal != "none":
+                            scaler.scale(loss / max(1, T)).backward()
+                            model.detach_temporal()
+                            if dsi_loss is not None:
+                                dsi_batch_sum += float(dsi_loss.detach().item())
+                        else:
+                            loss_seq = loss if loss_seq is None else (loss_seq + loss)
+                        loss_batch_sum += float(loss.detach().item())
+                        if (not args.tbptt_detach) and dsi_loss is not None:
+                            dsi_batch_sum += float(dsi_loss.detach().item())
                     else:
                         if val_mode == "loss":
                             with torch.inference_mode():
                                 outs = model(imgs, use_temporal=True)
-                                base_loss, logs = criterion(outs, targets_dev, model.strides)
-                            logs["loss_cons"] = 0.0
+                                loss, logs = criterion(outs, targets_dev, model.strides)
                         else:
                             with torch.inference_mode(), amp_autocast():
                                 outs = model(imgs, use_temporal=True)
-                            base_loss = torch.tensor(0., device=imgs.device)
-                            logs = {
-                                "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
-                                "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
-                            }
+                            loss = torch.tensor(0., device=imgs.device)
+                            logs = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,"loss_p0":0,"loss_p12":0,"pos":0,"neg":0}
+                        dsi_loss = None
+                        loss_batch_sum += float(loss.detach().item())
 
-                        # 검증 시에는 full_loss를 backward 안 하므로 accum_full_loss는 사용 X
-
-                    # 로그 누적
                     for k in logs_accum.keys():
                         logs_accum[k] += logs.get(k, 0.0)
 
                     # 메트릭: 시퀀스 마지막 step만 평가
-                    if collect_metrics and (tstep == T - 1):
+                    if collect_metrics and (tstep == T-1):
                         decoded = decode_predictions(
                             outs, model.strides,
                             clip_cells=eval_cfg.get("clip_cells", None),
@@ -1329,155 +1568,169 @@ def main():
                         for dets_img, tgt_cpu in zip(decoded, [tgts_bt[b][tstep] for b in range(B)]):
                             gt_tri = tgt_cpu["points"].cpu().numpy()
                             records, _ = evaluate_single_image(dets_img, gt_tri, iou_thr=eval_cfg.get("iou_thr", 0.5))
-                            metric_records.extend(records)
-                            total_gt += gt_tri.shape[0]
+                            metric_records.extend(records); total_gt += gt_tri.shape[0]
 
-                    # TBPTT 모드면 time-step마다 hidden detach (긴 시퀀스에서 폭주 방지)
-                    if args.tbptt_detach and args.temporal != "none":
-                        model.detach_temporal()
+                total_loss_sum += loss_batch_sum / max(1, steps_seq)
+                if use_dsi:
+                    dsi_loss_sum += dsi_batch_sum / max(1, steps_seq)
 
-                # ---- 시퀀스 끝, 이제 한 번만 backward ----
                 if train:
                     if bad_batch and args.skip_bad_batch:
-                        opt_bb.zero_grad(set_to_none=True)
-                        opt_hd.zero_grad(set_to_none=True)
+                        # 배치 스킵: grad 초기화 후 상태 리셋
+                        opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
                         if args.temporal != "none":
                             model.reset_temporal()
+                            prev_stream_key = None
+                        # 진행표시만 업데이트하고 다음 배치로
                         pbar.set_postfix_str("skip bad batch (NaN/Inf)")
                         continue
 
-                    if torch.isfinite(accum_full_loss):
-                        scaler.scale(accum_full_loss).backward()
+                    # ---- GradScaler 안전 스텝 (freeze 대응) ----
+                    if (not args.tbptt_detach) and loss_seq is not None and steps_seq > 0:
+                        scaler.scale(loss_seq / max(1, steps_seq)).backward()
+                    has_bb = _opt_has_grad(opt_bb)
+                    has_hd = _opt_has_grad(opt_hd)
+
+                    if has_bb: scaler.unscale_(opt_bb)
+                    if has_hd: scaler.unscale_(opt_hd)
+
+                    # 비정상 grad 제거 + norm clip
+                    _sanitize_grads(model)
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
+                    if use_dsi and args.dsi_gam:
+                        backbone_norm = module_grad_l1(model.backbone_neck)
+                        head_norm = module_grad_l1(model.heads)
+                        if model.temporal is not None:
+                            head_norm += module_grad_l1(model.temporal)
+                        if dsi_helper is not None:
+                            head_norm += module_grad_l1(dsi_helper.projector)
+                        denom = backbone_norm + head_norm
+                        if denom > 0:
+                            grad_ratio_sum += (backbone_norm / denom)
+                            grad_ratio_count += 1
+
+                    if has_bb: scaler.step(opt_bb)
+                    if has_hd: scaler.step(opt_hd)
+                    scaler.update()
+                    # -------------------------------------------
+
+                # 평균 로그로 표시
+                logs_mean = {k:(v/ T if isinstance(v,(int,float)) else v) for k,v in logs_accum.items()}
+                tot += logs_mean["loss_total"]; treg += logs_mean["loss_reg"]; tobj += logs_mean["loss_obj"]
+                tcls += logs_mean["loss_cls"];  tp0  += logs_mean["loss_p0"];  tp12 += logs_mean["loss_p12"]
+                tpos += logs_mean["pos"]; nb += 1
+
+            else:
+                # 단일 프레임 경로
+                imgs, targets_cpu, names = batch
+                handle_temporal_state(names)
+                imgs = imgs.to(DEVICE, non_blocking=True)
+                targets_dev = [{"points": t["points"].to(DEVICE), "labels": t["labels"].to(DEVICE)} for t in targets_cpu]
+
+                if train:
+                    opt_bb.zero_grad(set_to_none=True); opt_hd.zero_grad(set_to_none=True)
+                    with amp_autocast():
+                        if use_dsi:
+                            outs, deep_feat = model(imgs, use_temporal=True, return_deep_feature=True)
+                        else:
+                            outs = model(imgs, use_temporal=True)
+                            deep_feat = None
+                        loss, logs = criterion(outs, targets_dev, model.strides)
+                        dsi_loss = None
+                        if use_dsi and deep_feat is not None:
+                            dsi_loss = dsi_helper(deep_feat, imgs)
+                            loss = loss + (dsi_weight * dsi_warm_factor) * dsi_loss
+                    if torch.isfinite(loss):
+                        scaler.scale(loss).backward()
                     elif args.skip_bad_batch:
-                        opt_bb.zero_grad(set_to_none=True)
-                        opt_hd.zero_grad(set_to_none=True)
+                        pbar.set_postfix_str("skip bad batch (NaN/Inf)")
                         if args.temporal != "none":
                             model.reset_temporal()
-                        pbar.set_postfix_str("skip bad batch (NaN/Inf)")
+                            prev_stream_key = None
                         continue
 
                     # ---- GradScaler 안전 스텝 (freeze 대응) ----
                     has_bb = _opt_has_grad(opt_bb)
                     has_hd = _opt_has_grad(opt_hd)
 
-                    if has_bb:
-                        scaler.unscale_(opt_bb)
-                    if has_hd:
-                        scaler.unscale_(opt_hd)
+                    if has_bb: scaler.unscale_(opt_bb)
+                    if has_hd: scaler.unscale_(opt_hd)
 
                     _sanitize_grads(model)
                     nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
+                    if use_dsi and args.dsi_gam:
+                        backbone_norm = module_grad_l1(model.backbone_neck)
+                        head_norm = module_grad_l1(model.heads)
+                        if model.temporal is not None:
+                            head_norm += module_grad_l1(model.temporal)
+                        if dsi_helper is not None:
+                            head_norm += module_grad_l1(dsi_helper.projector)
+                        denom = backbone_norm + head_norm
+                        if denom > 0:
+                            grad_ratio_sum += (backbone_norm / denom)
+                            grad_ratio_count += 1
 
-                    if has_bb:
-                        scaler.step(opt_bb)
-                    if has_hd:
-                        scaler.step(opt_hd)
+                    if has_bb: scaler.step(opt_bb)
+                    if has_hd: scaler.step(opt_hd)
                     scaler.update()
                     # -------------------------------------------
 
-                # 평균 로그로 표시
-                logs_mean = {k: (v / max(1, T) if isinstance(v, (int, float, float)) else v)
-                             for k, v in logs_accum.items()}
-                tot  += logs_mean["loss_total"]
-                treg += logs_mean["loss_reg"]
-                tobj += logs_mean["loss_obj"]
-                tcls += logs_mean["loss_cls"]
-                tp0  += logs_mean["loss_p0"]
-                tp12 += logs_mean["loss_p12"]
-                tcons+= logs_mean["loss_cons"]
-                tpos += logs_mean["pos"]
-                nb   += 1
-
-            else:
-                # ===== 단일 프레임 경로 =====
-                imgs, targets_cpu, _ = batch
-                imgs = imgs.to(DEVICE, non_blocking=True)
-                targets_dev = [{
-                    "points": t["points"].to(DEVICE),
-                    "labels": t["labels"].to(DEVICE)
-                } for t in targets_cpu]
-
-                if train:
-                    opt_bb.zero_grad(set_to_none=True)
-                    opt_hd.zero_grad(set_to_none=True)
-                    with amp_autocast():
-                        outs = model(imgs, use_temporal=True)
-                        loss, logs = criterion(outs, targets_dev, model.strides)
-                    # seq_len==1 이면 consistency는 정의 불가 → 0
-                    logs["loss_cons"] = 0.0
-
-                    if torch.isfinite(loss):
-                        scaler.scale(loss).backward()
-                    elif args.skip_bad_batch:
-                        pbar.set_postfix_str("skip bad batch (NaN/Inf)")
-                        continue
-
-                    has_bb = _opt_has_grad(opt_bb)
-                    has_hd = _opt_has_grad(opt_hd)
-
-                    if has_bb:
-                        scaler.unscale_(opt_bb)
-                    if has_hd:
-                        scaler.unscale_(opt_hd)
-
-                    _sanitize_grads(model)
-                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
-
-                    if has_bb:
-                        scaler.step(opt_bb)
-                    if has_hd:
-                        scaler.step(opt_hd)
-                    scaler.update()
                 else:
                     if val_mode == "loss":
                         with torch.inference_mode():
                             outs = model(imgs, use_temporal=True)
-                            loss, logs = criterion(outs, targets_dev, model.strides)
-                        logs["loss_cons"] = 0.0
+                        loss, logs = criterion(outs, targets_dev, model.strides)
                     else:
                         with torch.inference_mode(), amp_autocast():
                             outs = model(imgs, use_temporal=True)
                         loss = torch.tensor(0., device=imgs.device)
-                        logs = {
-                            "loss_total": 0.0, "loss_reg": 0.0, "loss_obj": 0.0, "loss_cls": 0.0,
-                            "loss_p0": 0.0, "loss_p12": 0.0, "loss_cons": 0.0, "pos": 0.0, "neg": 0.0
-                        }
+                        logs = {"loss_total":0,"loss_reg":0,"loss_obj":0,"loss_cls":0,"loss_p0":0,"loss_p12":0,"pos":0,"neg":0}
+                    dsi_loss = None
 
-                tot  += logs["loss_total"]
-                treg += logs["loss_reg"]
-                tobj += logs["loss_obj"]
-                tcls += logs["loss_cls"]
-                tp0  += logs["loss_p0"]
-                tp12 += logs["loss_p12"]
-                tcons+= logs.get("loss_cons", 0.0)
-                tpos += logs["pos"]
-                nb   += 1
+                tot+=logs["loss_total"]; treg+=logs["loss_reg"]; tobj+=logs["loss_obj"]
+                tcls+=logs["loss_cls"]; tp0+=logs["loss_p0"]; tp12+=logs["loss_p12"]; tpos+=logs["pos"]; nb+=1
+                total_loss_sum += float(loss.detach().item())
+                if use_dsi and dsi_loss is not None:
+                    dsi_loss_sum += float(dsi_loss.detach().item())
 
-            lr_bb = opt_bb.param_groups[0]['lr']
-            lr_hd = opt_hd.param_groups[0]['lr']
+            lr_bb = opt_bb.param_groups[0]['lr']; lr_hd = opt_hd.param_groups[0]['lr']
             pbar.set_postfix(
-                loss=(tot/nb if nb>0 else 0),
+                loss_det=(tot/nb if nb>0 else 0),
                 reg=(treg/nb if nb>0 else 0),
                 obj=(tobj/nb if nb>0 else 0),
                 p0=(tp0/nb if nb>0 else 0),
                 p12=(tp12/nb if nb>0 else 0),
-                cons=(tcons/nb if nb>0 else 0),
                 cls=(tcls/nb if nb>0 else 0),
                 pos=(tpos/nb if nb>0 else 0),
-                lr_bb=lr_bb, lr_hd=lr_hd
+                loss_total=(total_loss_sum/nb if nb>0 else 0),
+                dsi=(dsi_loss_sum/nb if (nb>0 and use_dsi) else 0),
+                lr_bb=lr_bb,
+                lr_hd=lr_hd
             )
 
             batches_seen += 1
             if (not train) and args.val_max_batches is not None and batches_seen >= args.val_max_batches:
                 break
 
-        avg_loss = float(tot/nb) if nb>0 else 0.0
+        avg_loss = float(total_loss_sum/nb) if nb>0 else 0.0
         metrics = compute_detection_metrics(metric_records, total_gt) if collect_metrics else None
-        return avg_loss, metrics
+        grad_ratio_avg = (grad_ratio_sum / grad_ratio_count) if grad_ratio_count > 0 else None
+        return avg_loss, metrics, grad_ratio_avg
 
     # --------- Loop ---------
     for ep in range(start_ep, EPOCHS):
-        train_loss, _ = run_epoch(train_loader, train=True, epoch_idx=ep, eval_cfg=eval_cfg, val_mode=args.val_mode)
+        train_loss, _, train_ratio = run_epoch(train_loader, train=True, epoch_idx=ep, eval_cfg=eval_cfg, val_mode=args.val_mode)
+        if args.dsi and args.dsi_gam and train_ratio is not None:
+            target = args.dsi_gam_rho
+            delta = args.dsi_gam_delta
+            new_weight = dsi_weight
+            if train_ratio > target + delta:
+                new_weight = max(args.dsi_weight_min, dsi_weight * (target / (train_ratio + 1e-8)))
+            elif train_ratio < target - delta:
+                new_weight = min(args.dsi_weight_max, dsi_weight * (target / (train_ratio + 1e-8)))
+            if abs(new_weight - dsi_weight) > 1e-6:
+                print(f"[GAM] epoch {ep+1} ratio={train_ratio:.4f} -> dsi_weight {dsi_weight:.3f} -> {new_weight:.3f}")
+                dsi_weight = new_weight
 
         run_val = (args.val_mode != "none" and val_loader is not None and
                    ((ep + 1) % max(1, args.val_interval) == 0 or ep == EPOCHS - 1))
@@ -1486,7 +1739,7 @@ def main():
         curr_map = curr_prec = curr_rec = curr_maoe = None
 
         if run_val:
-            val_loss, val_metrics = run_epoch(val_loader, train=False, epoch_idx=ep, eval_cfg=eval_cfg, val_mode=args.val_mode)
+            val_loss, val_metrics, _ = run_epoch(val_loader, train=False, epoch_idx=ep, eval_cfg=eval_cfg, val_mode=args.val_mode)
             if val_metrics is not None:
                 curr_prec = float(val_metrics["precision"])
                 curr_rec  = float(val_metrics["recall"])
@@ -1561,14 +1814,55 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 """
-python train_lstm_onnx_new.py \
-  --train-root ./output_all \
-  --weights ./runs/yolo11m_2_5d_real_coshow_v3.pth \
-  --start-epoch 5 --batch 6 \
-  --seq-len 4 --temporal lstm \
-  --lambda-consistency 0.1 \
-  --lambda-temp-objcls 0.01   --img-h 864 --img-w 1536
+
+python -m src.train_lstm_onnx \
+  --train-root /media/ubuntu24/T7/output_lstm \
+  --val-root /media/ubuntu24/T7/val_dataset_lstm/cam2_-30 \
+  --data-layout auto \
+  --yolo-weights yolo11m.pt \
+  --weights onnx/base_pth/yolo11m_2_5d_epoch_005.pth \
+  --temporal lstm --temporal-hidden 256 --temporal-layers 1 --temporal-on-scales last \
+  --seq-len 6 --seq-stride 2 --seq-grouping auto \
+  --batch 2 --start-epoch 5 \
+  --num-classes 1 \
+  --save-dir runs/1206_lstm
+
+
+python -m src.train_lstm_onnx \
+  --train-root /media/ubuntu24/T7/val_dataset_lstm \
+  --val-root /media/ubuntu24/T7/val_dataset_lstm/cam2_-30 \
+  --data-layout auto \
+  --yolo-weights yolo11m.pt \
+  --weights onnx/base_pth/yolo11m_2_5d_epoch_005.pth \
+  --temporal lstm --temporal-hidden 256 --temporal-layers 1 --temporal-on-scales last \
+  --seq-len 6 --seq-stride 2 --seq-grouping auto \
+  --batch 2 --start-epoch 5 \
+  --num-classes 1 \
+  --save-dir runs/1206_lstm
+
+
+
+
+
+ python -m src.train_lstm_onnx \
+  --train-root /media/ubuntu24/T7/carla_dataset_lstm_1209/train \
+  --val-root   /media/ubuntu24/T7/carla_dataset_lstm_1209/val \
+  --data-layout auto \
+  --yolo-weights yolo11m.pt \
+  --weights onnx/base_pth/yolo11m_2_5d_epoch_005.pth \
+  --temporal lstm --temporal-hidden 256 --temporal-layers 1 --temporal-on-scales last \
+  --seq-len 6 --seq-stride 1 --seq-grouping by_subdir \
+  --batch 6 --val-batch 4 \
+  --no-seq-streaming --tbptt-detach --temporal-reset-per-batch \
+  --freeze-bb-epochs 2 \
+  --lr-bb 2e-4 --lr-hd 6e-4 --lr-min 1e-4 \
+  --num-classes 3 \
+  --score-mode obj --eval-conf 0.35 \
+  --train-augment --dsi \
+  --skip-bad-batch --max-grad-norm 10.0 \
+  --save-dir runs/carla_lstm_1209
+ 
+
 
 """
