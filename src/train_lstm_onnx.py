@@ -685,11 +685,19 @@ class TriHead(nn.Module):
 
 class YOLO11_2_5D(nn.Module):
     def __init__(self, yolo11_path='yolo11m.pt', num_classes=1, img_size=(1088,1920),
-                 temporal_mode="none", temporal_hidden=256, temporal_layers=1, temporal_on_scales="last"):
+                 temporal_mode="none", temporal_hidden=256, temporal_layers=1, temporal_on_scales="last",
+                 include_p2=False):
         super().__init__()
         base = YOLO(yolo11_path).model
+        self.include_p2 = bool(include_p2)
         self.backbone_neck = base.model[:-1]
-        self.save_idx = base.save
+        self.save_idx = list(base.save)
+        if self.include_p2:
+            # layer 2: stride 4 feature (C3k2)
+            self.p2_source_idx = 2
+            if self.p2_source_idx not in self.save_idx:
+                self.save_idx.append(self.p2_source_idx)
+            self.save_idx = sorted(set(self.save_idx))
         detect = base.model[-1]
         self.strides = detect.stride
         self.f_indices = detect.f
@@ -707,9 +715,37 @@ class YOLO11_2_5D(nn.Module):
                 feats_memory.append(x if m.i in self.save_idx else None)
             feat_list = [feats_memory[i] for i in self.f_indices]
             in_chs = [f.shape[1] for f in feat_list]
+            if self.include_p2:
+                p2_src = feats_memory[self.p2_source_idx]
+                self.p2_src_ch = p2_src.shape[1]
+                self.p3_ch = in_chs[0]
         self.backbone_neck.train()
 
         # heads
+        self.p2_reduce = None
+        self.p2_lateral = None
+        self.p2_upsample = None
+        self.p2_fuse = None
+        if self.include_p2:
+            p2_lat_ch = max(32, self.p3_ch // 2)
+            p3_red = max(32, self.p3_ch // 2)
+            self.p2_reduce = nn.Sequential(
+                nn.Conv2d(self.p3_ch, p3_red, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(p3_red),
+                nn.SiLU()
+            )
+            self.p2_lateral = nn.Sequential(
+                nn.Conv2d(self.p2_src_ch, p2_lat_ch, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(p2_lat_ch),
+                nn.SiLU()
+            )
+            self.p2_upsample = nn.Upsample(scale_factor=2, mode="nearest")
+            self.p2_fuse = nn.Sequential(
+                nn.Conv2d(p3_red + p2_lat_ch, self.p3_ch, 3, 1, 1, bias=False),
+                nn.BatchNorm2d(self.p3_ch),
+                nn.SiLU()
+            )
+            in_chs = [self.p3_ch] + in_chs
         self.heads = nn.ModuleList([TriHead(c, num_classes) for c in in_chs])
         self.num_classes = num_classes
         self.deep_feature_channels = in_chs[-1]
@@ -729,6 +765,9 @@ class YOLO11_2_5D(nn.Module):
                                                   layers=temporal_layers, mode=temporal_mode)
         else:
             self.temporal = None
+
+        if self.include_p2:
+            self.strides = [4.0] + list(self.strides)
 
     def reset_temporal(self):
         if self.temporal is None: return
@@ -750,6 +789,16 @@ class YOLO11_2_5D(nn.Module):
             x = m(x)
             feats_memory.append(x if m.i in self.save_idx else None)
         feat_list = [feats_memory[i] for i in self.f_indices]
+
+        if self.include_p2:
+            p3 = feat_list[0]
+            p2_src = feats_memory[self.p2_source_idx]
+            p3_red = self.p2_reduce(p3)
+            p2_lat = self.p2_lateral(p2_src)
+            p2_up = self.p2_upsample(p3_red)
+            p2 = torch.cat([p2_up, p2_lat], dim=1)
+            p2 = self.p2_fuse(p2)
+            feat_list = [p2] + feat_list
 
         if use_temporal and self.temporal is not None:
             feat_new = []
@@ -784,6 +833,15 @@ class YOLO11_2_5D(nn.Module):
             x = m(x)
             feats_memory.append(x if m.i in self.save_idx else None)
         feat_list = [feats_memory[i] for i in self.f_indices]
+        if self.include_p2:
+            p3 = feat_list[0]
+            p2_src = feats_memory[self.p2_source_idx]
+            p3_red = self.p2_reduce(p3)
+            p2_lat = self.p2_lateral(p2_src)
+            p2_up = self.p2_upsample(p3_red)
+            p2 = torch.cat([p2_up, p2_lat], dim=1)
+            p2 = self.p2_fuse(p2)
+            feat_list = [p2] + feat_list
 
         state_out = None
         # temporal
@@ -826,6 +884,7 @@ class Strict2_5DLoss(nn.Module):
         self.mse = nn.MSELoss(reduction='sum')
         self.register_buffer("obj_pos_weight", torch.tensor([obj_pos_weight], dtype=torch.float32))
         self.lambda_p0 = 1.0
+        self._grid_cache = {}
     def set_p0_weight(self, w: float):
         self.lambda_p0 = float(w)
 
@@ -836,6 +895,15 @@ class Strict2_5DLoss(nn.Module):
         yy, xx = torch.meshgrid(ys, xs, indexing='ij')
         # (Hs, Ws, 2) on CPU (float32 고정)
         return torch.stack([xx, yy], dim=-1)
+
+    def _grid_centers_cached(self, Hs, Ws, stride, device):
+        key = (device, Hs, Ws, float(stride))
+        if key not in self._grid_cache:
+            ys = (torch.arange(Hs, device=device, dtype=torch.float32) + 0.5) * float(stride)
+            xs = (torch.arange(Ws, device=device, dtype=torch.float32) + 0.5) * float(stride)
+            yy, xx = torch.meshgrid(ys, xs, indexing='ij')
+            self._grid_cache[key] = torch.stack([xx, yy], dim=-1)
+        return self._grid_cache[key]
 
     def forward(self, outputs, targets, strides):
         dev = outputs[0][0].device
@@ -867,8 +935,9 @@ class Strict2_5DLoss(nn.Module):
                 Hs, Ws = pred_obj_i.shape[1:]
                 stride = float(strides[l]) if not isinstance(strides[l], torch.Tensor) else float(strides[l].item())
 
-                # CPU 격자 (단 한 번)
-                centers_cpu = self._grid_centers_cpu(Hs, Ws, stride)    # (Hs,Ws,2) CPU float32
+                # 격자 캐시 (GPU)
+                centers = self._grid_centers_cached(Hs, Ws, stride, dev)  # (Hs,Ws,2) GPU float32
+                centers_flat = centers.view(-1, 2)                        # (P,2)
 
                 # GPU 타깃 텐서
                 obj_t = torch.zeros_like(pred_obj_i, device=dev)        # (1,Hs,Ws)
@@ -888,39 +957,60 @@ class Strict2_5DLoss(nn.Module):
                     neg_count += Hs*Ws
                     continue
 
-                # ====== CPU에서 모든 GT 처리 → (iy, ix) 모으기 ======
-                pos_list_cpu = []   # [(Np,2) CPU] accumulate
+                # ====== GPU에서 모든 GT 처리 → (iy, ix) 모으기 ======
+                px = centers_flat[:, 0].view(1, -1)
+                py = centers_flat[:, 1].view(1, -1)
+                A = gt[:, 0, :]; Bp = gt[:, 1, :]; C = gt[:, 2, :]
+
+                def _sign(Px, Py, Ax, Ay, Bx, By):
+                    return (Px - Bx) * (Ay - By) - (Ax - Bx) * (Py - By)
+
+                d1 = _sign(px, py, A[:, 0:1], A[:, 1:2], Bp[:, 0:1], Bp[:, 1:2])
+                d2 = _sign(px, py, Bp[:, 0:1], Bp[:, 1:2], C[:, 0:1], C[:, 1:2])
+                d3 = _sign(px, py, C[:, 0:1], C[:, 1:2], A[:, 0:1], A[:, 1:2])
+                inside = ~(((d1 < 0) | (d2 < 0) | (d3 < 0)) & ((d1 > 0) | (d2 > 0) | (d3 > 0)))  # (Ng,P)
+
+                px_expand = px.expand(Ng, -1)
+                py_expand = py.expand(Ng, -1)
+                d_seg1 = _point_to_segment_dist(px_expand, py_expand,
+                                                A[:, 0:1], A[:, 1:2], Bp[:, 0:1], Bp[:, 1:2])
+                d_seg2 = _point_to_segment_dist(px_expand, py_expand,
+                                                Bp[:, 0:1], Bp[:, 1:2], C[:, 0:1], C[:, 1:2])
+                d_seg3 = _point_to_segment_dist(px_expand, py_expand,
+                                                C[:, 0:1], C[:, 1:2], A[:, 0:1], A[:, 1:2])
+                dist_b = torch.minimum(d_seg1, torch.minimum(d_seg2, d_seg3))  # (Ng,P)
+                near = dist_b <= self.eta_px
+                pos_mask_all = (inside | near)  # (Ng,P)
+
+                pos_list_gpu = []   # [(Np,2) GPU] accumulate
                 tri_list_gpu = []   # 매칭되는 GT 삼각형(GPU) (회귀에 필요)
                 cls_list = []
                 for j in range(Ng):
-                    tri_px_cpu = gt[j].detach().to(cpu)              # (3,2) CPU float32
                     if gt_lbl is not None and gt_lbl.shape[0] > j:
                         cls_idx = int(gt_lbl[j].item())
                     else:
                         cls_idx = 0
 
-                    inside = _point_in_triangle(centers_cpu[...,0], centers_cpu[...,1], tri_px_cpu)  # CPU bool
-                    dist_b = _point_to_triangle_dist(centers_cpu[...,0], centers_cpu[...,1], tri_px_cpu)  # CPU float
-                    near = dist_b <= self.eta_px
-                    pos_mask_cpu = (inside | near)
-
-                    npix = int(pos_mask_cpu.sum().item())
+                    mask_flat = pos_mask_all[j]
+                    npix = int(mask_flat.sum().item())
                     if npix == 0:
                         continue
 
                     if npix > self.k_pos_cap:
-                        flat_idx = torch.nonzero(pos_mask_cpu, as_tuple=False)  # (Np,2) CPU
-                        d_keep = dist_b[pos_mask_cpu]                            # (Np,)  CPU
+                        flat_idx = torch.nonzero(mask_flat, as_tuple=False).squeeze(1)  # (Np,)
+                        d_keep = dist_b[j][mask_flat]                                    # (Np,)
                         topk = torch.topk(-d_keep, k=self.k_pos_cap).indices
-                        sel = flat_idx[topk]                                     # (K,2)
-                        pos_list_cpu.append(sel)
+                        sel_flat = flat_idx[topk]
                     else:
-                        pos_list_cpu.append(torch.nonzero(pos_mask_cpu, as_tuple=False))
+                        sel_flat = torch.nonzero(mask_flat, as_tuple=False).squeeze(1)
 
+                    iy = torch.div(sel_flat, Ws, rounding_mode='floor')
+                    ix = sel_flat - iy * Ws
+                    pos_list_gpu.append(torch.stack([iy, ix], dim=1))  # (N,2) GPU
                     tri_list_gpu.append(gt[j])  # (3,2) on GPU, 같은 순서로 저장
                     cls_list.append(cls_idx)
 
-                if len(pos_list_cpu) == 0:
+                if len(pos_list_gpu) == 0:
                     # 모든 GT가 선택 픽셀이 없었음
                     obj_loss += F.binary_cross_entropy_with_logits(
                         pred_obj_i, obj_t, pos_weight=self.obj_pos_weight, reduction='sum'
@@ -928,9 +1018,8 @@ class Strict2_5DLoss(nn.Module):
                     neg_count += Hs*Ws
                     continue
 
-                # ====== 한 번에 GPU로 옮기기 ======
-                pos_idx_cpu = torch.cat(pos_list_cpu, dim=0)                  # (Npos,2) CPU
-                pos_idx = pos_idx_cpu.to(dev, non_blocking=True)              # (Npos,2) GPU
+                # ====== 한 번에 GPU로 모으기 ======
+                pos_idx = torch.cat(pos_list_gpu, dim=0)                  # (Npos,2) GPU
 
                 # 평탄 인덱스 (GPU)
                 flat_idx_gpu = (pos_idx[:,0] * Ws + pos_idx[:,1]).long()
@@ -942,7 +1031,7 @@ class Strict2_5DLoss(nn.Module):
                 anchor_xy = torch.stack(((ix + 0.5) * stride, (iy + 0.5) * stride), dim=1).to(torch.float32)
 
                 # 블록 길이 계산 및 클래스 반복
-                lens = [p.shape[0] for p in pos_list_cpu]
+                lens = [p.shape[0] for p in pos_list_gpu]
                 cls_targets = []
                 tri_expanded = []
                 for tri, ln in zip(tri_list_gpu, lens):
@@ -1091,6 +1180,7 @@ def export_epoch_onnx(model: YOLO11_2_5D, onnx_dir: Path, onnx_name: str,
     H, W = img_size
     device = next(model.parameters()).device
     model.eval()
+    num_heads = len(model.heads)
 
     last_stride = int(model.strides[-1]) if isinstance(model.strides[-1], (int,float)) else int(model.strides[-1].item())
     Hh, Wh = H // last_stride, W // last_stride
@@ -1102,14 +1192,14 @@ def export_epoch_onnx(model: YOLO11_2_5D, onnx_dir: Path, onnx_name: str,
         wrapper = _ONNXWrapNone(model).to(device)
         inputs = (x,)
         input_names = ["images"]
-        output_names = [f"p{l}_{k}" for l in range(3) for k in ("reg","obj","cls")]
+        output_names = [f"p{l}_{k}" for l in range(num_heads) for k in ("reg","obj","cls")]
         dynamic_axes = { "images": {0: "batch"} }
     elif temporal == "gru":
         h = torch.zeros(1, temporal_hidden, Hh, Wh, device=device)
         wrapper = _ONNXWrapGRULast(model).to(device)
         inputs = (x, h)
         input_names = ["images", "h_in"]
-        output_names = [f"p{l}_{k}" for l in range(3) for k in ("reg","obj","cls")] + ["h_out"]
+        output_names = [f"p{l}_{k}" for l in range(num_heads) for k in ("reg","obj","cls")] + ["h_out"]
         dynamic_axes = { "images": {0: "batch"}, "h_in": {0: "batch"}, "h_out": {0: "batch"} }
     elif temporal == "lstm":
         h = torch.zeros(1, temporal_hidden, Hh, Wh, device=device)
@@ -1117,7 +1207,7 @@ def export_epoch_onnx(model: YOLO11_2_5D, onnx_dir: Path, onnx_name: str,
         wrapper = _ONNXWrapLSTMLast(model).to(device)
         inputs = (x, h, c)
         input_names = ["images", "h_in", "c_in"]
-        output_names = [f"p{l}_{k}" for l in range(3) for k in ("reg","obj","cls")] + ["h_out","c_out"]
+        output_names = [f"p{l}_{k}" for l in range(num_heads) for k in ("reg","obj","cls")] + ["h_out","c_out"]
         dynamic_axes = { "images": {0: "batch"}, "h_in": {0: "batch"}, "c_in": {0: "batch"},
                          "h_out": {0: "batch"}, "c_out": {0: "batch"} }
     else:
@@ -1180,6 +1270,10 @@ def main():
     parser.add_argument("--lr-bb", type=float, default=2e-4)
     parser.add_argument("--lr-hd", type=float, default=1e-3)
     parser.add_argument("--lr-min", type=float, default=1e-4)
+
+    # 스케일 옵션
+    parser.add_argument("--p2-head", action="store_true", default=False,
+                        help="stride=4 (P2) 헤드를 추가합니다. 기존 가중치는 호환되지 않으며 새로 학습해야 합니다.")
 
     # 안정화 옵션
     parser.add_argument("--skip-bad-batch", action="store_true",
@@ -1340,7 +1434,8 @@ def main():
         temporal_mode=args.temporal,
         temporal_hidden=args.temporal_hidden,
         temporal_layers=args.temporal_layers,
-        temporal_on_scales=args.temporal_on_scales
+        temporal_on_scales=args.temporal_on_scales,
+        include_p2=args.p2_head
     ).to(DEVICE)
 
     if isinstance(model.strides, torch.Tensor):

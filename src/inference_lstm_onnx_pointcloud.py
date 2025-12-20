@@ -792,6 +792,7 @@ class ONNXTemporalRunner:
         self.reg_names.sort(key=_sort_key)
         self.obj_names.sort(key=_sort_key)
         self.cls_names.sort(key=_sort_key)
+        self.num_scales = min(len(self.reg_names), len(self.obj_names), len(self.cls_names))
 
         # 상태 버퍼
         self.h_buf = None
@@ -976,6 +977,19 @@ def main():
         state_stride_hint=args.state_stride_hint,
         default_hidden_ch=args.default_hidden_ch
     )
+
+    if len(strides) != runner.num_scales:
+        if runner.num_scales == len(strides) + 1:
+            # 추론 모델이 스케일을 하나 더 갖고 있음 (예: 4,8,16,32)
+            first = max(1.0, strides[0] / 2.0)
+            strides = [first] + strides
+            print(f"[Infer-ONNX] strides length adjusted to match model outputs: {strides}")
+        elif len(strides) > runner.num_scales:
+            strides = strides[:runner.num_scales]
+            print(f"[Infer-ONNX] strides truncated to {strides} to match model outputs")
+        else:
+            raise ValueError(f"ONNX outputs ({runner.num_scales}) and strides ({len(strides)}) mismatch. "
+                             "Set --strides accordingly (e.g., 4,8,16,32 for stride-4 models).")
 
     out_img_dir = os.path.join(args.output_dir, "images")
     out_lab_dir = os.path.join(args.output_dir, "labels")
