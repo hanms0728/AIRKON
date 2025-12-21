@@ -1262,6 +1262,8 @@ def main():
     parser.add_argument("--eval-topk", type=int, default=100)
     parser.add_argument("--eval-iou-thr", type=float, default=0.5)
     parser.add_argument("--score-mode", type=str, default="obj*cls", choices=["cls","obj","obj*cls"])
+    parser.add_argument("--eval-class-conf", type=str, default=None,
+                        help="클래스별 conf, 예: '0:0.2,1:0.35,2:0.35'")
     parser.add_argument("--clip-cells", type=float, default=4.0)
 
     # 라벨/손실 하이퍼
@@ -1387,6 +1389,17 @@ def main():
 
     eval_cfg = None
     if args.val_mode == "metrics":
+        class_conf_map = None
+        if args.eval_class_conf:
+            class_conf_map = {}
+            for tok in args.eval_class_conf.split(","):
+                tok = tok.strip()
+                if not tok: continue
+                try:
+                    cid, thr = tok.split(":")
+                    class_conf_map[int(cid.strip())] = float(thr.strip())
+                except Exception:
+                    print(f"[Warn] invalid --eval-class-conf token '{tok}', expected 'cls:thr'")
         eval_cfg = {
             "conf_th": args.eval_conf,
             "nms_iou": args.eval_nms_iou,
@@ -1394,6 +1407,7 @@ def main():
             "iou_thr": args.eval_iou_thr,
             "score_mode": args.score_mode,
             "clip_cells": args.clip_cells,
+            "class_conf": class_conf_map,
         }
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1693,6 +1707,13 @@ def main():
                             score_mode=eval_cfg.get("score_mode", "obj*cls"),
                             use_gpu_nms=True
                         )
+                        class_conf_map = eval_cfg.get("class_conf", None)
+                        if class_conf_map:
+                            def _keep(d):
+                                cid = int(d.get("class_id", d.get("cls", 0)))
+                                thr = class_conf_map.get(cid, eval_cfg.get("conf_th", 0.30))
+                                return float(d.get("score", 0.0)) >= thr
+                            decoded = [[d for d in dets_img if _keep(d)] for dets_img in decoded]
                         decoded = [tiny_filter_on_dets(dets_img=di, min_area=20.0, min_edge=3.0) for di in decoded]
                         for dets_img, tgt_cpu in zip(decoded, [tgts_bt[b][tstep] for b in range(B)]):
                             gt_tri = tgt_cpu["points"].cpu().numpy()
