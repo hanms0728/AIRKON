@@ -8,6 +8,7 @@ import cv2
 import math
 import argparse
 import numpy as np
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Optional, Union
 
@@ -875,7 +876,8 @@ def chamfer_2pts(pred_2x2, gt_2x2):
     return (d1 + d2).mean()
 
 class Strict2_5DLoss(nn.Module):
-    def __init__(self, num_classes=1, eta_px=3.0, obj_pos_weight=1.2, lambda_cd=1.0, k_pos_cap=64):
+    def __init__(self, num_classes=1, eta_px=3.0, obj_pos_weight=1.2, lambda_cd=1.0, k_pos_cap=64,
+                 cls_weights=None, cls_focal_gamma=0.0):
         super().__init__()
         self.num_classes = num_classes
         self.eta_px = float(eta_px)
@@ -883,6 +885,11 @@ class Strict2_5DLoss(nn.Module):
         self.k_pos_cap = int(k_pos_cap)  # 기본 64로 낮춰 과부하/timeout 완화
         self.mse = nn.MSELoss(reduction='sum')
         self.register_buffer("obj_pos_weight", torch.tensor([obj_pos_weight], dtype=torch.float32))
+        if cls_weights is not None and len(cls_weights) != num_classes:
+            print(f"[Warn] cls_weights length ({len(cls_weights)}) != num_classes ({num_classes}), ignoring weights")
+            cls_weights = None
+        self.register_buffer("cls_weights", torch.tensor(cls_weights, dtype=torch.float32) if cls_weights is not None else None)
+        self.cls_focal_gamma = float(cls_focal_gamma)
         self.lambda_p0 = 1.0
         self._grid_cache = {}
     def set_p0_weight(self, w: float):
@@ -1071,7 +1078,18 @@ class Strict2_5DLoss(nn.Module):
                 else:
                     if cls_targets_all is not None and cls_targets_all.numel() > 0:
                         logits = pred_cls_i[:, pos_idx[:,0], pos_idx[:,1]].permute(1,0).contiguous()
-                        cls_loss += F.cross_entropy(logits, cls_targets_all, reduction='sum')
+                        weight = None
+                        if self.cls_weights is not None:
+                            weight = self.cls_weights.to(dev)
+                        if self.cls_focal_gamma > 0.0:
+                            log_probs = F.log_softmax(logits, dim=1)
+                            probs = log_probs.exp()
+                            ce = F.nll_loss(log_probs, cls_targets_all, weight=weight, reduction='none')
+                            pt = probs[torch.arange(cls_targets_all.numel(), device=dev), cls_targets_all]
+                            focal = ((1.0 - pt) ** self.cls_focal_gamma) * ce
+                            cls_loss += focal.sum()
+                        else:
+                            cls_loss += F.cross_entropy(logits, cls_targets_all, weight=weight, reduction='sum')
 
                 pos_now = int((obj_t>0.5).sum().item())
                 neg_count += (Hs*Ws - pos_now)
@@ -1251,6 +1269,10 @@ def main():
     parser.add_argument("--eta-px", type=float, default=3.0)
     parser.add_argument("--lambda-cd", type=float, default=1.0)
     parser.add_argument("--k-pos-cap", type=int, default=96)
+    parser.add_argument("--cls-weights", type=float, nargs="+", default=None,
+                        help="클래스별 가중치(CE). num-classes 길이와 맞아야 함.")
+    parser.add_argument("--cls-focal-gamma", type=float, default=0.0,
+                        help=">0이면 focal loss로 적용 (gamma 값)")
 
     # 백본 프리즈
     parser.add_argument("--freeze-bb-epochs", type=int, default=1)
@@ -1463,7 +1485,9 @@ def main():
                                eta_px=args.eta_px,
                                obj_pos_weight=1.2,
                                lambda_cd=args.lambda_cd,
-                               k_pos_cap=args.k_pos_cap).to(DEVICE)
+                               k_pos_cap=args.k_pos_cap,
+                               cls_weights=args.cls_weights,
+                               cls_focal_gamma=args.cls_focal_gamma).to(DEVICE)
 
     head_params = list(model.heads.parameters())
     bb_params = [p for n,p in model.named_parameters() if not n.startswith("heads.") and "temporal" not in n]
@@ -1536,6 +1560,7 @@ def main():
         model.train(mode=train)
         collect_metrics = (not train) and (eval_cfg is not None)
         metric_records = []; total_gt = 0
+        total_gt_per_cls = defaultdict(int)
 
         tot = treg = tobj = tcls = tpos = tp0 = tp12 = 0.0
         nb = 0; batches_seen = 0
@@ -1671,8 +1696,16 @@ def main():
                         decoded = [tiny_filter_on_dets(dets_img=di, min_area=20.0, min_edge=3.0) for di in decoded]
                         for dets_img, tgt_cpu in zip(decoded, [tgts_bt[b][tstep] for b in range(B)]):
                             gt_tri = tgt_cpu["points"].cpu().numpy()
-                            records, _ = evaluate_single_image(dets_img, gt_tri, iou_thr=eval_cfg.get("iou_thr", 0.5))
+                            gt_cls = tgt_cpu["labels"].cpu().numpy() if "labels" in tgt_cpu else None
+                            records, _ = evaluate_single_image(
+                                dets_img, gt_tri,
+                                gt_classes=gt_cls,
+                                iou_thr=eval_cfg.get("iou_thr", 0.5)
+                            )
                             metric_records.extend(records); total_gt += gt_tri.shape[0]
+                            if gt_cls is not None:
+                                for c in gt_cls:
+                                    total_gt_per_cls[int(c)] += 1
 
                 total_loss_sum += loss_batch_sum / max(1, steps_seq)
                 if use_dsi:
@@ -1818,6 +1851,20 @@ def main():
 
         avg_loss = float(total_loss_sum/nb) if nb>0 else 0.0
         metrics = compute_detection_metrics(metric_records, total_gt) if collect_metrics else None
+        if collect_metrics:
+            per_class_metrics = {}
+            # 클래스별 records/GT 수 집계
+            class_records = defaultdict(list)
+            for rec in metric_records:
+                if len(rec) >= 5:
+                    class_records[int(rec[4])].append(rec)
+            class_ids = set(class_records.keys()) | set(total_gt_per_cls.keys())
+            for cls_id in sorted(class_ids):
+                recs = class_records.get(cls_id, [])
+                per_class_metrics[int(cls_id)] = compute_detection_metrics(
+                    recs, total_gt_per_cls.get(cls_id, 0)
+                )
+            metrics["per_class"] = per_class_metrics
         grad_ratio_avg = (grad_ratio_sum / grad_ratio_count) if grad_ratio_count > 0 else None
         return avg_loss, metrics, grad_ratio_avg
 
@@ -1852,6 +1899,15 @@ def main():
                 print("  -> metrics P={:.4f} R={:.4f} mAP@50={:.4f} mAOE(deg)={:.2f}".format(
                     curr_prec, curr_rec, curr_map, curr_maoe
                 ))
+                per_cls = val_metrics.get("per_class")
+                if per_cls:
+                    pcs = []
+                    for cls_id in sorted(per_cls.keys()):
+                        m = per_cls[cls_id]
+                        pcs.append(
+                            f"{cls_id}:P={m['precision']:.3f} R={m['recall']:.3f} mAP50={m['map50']:.3f} mAOE={m['mAOE_deg']:.2f}"
+                        )
+                    print("  -> per-class " + " | ".join(pcs))
                 # mAP@50 기준 베스트
                 if curr_map > best_val:
                     best_val = curr_map
