@@ -1504,8 +1504,17 @@ def main():
         sd = torch.load(args.weights, map_location=DEVICE)
         if isinstance(sd, dict) and "model" in sd:
             sd = sd["model"]
-        if args.num_classes != 1:
-            sd = {k:v for k,v in sd.items() if not k.startswith("heads.") or (".cls." not in k)}
+
+        # 클래스 수가 다를 때만 cls 헤드를 버린다.
+        ckpt_classes = None
+        for k, v in sd.items():
+            if k.startswith("heads.") and ".cls." in k and hasattr(v, "shape") and len(v.shape) > 0:
+                ckpt_classes = v.shape[0]
+                break
+        if (ckpt_classes is not None) and (ckpt_classes != args.num_classes):
+            print(f"[Warm-start] drop cls weights (ckpt_classes={ckpt_classes} != num_classes={args.num_classes})")
+            sd = {k:v for k,v in sd.items() if not (k.startswith("heads.") and ".cls." in k)}
+
         missing, unexpected = model.load_state_dict(sd, strict=False)
         print(f"[Warm-start] {args.weights} (missing={len(missing)}, unexpected={len(unexpected)})")
         start_ep = int(args.start_epoch)
