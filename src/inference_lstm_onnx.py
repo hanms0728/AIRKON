@@ -373,6 +373,52 @@ def evaluate_single_image_bev(preds_bev: List[dict], gt_tris_bev: np.ndarray, io
     return records, int(matched.sum())
 
 # =========================
+# 클래스별/필터링 유틸
+# =========================
+def parse_class_conf_map(conf_str: Optional[str]) -> dict:
+    """Parse '0:0.5,1:0.3' -> {0:0.5,1:0.3}"""
+    if not conf_str:
+        return {}
+    mapping = {}
+    for token in conf_str.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if ":" not in token:
+            raise ValueError(f"잘못된 class-conf 형식: '{token}' (예: 0:0.5)")
+        cid_str, thr_str = token.split(":", 1)
+        cid = int(cid_str.strip())
+        thr = float(thr_str.strip())
+        mapping[cid] = thr
+    return mapping
+
+def parse_allowed_classes(cls_str: Optional[str]) -> Optional[set]:
+    """Parse '0,1,2' -> {0,1,2}"""
+    if not cls_str:
+        return None
+    allowed = set()
+    for token in cls_str.split(","):
+        token = token.strip()
+        if token == "":
+            continue
+        allowed.add(int(token))
+    return allowed if allowed else None
+
+def filter_dets_by_class_and_conf(dets: List[dict], allowed_classes: Optional[set],
+                                  class_conf_map: dict, default_conf: float) -> List[dict]:
+    """Apply class allowlist and per-class confidence thresholds."""
+    filtered = []
+    for d in dets:
+        cls_id = int(d.get("cls", d.get("class_id", 0)))
+        if allowed_classes is not None and cls_id not in allowed_classes:
+            continue
+        thr = class_conf_map.get(cls_id, default_conf)
+        if float(d.get("score", 0.0)) < thr:
+            continue
+        filtered.append(d)
+    return filtered
+
+# =========================
 # ONNX temporal runner (고쳐진 버전: 입력 메타에서 zero-state 생성)
 # =========================
 class ONNXTemporalRunner:
@@ -510,7 +556,11 @@ def main():
     ap.add_argument("--weights", type=str, required=True, help="ONNX 파일 경로")
     ap.add_argument("--img-size", type=str, default="864,1536")
     ap.add_argument("--score-mode", type=str, default="obj*cls", choices=["obj","cls","obj*cls"])
-    ap.add_argument("--conf", type=float, default=0.80)
+    ap.add_argument("--conf", type=float, default=0.01)
+    ap.add_argument("--class-conf-map", type=str, default='0:0.01,1:1.0,2:1.0',
+                    help="클래스별 conf 임계값 (예: '0:0.6,1:0.4'). 지정 시 전체 conf는 min 값으로 디코드 후 클래스별 필터링.")
+    ap.add_argument("--allowed-classes", type=str, default='0',
+                    help="허용 클래스 id 목록 (쉼표로 구분, 예: '0,2'). 지정 시 다른 클래스는 버림.")
     ap.add_argument("--nms-iou", type=float, default=0.2)
     ap.add_argument("--topk", type=int, default=50)
     ap.add_argument("--contain-thr", type=float, default=0.85)
@@ -543,6 +593,10 @@ def main():
     args = ap.parse_args()
     H, W = map(int, args.img_size.split(","))
     strides = [float(s) for s in args.strides.split(",")]
+    class_conf_map = parse_class_conf_map(args.class_conf_map)
+    allowed_classes = parse_allowed_classes(args.allowed_classes)
+    # 클래스별 conf가 있으면 디코더 임계값은 (클래스별, 기본값) 중 최소값으로 내려서 후단에서 다시 필터링
+    decode_conf = min(list(class_conf_map.values()) + [args.conf]) if class_conf_map else args.conf
 
     providers = ["CUDAExecutionProvider","CPUExecutionProvider"]
     if args.no_cuda or ort.get_device().upper() != "GPU":
@@ -620,13 +674,16 @@ def main():
         dets = decode_predictions(
             outs, strides,
             clip_cells=args.clip_cells,
-            conf_th=args.conf,
+            conf_th=decode_conf,
             nms_iou=args.nms_iou,
             topk=args.topk,
             contain_thr=args.contain_thr,
             score_mode=args.score_mode,
             use_gpu_nms=True
         )[0]
+
+        # 클래스 필터 및 클래스별 conf 필터 적용
+        dets = filter_dets_by_class_and_conf(dets, allowed_classes, class_conf_map, args.conf)
 
         dets = tiny_filter_on_dets(dets, min_area=20.0, min_edge=3.0)
 
@@ -737,6 +794,7 @@ python ./src/inference_lstm_onnx.py \
   --input-dir ./dataset_example/images \
   --output-dir ./inference_results_onnx \
   --weights ./onnx/yolo11m_2_5d_epoch_005.onnx \
+  --class-conf-map "0:0.7,1:0.5" --allowed-classes "0,1" \
   --temporal lstm \
   --seq-mode by_prefix --reset-per-seq \
   --conf 0.8 --nms-iou 0.2 --topk 50 \
