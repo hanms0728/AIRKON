@@ -366,7 +366,7 @@ class LabelEditorApp:
         self.help_text = self.fig.text(
             0.5,
             0.015,
-            "n/p(or ←/→): prev/next · a: add · esc: cancel add · d: delete · f: flip dir · drag point: move · r: toggle delete ROI · y: toggle copy · u: clear copy · ctrl+z: undo · s: save · 0-9: set class (selected/new) · q: quit",
+            "n/p(or ←/→ or v/c): prev/next · a: add · esc: cancel add · d: delete · f: flip dir · drag point: move · r: toggle delete ROI · y: toggle copy · u: clear copy · ctrl+z: undo · s: save · 0-9: set class (selected/new) · q: quit",
             ha="center",
             va="bottom",
             fontsize=9,
@@ -1028,9 +1028,9 @@ class LabelEditorApp:
 
     def on_key(self, event) -> None:
         key = (event.key or "").lower()
-        if key in ("n", "right"):
+        if key in ("n", "right", "v"):
             self.goto(self.idx + 1)
-        elif key in ("p", "left"):
+        elif key in ("p", "left", "c"):
             self.goto(self.idx - 1)
         elif key in ("s", "ctrl+s"):
             try:
